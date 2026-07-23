@@ -1,0 +1,57 @@
+# Secrets & env
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Data / runtime
+.agentharness/
+*.db
+*.db-wal
+*.db-shm
+
+# Artifacts & browser profiles (runtime)
+**/artifacts/
+**/browser_profiles/
+
+# Node
+web/node_modules/
+web/dist/
+web/playwright-report/
+web/test-results/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Screenshots local
+screenshots/
+output/playwright/
+*.log
+
+# Accidental absolute-path junk (IME etc.)
+web/%SystemDrive%/
+**/%SystemDrive%/
+
+# Local probe / MCP dumps
+.playwright-mcp/
+
+# Local screenshots at repo root (optional artifacts)
+agentharness-*.png
+historical-*.png
