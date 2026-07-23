@@ -979,3 +979,61 @@ pre {
     grid-template-columns: 88px minmax(0, 1fr);
   }
 }
+
+
+/* Trace projection */
+.timeline-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.timeline-toggle input {
+  margin: 0;
+}
+.timeline-row.tool .event-args {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.timeline-row.turn .event-preview {
+  white-space: pre-wrap;
+}
+.run-item.stale .status-text {
+  color: var(--warning);
+}
+.run-item .run-summary {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.tree-list .tree-item,
+.tree-list button.tree-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  text-align: left;
+}
+.tree-list .tree-item:hover {
+  background: var(--surface-subtle);
+}
+.tree-list .tree-item.selected {
+  background: var(--accent-soft);
+}
+.tree-list .tree-item.child {
+  padding-left: 18px;
+}

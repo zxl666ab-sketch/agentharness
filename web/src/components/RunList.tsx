@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+﻿import { useMemo, useState } from "react";
 import { Search } from "lucide-react";
-import type { RunRow } from "../api/client";
+import type { EventRow, RunRow } from "../api/client";
+import { extractUserMessageFromEvents, runListSummary } from "../trace/buildTurnTrace";
 
 const STATUS_LABEL: Record<string, string> = {
   pending: "Pending",
@@ -12,10 +13,14 @@ const STATUS_LABEL: Record<string, string> = {
   interrupted: "Interrupted",
 };
 
+const STALE_RUNNING_MS = 30 * 60 * 1000;
+
 type Props = {
   runs: RunRow[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  /** Optional map of run_id -> first events/user message for list summaries */
+  userMessageByRunId?: Record<string, string>;
 };
 
 type PositionedRun = { run: RunRow; depth: number };
@@ -43,7 +48,14 @@ function positionRuns(runs: RunRow[]): PositionedRun[] {
   return ordered;
 }
 
-export function RunList({ runs, selectedId, onSelect }: Props) {
+function isStaleRunning(run: RunRow): boolean {
+  if (run.status !== "running" && run.status !== "pending") return false;
+  const updated = new Date(run.updated_at || run.created_at).getTime();
+  if (Number.isNaN(updated)) return false;
+  return Date.now() - updated > STALE_RUNNING_MS;
+}
+
+export function RunList({ runs, selectedId, onSelect, userMessageByRunId = {} }: Props) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
   const visible = useMemo(() => {
@@ -51,11 +63,17 @@ export function RunList({ runs, selectedId, onSelect }: Props) {
     return positionRuns(runs).filter(({ run }) => {
       if (status !== "all" && run.status !== status) return false;
       if (!needle) return true;
-      return [run.id, run.output_summary, run.error, run.provider, run.model]
+      const summary = runListSummary({
+        userMessage: userMessageByRunId[run.id],
+        outputSummary: run.output_summary,
+        error: run.error,
+        provider: run.provider,
+      });
+      return [run.id, summary, run.error, run.provider, run.model]
         .filter(Boolean)
         .some((value) => String(value).toLowerCase().includes(needle));
     });
-  }, [query, runs, status]);
+  }, [query, runs, status, userMessageByRunId]);
 
   return (
     <div className="run-navigator">
@@ -85,34 +103,62 @@ export function RunList({ runs, selectedId, onSelect }: Props) {
       </div>
       <div className="run-list" data-testid="run-list">
         {!visible.length && <div className="empty-state">No matching runs</div>}
-        {visible.map(({ run, depth }) => (
-          <button
-            type="button"
-            key={run.id}
-            className={`run-item ${selectedId === run.id ? "selected" : ""}`}
-            onClick={() => onSelect(run.id)}
-            style={{ paddingLeft: `${12 + Math.min(depth, 3) * 18}px` }}
-            data-testid={`run-item-${run.id}`}
-          >
-            <span className="run-line">
-              <span className={`status-dot ${run.status}`} aria-hidden="true" />
-              <code>{run.id.slice(0, 10)}</code>
-              <span className={`status-text ${run.status}`}>
-                {STATUS_LABEL[run.status] || run.status}
+        {visible.map(({ run, depth }) => {
+          const stale = isStaleRunning(run);
+          const summary = runListSummary({
+            userMessage: userMessageByRunId[run.id],
+            outputSummary: run.output_summary,
+            error: run.error,
+            provider: run.provider,
+          });
+          const duration = formatDuration(run.created_at, run.finished_at);
+          return (
+            <button
+              type="button"
+              key={run.id}
+              className={`run-item ${selectedId === run.id ? "selected" : ""} ${stale ? "stale" : ""}`}
+              onClick={() => onSelect(run.id)}
+              style={{ paddingLeft: `${12 + Math.min(depth, 3) * 18}px` }}
+              data-testid={`run-item-${run.id}`}
+            >
+              <span className="run-line">
+                <span className={`status-dot ${run.status}`} aria-hidden="true" />
+                <code>{run.id.slice(0, 10)}</code>
+                <span className={`status-text ${run.status}`}>
+                  {STATUS_LABEL[run.status] || run.status}
+                  {stale ? " · stale" : ""}
+                </span>
               </span>
-            </span>
-            <span className="run-summary">
-              {run.output_summary || run.error || `${run.provider || "unknown"} provider`}
-            </span>
-            <span className="run-meta">
-              {run.provider || "-"} · {formatTime(run.created_at)}
-              {depth > 0 ? " · child" : ""}
-            </span>
-          </button>
-        ))}
+              <span className="run-summary" title={summary}>
+                {summary}
+              </span>
+              <span className="run-meta">
+                {run.provider || "-"}
+                {run.model ? `/${run.model}` : ""} · {duration}
+                {typeof run.steps === "number" ? ` · ${run.steps} steps` : ""}
+                {depth > 0 ? " · child" : ""}
+              </span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
+}
+
+/** Exported for tests — derive user message from a small event sample. */
+export function userMessageFromEvents(events: EventRow[]): string | null {
+  return extractUserMessageFromEvents(events);
+}
+
+function formatDuration(start: string, end?: string | null): string {
+  const started = new Date(start).getTime();
+  const finished = end ? new Date(end).getTime() : Date.now();
+  if (Number.isNaN(started) || Number.isNaN(finished)) return formatTime(start);
+  const ms = Math.max(0, finished - started);
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${(ms / 60_000).toFixed(1)}m`;
 }
 
 function formatTime(value: string): string {

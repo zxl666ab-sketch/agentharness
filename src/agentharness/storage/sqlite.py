@@ -489,16 +489,26 @@ class Storage:
                 from agentharness.contracts import ToolCall
 
                 tcs = [ToolCall.model_validate(x) for x in json.loads(r["tool_calls_json"])]
-            result.append(
-                Message(
-                    id=r["id"],
-                    role=r["role"],
-                    content=r["content"] or "",
-                    tool_call_id=r["tool_call_id"],
-                    name=r["name"],
-                    tool_calls=tcs,
-                )
+            created = r["created_at"] if "created_at" in r.keys() else None
+            msg_kwargs: dict = dict(
+                id=r["id"],
+                role=r["role"],
+                content=r["content"] or "",
+                tool_call_id=r["tool_call_id"],
+                name=r["name"],
+                tool_calls=tcs,
             )
+            if created:
+                from datetime import datetime
+
+                if isinstance(created, str):
+                    try:
+                        msg_kwargs["created_at"] = datetime.fromisoformat(created)
+                    except ValueError:
+                        pass
+                else:
+                    msg_kwargs["created_at"] = created
+            result.append(Message(**msg_kwargs))
         return result
 
     # -- checkpoints --------------------------------------------------------

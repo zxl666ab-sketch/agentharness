@@ -1,4 +1,4 @@
-/** Small independent SSE store — no external state library. */
+﻿/** Small independent SSE store — no external state library. */
 
 import type { EventRow } from "../api/client";
 
@@ -12,6 +12,8 @@ class SseStore {
   events: EventRow[] = [];
   private source: EventSource | null = null;
   private listeners = new Set<Listener>();
+  private reconnectTimer: number | null = null;
+  private intentionalClose = false;
 
   subscribe = (fn: Listener) => {
     this.listeners.add(fn);
@@ -23,11 +25,12 @@ class SseStore {
   }
 
   connect(after = 0) {
-    this.disconnect();
+    this.disconnect(false);
+    this.intentionalClose = false;
     this.status = "connecting";
     this.lastSeq = Math.max(this.lastSeq, after);
     this.emit();
-    const url = `/api/stream?after=${after}`;
+    const url = `/api/stream?after=${this.lastSeq}`;
     const es = new EventSource(url);
     this.source = es;
 
@@ -37,23 +40,28 @@ class SseStore {
     };
 
     es.onerror = () => {
+      if (this.intentionalClose) return;
       this.status = "error";
       this.emit();
-      // browser will auto-reconnect EventSource; we keep lastSeq for query param on manual re-connect
+      // Close broken stream and resume from lastSeq (avoids after=0 replay storms).
+      try {
+        es.close();
+      } catch {
+        /* ignore */
+      }
+      if (this.source === es) this.source = null;
+      if (this.reconnectTimer != null) window.clearTimeout(this.reconnectTimer);
+      const resumeFrom = this.lastSeq;
+      this.reconnectTimer = window.setTimeout(() => {
+        this.reconnectTimer = null;
+        if (!this.intentionalClose) this.connect(resumeFrom);
+      }, 1500);
     };
 
     es.onmessage = (msg) => {
       this.handleRaw(msg);
     };
 
-    // Named events from server: event: <type>
-    // EventSource fires onmessage only for default; listen broadly via addEventListener is hard for dynamic types.
-    // Server also sends data lines — use a catch-all by overriding.
-    const orig = es.addEventListener.bind(es);
-    // Fallback: parse any message event
-    es.addEventListener("message", (msg) => this.handleRaw(msg as MessageEvent));
-
-    // Also try common event types
     const types = [
       "run_started",
       "run_status",
@@ -82,8 +90,6 @@ class SseStore {
     for (const t of types) {
       es.addEventListener(t, (msg) => this.handleRaw(msg as MessageEvent));
     }
-
-    void orig;
   }
 
   private handleRaw(msg: MessageEvent) {
@@ -101,13 +107,20 @@ class SseStore {
     }
   }
 
-  disconnect() {
+  disconnect(markClosed = true) {
+    this.intentionalClose = true;
+    if (this.reconnectTimer != null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.source) {
       this.source.close();
       this.source = null;
     }
-    this.status = "closed";
-    this.emit();
+    if (markClosed) {
+      this.status = "closed";
+      this.emit();
+    }
   }
 
   eventsForRun(runId: string): EventRow[] {

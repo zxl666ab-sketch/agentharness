@@ -38,6 +38,7 @@ from agentharness.engine.context import assemble_context, estimate_tokens
 from agentharness.engine.scheduler import EffectScheduler
 from agentharness.security.approval import auto_decision
 from agentharness.security.redaction import Redactor, default_redactor
+
 from agentharness.storage.sqlite import Storage
 
 ApprovalCallback = Callable[[ApprovalRequest], Awaitable[ApprovalDecision]]
@@ -49,6 +50,47 @@ _RESUMABLE_STATUSES = frozenset(
         RunStatus.waiting_approval,
     }
 )
+
+
+
+
+def _summarize_tool_arguments(arguments: Any) -> str:
+    """Compact tool args for event payloads (no large blobs / secrets)."""
+    if arguments is None:
+        return ""
+    if not isinstance(arguments, dict):
+        text = str(arguments)
+        return text if len(text) <= 160 else text[:159] + "…"
+    preferred = (
+        "action",
+        "url",
+        "path",
+        "command",
+        "query",
+        "method",
+        "selector",
+        "name",
+        "skill",
+        "memory",
+        "context_id",
+    )
+    parts: list[str] = []
+    for key in preferred:
+        if key in arguments and arguments[key] not in (None, ""):
+            val = arguments[key]
+            if isinstance(val, str) and len(val) > 80:
+                val = val[:79] + "…"
+            parts.append(f"{key}={val}")
+    if not parts:
+        for key, val in list(arguments.items())[:4]:
+            kl = str(key).lower()
+            if kl in {"api_key", "token", "password", "authorization", "secret", "key"} or "token" in kl:
+                parts.append(f"{key}=[REDACTED]")
+            else:
+                rendered = val if not isinstance(val, str) or len(val) <= 60 else val[:59] + "…"
+                parts.append(f"{key}={rendered}")
+    text = " ".join(parts)
+    return text if len(text) <= 160 else text[:159] + "…"
 
 
 class RunEngine:
@@ -1130,7 +1172,14 @@ class RunEngine:
                     self._event(
                         run_row,
                         EventType.tool_call_end,
-                        {"tool_call_id": tc.id, "name": tc.name, "is_error": result.is_error},
+                        {
+                            "tool_call_id": tc.id,
+                            "name": tc.name,
+                            "is_error": result.is_error,
+                            "arguments_summary": self.redactor.redact_text(
+                                _summarize_tool_arguments(tc.arguments)
+                            ),
+                        },
                         span_id=span_id,
                     ),
                 ],

@@ -14,6 +14,7 @@ from rich.markdown import Markdown
 from rich.table import Table
 
 from agentharness.cli.input import async_redirected_input
+from agentharness.cli.config_store import apply_settings_to_harness, resolve_runtime_settings
 from agentharness.cli.provider_defaults import resolve_default_model, resolve_default_provider
 from agentharness.contracts import (
     ApprovalDecision,
@@ -196,20 +197,21 @@ def _root(
         return
     dd = _data_dir(data_dir)
     work = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
-    prov = resolve_default_provider(provider)
-    mod = resolve_default_model(prov, model)
+    settings = resolve_runtime_settings(dd, provider=provider, model=model)
     h = _make_harness(str(dd), approval=approval)
+    apply_settings_to_harness(h, settings)
     from agentharness.cli.interactive import run_interactive
 
     try:
         run_interactive(
             harness=h,
             console=console,
-            provider=prov,
-            model=mod,
+            provider=settings.provider,
+            model=settings.model,
             approval=approval,
             cwd=work,
             session_id=session,
+            data_dir=dd,
         )
     finally:
         h.close()
@@ -228,15 +230,15 @@ def run(
     """Run a single agent task and exit with a scriptable status code."""
     dd = _data_dir(data_dir)
     work = Path(cwd).resolve() if cwd else Path.cwd()
-    prov = resolve_default_provider(provider)
-    mod = resolve_default_model(prov, model)
+    settings = resolve_runtime_settings(dd, provider=provider, model=model)
 
     h = _make_harness(str(dd), approval=approval)
+    apply_settings_to_harness(h, settings)
     req = RunRequest(
         message=message,
         session_id=session,
-        provider=prov,
-        model=mod,
+        provider=settings.provider,
+        model=settings.model,
         approval=ApprovalMode(approval),
         cwd=str(work),
     )
@@ -411,6 +413,10 @@ def doctor(
         "set" if os.environ.get("ANTHROPIC_API_KEY") else "unset",
     )
     table.add_row("default_provider", resolve_default_provider(None))
+    settings = resolve_runtime_settings(_data_dir(data_dir))
+    table.add_row("profile_provider", settings.provider)
+    table.add_row("profile_model", settings.model or "(none)")
+    table.add_row("profile_source", settings.source)
     console.print(table)
 
 

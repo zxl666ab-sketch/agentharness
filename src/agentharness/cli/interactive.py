@@ -1,14 +1,25 @@
-"""Line-oriented interactive CLI for long-lived multi-turn sessions."""
+﻿"""Line-oriented interactive CLI for long-lived multi-turn sessions."""
 
 from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
 
-from agentharness.cli.input import redirected_input
+from agentharness.cli.config_store import (
+    KNOWN_PROVIDERS,
+    RuntimeSettings,
+    apply_settings_to_harness,
+    config_path,
+    load_config,
+    mask_secret,
+    resolve_runtime_settings,
+    update_provider_fields,
+)
+from agentharness.cli.input import SLASH_COMMANDS, readline_with_completion, redirected_input
 from agentharness.contracts import ApprovalMode, EventType, RunRequest, RunResult
 from agentharness.harness import Harness
 
@@ -30,9 +41,14 @@ def _print_help(console: Console) -> None:
     table.add_row("/new", "Start a new session")
     table.add_row("/sessions", "List recent sessions")
     table.add_row("/use <session>", "Continue an existing session")
+    table.add_row("/model [name]", "Show or set model (persisted)")
+    table.add_row("/provider [name]", "Show or set provider (fake|openai|anthropic)")
+    table.add_row("/config", "Show provider config (keys masked)")
+    table.add_row("/config set <key> <value>", "Set api_key|base_url|model for active provider")
     table.add_row("/help", "Show this help")
     table.add_row("/quit", "Exit")
     console.print(table)
+    console.print("[dim]Tab completes slash commands in a TTY. Secrets stay in data-dir cli_config.json.[/dim]")
 
 
 def _print_sessions(harness: Harness, console: Console) -> None:
@@ -69,6 +85,129 @@ def _resolve_session(harness: Harness, value: str) -> tuple[str | None, str | No
     if not matches:
         return None, f"Session not found: {value}"
     return None, f"Session prefix is ambiguous: {value}"
+
+
+def _print_banner(console: Console, settings: RuntimeSettings, approval: str) -> None:
+    model = settings.model or "(provider default)"
+    console.print(
+        f"[bold]Agent Harness[/bold]  provider=[cyan]{settings.provider}[/cyan]  "
+        f"model=[cyan]{model}[/cyan]  approval={approval}  source={settings.source}\n"
+        "Type [cyan]/help[/cyan] for commands. Tab completes [cyan]/[/cyan] commands."
+    )
+
+
+def _print_config(console: Console, data_dir: Path, settings: RuntimeSettings) -> None:
+    cfg = load_config(data_dir)
+    pcfg = (cfg.get("providers") or {}).get(settings.provider) or {}
+    table = Table(title="CLI config", show_header=True, header_style="bold")
+    table.add_column("key")
+    table.add_column("value")
+    table.add_row("data_dir", str(data_dir))
+    table.add_row("config_file", str(config_path(data_dir)))
+    table.add_row("provider", settings.provider)
+    table.add_row("model", settings.model or "(provider default)")
+    table.add_row("source", settings.source)
+    table.add_row("api_key", mask_secret(pcfg.get("api_key") or settings.api_key))
+    table.add_row("base_url", str(pcfg.get("base_url") or settings.base_url or "(env/default)"))
+    console.print(table)
+    console.print(
+        "[dim]Set with: /config set api_key <value> | /config set base_url <url> | "
+        "/config set model <name>[/dim]"
+    )
+    console.print("[dim]Project .env is not auto-loaded; export env vars or use /config.[/dim]")
+
+
+def _handle_config_command(
+    line: str,
+    *,
+    harness: Harness,
+    console: Console,
+    data_dir: Path,
+    settings: RuntimeSettings,
+) -> RuntimeSettings:
+    parts = line.split(maxsplit=3)
+    # /config
+    if len(parts) == 1:
+        _print_config(console, data_dir, settings)
+        return settings
+    # /config set KEY VALUE
+    if len(parts) >= 4 and parts[1] == "set":
+        key = parts[2].lower().replace("-", "_")
+        value = parts[3].strip()
+        if key in {"api_key", "key", "apikey"}:
+            update_provider_fields(data_dir, settings.provider, api_key=value, set_active=True)
+            console.print(f"[green]api_key saved for {settings.provider}[/green] ({mask_secret(value)})")
+        elif key in {"base_url", "baseurl", "url"}:
+            update_provider_fields(data_dir, settings.provider, base_url=value, set_active=True)
+            console.print(f"[green]base_url saved for {settings.provider}[/green]: {value}")
+        elif key == "model":
+            update_provider_fields(data_dir, settings.provider, model=value, set_active=True)
+            console.print(f"[green]model saved[/green]: {value}")
+        else:
+            console.print(
+                "[yellow]Unknown config key. Use api_key, base_url, or model.[/yellow]"
+            )
+            return settings
+        settings = resolve_runtime_settings(data_dir, provider=settings.provider, model=None)
+        # Prefer just-set model if active provider profile has it
+        apply_settings_to_harness(harness, settings)
+        return settings
+    if len(parts) >= 2 and parts[1] in {"show", "get"}:
+        _print_config(console, data_dir, settings)
+        return settings
+    console.print("[yellow]Usage: /config | /config set <api_key|base_url|model> <value>[/yellow]")
+    return settings
+
+
+def _handle_model_command(
+    line: str,
+    *,
+    harness: Harness,
+    console: Console,
+    data_dir: Path,
+    settings: RuntimeSettings,
+) -> RuntimeSettings:
+    parts = line.split(maxsplit=1)
+    if len(parts) == 1:
+        console.print(f"model=[cyan]{settings.model or '(provider default)'}[/cyan]  provider={settings.provider}")
+        return settings
+    name = parts[1].strip()
+    if not name:
+        console.print("[yellow]Usage: /model <name>[/yellow]")
+        return settings
+    update_provider_fields(data_dir, settings.provider, model=name, set_active=True)
+    settings = resolve_runtime_settings(data_dir, provider=settings.provider, model=name)
+    apply_settings_to_harness(harness, settings)
+    console.print(f"[green]model set[/green]: {settings.model} (provider={settings.provider})")
+    return settings
+
+
+def _handle_provider_command(
+    line: str,
+    *,
+    harness: Harness,
+    console: Console,
+    data_dir: Path,
+    settings: RuntimeSettings,
+) -> RuntimeSettings:
+    parts = line.split(maxsplit=1)
+    if len(parts) == 1:
+        console.print(
+            f"provider=[cyan]{settings.provider}[/cyan]  model={settings.model or '(default)'}  "
+            f"known={', '.join(KNOWN_PROVIDERS)}"
+        )
+        return settings
+    name = parts[1].strip().lower()
+    if name not in KNOWN_PROVIDERS:
+        console.print(f"[yellow]Unknown provider:[/yellow] {name}. Choose: {', '.join(KNOWN_PROVIDERS)}")
+        return settings
+    update_provider_fields(data_dir, name, set_active=True)
+    settings = resolve_runtime_settings(data_dir, provider=name, model=None)
+    apply_settings_to_harness(harness, settings)
+    console.print(
+        f"[green]provider set[/green]: {settings.provider}  model={settings.model or '(default)'}"
+    )
+    return settings
 
 
 def _run_turn(
@@ -129,7 +268,7 @@ def _run_turn(
         console.print()
     console.print(
         f"[dim]status={result.status.value}  run={result.run_id[:12]}  "
-        f"session={result.session_id[:12]}[/dim]"
+        f"session={result.session_id[:12]}  provider={provider}  model={model or '-'}[/dim]"
     )
     if result.error:
         console.print(f"[red]error:[/red] {result.error}")
@@ -145,20 +284,43 @@ def run_interactive(
     approval: str,
     cwd: str,
     session_id: str | None = None,
+    data_dir: Path | str | None = None,
 ) -> None:
     """Run the foreground prompt loop until `/quit` or EOF."""
     _enable_windows_ctrl_c()
-    console.print(
-        f"[bold]Agent Harness[/bold]  provider={provider}  approval={approval}\n"
-        "Type [cyan]/help[/cyan] for commands."
-    )
+    dd = Path(data_dir or harness.data_dir).expanduser().resolve()
+    settings = resolve_runtime_settings(dd, provider=provider, model=model)
+    # Honour explicit CLI provider/model when provided.
+    if provider and provider not in ("auto", ""):
+        settings = RuntimeSettings(
+            provider=provider,
+            model=model if model else settings.model,
+            api_key=settings.api_key if settings.provider == provider else None,
+            base_url=settings.base_url if settings.provider == provider else None,
+            source="flag",
+        )
+        # Re-resolve credentials for the explicit provider.
+        refreshed = resolve_runtime_settings(dd, provider=provider, model=model)
+        settings = RuntimeSettings(
+            provider=provider,
+            model=model if model else refreshed.model,
+            api_key=refreshed.api_key,
+            base_url=refreshed.base_url,
+            source="flag",
+        )
+    apply_settings_to_harness(harness, settings)
+    _print_banner(console, settings, approval)
     current_session_id = session_id
     runner = asyncio.Runner()
     try:
         while True:
             try:
                 if sys.stdin.isatty():
-                    raw_line = console.input("[bold cyan]you>[/bold cyan] ")
+                    raw_line = readline_with_completion(
+                        console,
+                        "[bold cyan]you>[/bold cyan] ",
+                        commands=SLASH_COMMANDS,
+                    )
                 else:
                     raw_line = redirected_input(console, "you> ")
                 line = raw_line.lstrip("\ufeff").strip()
@@ -191,6 +353,21 @@ def run_interactive(
                     current_session_id = selected
                     console.print(f"[green]Using session {selected[:12]}.[/green]")
                 continue
+            if line == "/model" or line.startswith("/model "):
+                settings = _handle_model_command(
+                    line, harness=harness, console=console, data_dir=dd, settings=settings
+                )
+                continue
+            if line == "/provider" or line.startswith("/provider "):
+                settings = _handle_provider_command(
+                    line, harness=harness, console=console, data_dir=dd, settings=settings
+                )
+                continue
+            if line == "/config" or line.startswith("/config "):
+                settings = _handle_config_command(
+                    line, harness=harness, console=console, data_dir=dd, settings=settings
+                )
+                continue
             if line.startswith("/"):
                 console.print(f"[yellow]Unknown command:[/yellow] {line}")
                 continue
@@ -201,8 +378,8 @@ def run_interactive(
                 console=console,
                 message=line,
                 session_id=current_session_id,
-                provider=provider,
-                model=model,
+                provider=settings.provider,
+                model=settings.model,
                 approval=approval,
                 cwd=cwd,
             )

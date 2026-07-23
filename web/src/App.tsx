@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
@@ -10,23 +10,45 @@ import {
   TerminalSquare,
   Zap,
 } from "lucide-react";
-import { api, type EventRow } from "./api/client";
+import { api, type EventRow, type RunRow } from "./api/client";
 import { Inspector } from "./components/Inspector";
 import { RunList } from "./components/RunList";
 import { Timeline } from "./components/Timeline";
 import { useSse } from "./store/useSse";
+import {
+  extractUserMessageFromEvents,
+  extractUserMessageFromMessages,
+  isTerminalStatus,
+} from "./trace/buildTurnTrace";
 
 type MobileView = "runs" | "timeline" | "inspector";
+
+const ACTIVE_RUN_STATUSES = new Set([
+  "pending",
+  "running",
+  "waiting_approval",
+]);
+
+function readRunFromUrl(): string | null {
+  try {
+    const value = new URLSearchParams(window.location.search).get("run");
+    return value && value.trim() ? value.trim() : null;
+  } catch {
+    return null;
+  }
+}
 
 export default function App() {
   const [theme, setTheme] = useState<"light" | "dark">(() =>
     window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light"
   );
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(() => readRunFromUrl());
   const [selectedEvent, setSelectedEvent] = useState<EventRow | null>(null);
   const [mobileView, setMobileView] = useState<MobileView>("runs");
+  const [userMessageByRunId, setUserMessageByRunId] = useState<Record<string, string>>({});
   const queryClient = useQueryClient();
-  const { status: sseStatus, events: liveEvents } = useSse(true);
+  const { status: sseStatus, events: liveEvents, lastSeq } = useSse(true);
+  const lastHandledSeq = useRef(0);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -35,70 +57,154 @@ export default function App() {
   const healthQuery = useQuery({
     queryKey: ["health"],
     queryFn: api.health,
-    refetchInterval: 10_000,
+    refetchInterval: 15_000,
   });
+
   const runsQuery = useQuery({
     queryKey: ["runs"],
     queryFn: () => api.runs(undefined, 500),
-    refetchInterval: 2_500,
+    // Low-frequency baseline; SSE bumps when needed.
+    refetchInterval: 10_000,
   });
   const runs = useMemo(() => runsQuery.data || [], [runsQuery.data]);
 
   useEffect(() => {
     if (!selectedRunId && runs.length) setSelectedRunId(runs[0].id);
     if (selectedRunId && runs.length && !runs.some((run) => run.id === selectedRunId)) {
-      setSelectedRunId(runs[0].id);
+      // Keep deep-linked id until runs load; only reset if clearly missing after load.
+      if (runsQuery.isFetched) setSelectedRunId(runs[0]?.id ?? null);
     }
-  }, [runs, selectedRunId]);
+  }, [runs, selectedRunId, runsQuery.isFetched]);
+
+  useEffect(() => {
+    if (!selectedRunId) return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("run") === selectedRunId) return;
+    url.searchParams.set("run", selectedRunId);
+    window.history.replaceState({}, "", url.toString());
+  }, [selectedRunId]);
+
+  const selectedFromList = runs.find((run) => run.id === selectedRunId) || null;
+  const selectedIsTerminal = isTerminalStatus(selectedFromList?.status);
 
   const runQuery = useQuery({
     queryKey: ["run", selectedRunId],
     queryFn: () => api.run(selectedRunId!),
     enabled: !!selectedRunId,
+    refetchInterval: selectedIsTerminal ? false : 4_000,
   });
+
   const eventsQuery = useQuery({
     queryKey: ["events", selectedRunId],
     queryFn: () => api.events(selectedRunId!),
     enabled: !!selectedRunId,
-    refetchInterval: 2_000,
+    // Terminal historical runs: single fetch. Active runs rely on SSE + light poll.
+    refetchInterval: selectedIsTerminal ? false : 3_000,
+    staleTime: selectedIsTerminal ? Infinity : 1_000,
   });
+
   const treeQuery = useQuery({
     queryKey: ["tree", selectedRunId],
     queryFn: () => api.tree(selectedRunId!),
     enabled: !!selectedRunId,
+    refetchInterval: selectedIsTerminal ? false : 5_000,
+    staleTime: selectedIsTerminal ? Infinity : 2_000,
   });
+
   const messagesQuery = useQuery({
     queryKey: ["messages", selectedRunId],
     queryFn: () => api.messages(selectedRunId!),
     enabled: !!selectedRunId,
+    refetchInterval: selectedIsTerminal ? false : 4_000,
+    staleTime: selectedIsTerminal ? Infinity : 2_000,
   });
+
   const approvalsQuery = useQuery({
     queryKey: ["approvals", selectedRunId],
     queryFn: () => api.approvals(selectedRunId!),
     enabled: !!selectedRunId,
+    refetchInterval: selectedIsTerminal ? false : 5_000,
+    staleTime: selectedIsTerminal ? Infinity : 2_000,
   });
+
   const checkpointQuery = useQuery({
     queryKey: ["checkpoint", selectedRunId],
     queryFn: () => api.checkpoint(selectedRunId!),
     enabled: !!selectedRunId,
     retry: false,
+    refetchInterval: selectedIsTerminal ? false : 5_000,
+    staleTime: selectedIsTerminal ? Infinity : 2_000,
   });
-  const selectedRun = runQuery.data || runs.find((run) => run.id === selectedRunId) || null;
+
+  const selectedRun: RunRow | null =
+    runQuery.data || runs.find((run) => run.id === selectedRunId) || null;
+
   const transcriptQuery = useQuery({
     queryKey: ["transcript", selectedRun?.session_id],
     queryFn: () => api.transcript(selectedRun!.session_id),
     enabled: !!selectedRun?.session_id,
+    staleTime: 5_000,
   });
 
+  // Smart SSE invalidation: only refresh what the new events require.
   useEffect(() => {
     if (!liveEvents.length) return;
-    void queryClient.invalidateQueries({ queryKey: ["runs"] });
-    if (selectedRunId) {
-      for (const key of ["run", "events", "tree", "messages", "approvals", "checkpoint"]) {
-        void queryClient.invalidateQueries({ queryKey: [key, selectedRunId] });
-      }
+    const fresh = liveEvents.filter((event) => event.global_seq > lastHandledSeq.current);
+    if (!fresh.length) return;
+    lastHandledSeq.current = Math.max(...fresh.map((event) => event.global_seq));
+
+    const touchesRuns = fresh.some((event) =>
+      [
+        "run_started",
+        "run_status",
+        "run_completed",
+        "run_failed",
+        "run_cancelled",
+        "run_interrupted",
+        "child_run_started",
+        "child_run_ended",
+      ].includes(event.type)
+    );
+    if (touchesRuns) {
+      void queryClient.invalidateQueries({ queryKey: ["runs"] });
     }
-  }, [liveEvents.length, queryClient, selectedRunId]);
+
+    if (!selectedRunId) return;
+    const forSelected = fresh.filter((event) => event.run_id === selectedRunId);
+    if (!forSelected.length) return;
+
+    // Events for selected run are merged from liveEvents; avoid full events refetch.
+    const needsMessages = forSelected.some((event) =>
+      ["tool_call_end", "tool_result", "model_turn_end", "run_completed", "run_failed"].includes(
+        event.type
+      )
+    );
+    const needsApprovals = forSelected.some((event) =>
+      ["approval_requested", "approval_resolved"].includes(event.type)
+    );
+    const needsTree = forSelected.some((event) =>
+      ["child_run_started", "child_run_ended"].includes(event.type)
+    );
+    const needsRun = forSelected.some((event) =>
+      [
+        "run_status",
+        "run_completed",
+        "run_failed",
+        "run_cancelled",
+        "run_interrupted",
+        "budget_warning",
+      ].includes(event.type)
+    );
+    const needsCheckpoint = forSelected.some((event) => event.type === "checkpoint");
+
+    if (needsRun) void queryClient.invalidateQueries({ queryKey: ["run", selectedRunId] });
+    if (needsMessages) void queryClient.invalidateQueries({ queryKey: ["messages", selectedRunId] });
+    if (needsApprovals)
+      void queryClient.invalidateQueries({ queryKey: ["approvals", selectedRunId] });
+    if (needsTree) void queryClient.invalidateQueries({ queryKey: ["tree", selectedRunId] });
+    if (needsCheckpoint)
+      void queryClient.invalidateQueries({ queryKey: ["checkpoint", selectedRunId] });
+  }, [liveEvents, lastSeq, queryClient, selectedRunId]);
 
   const events = useMemo(() => {
     const merged = new Map<number, EventRow>();
@@ -108,6 +214,49 @@ export default function App() {
     }
     return [...merged.values()].sort((left, right) => left.global_seq - right.global_seq);
   }, [eventsQuery.data, liveEvents, selectedRunId]);
+
+  // Seed list summaries from selected run messages / run_started.
+  useEffect(() => {
+    if (!selectedRunId) return;
+    const fromMessages = extractUserMessageFromMessages(messagesQuery.data || []);
+    const fromEvents = extractUserMessageFromEvents(events);
+    const user = fromMessages || fromEvents;
+    if (!user) return;
+    setUserMessageByRunId((prev) =>
+      prev[selectedRunId] === user ? prev : { ...prev, [selectedRunId]: user }
+    );
+  }, [selectedRunId, messagesQuery.data, events]);
+
+  // Best-effort: hydrate user messages for visible runs via run_started peek (batched lightly).
+  useEffect(() => {
+    let cancelled = false;
+    const missing = runs
+      .filter((run) => !userMessageByRunId[run.id] && !ACTIVE_RUN_STATUSES.has(run.status))
+      .slice(0, 12);
+    if (!missing.length) return;
+    (async () => {
+      for (const run of missing) {
+        if (cancelled) return;
+        try {
+          // Cheap: messages endpoint is enough for user role; only first page needed.
+          const messages = await api.messages(run.id);
+          const user = extractUserMessageFromMessages(messages);
+          if (user && !cancelled) {
+            setUserMessageByRunId((prev) =>
+              prev[run.id] ? prev : { ...prev, [run.id]: user }
+            );
+          }
+        } catch {
+          // ignore individual failures
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Only re-run when run ids set changes meaningfully.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runs.map((run) => run.id).join(",")]);
 
   useEffect(() => {
     if (selectedEvent && selectedEvent.run_id !== selectedRunId) setSelectedEvent(null);
@@ -172,7 +321,12 @@ export default function App() {
           data-testid="runs-panel"
         >
           <PanelHeader title="Runs" meta={`${runs.length} total`} />
-          <RunList runs={runs} selectedId={selectedRunId} onSelect={selectRun} />
+          <RunList
+            runs={runs}
+            selectedId={selectedRunId}
+            onSelect={selectRun}
+            userMessageByRunId={userMessageByRunId}
+          />
         </section>
 
         <section
@@ -198,6 +352,7 @@ export default function App() {
           </div>
           <Timeline
             events={events}
+            messages={messagesQuery.data || []}
             selectedId={selectedEvent?.event_id || null}
             onSelect={selectEvent}
           />
@@ -218,6 +373,7 @@ export default function App() {
             approvals={approvalsQuery.data || []}
             checkpoint={checkpointQuery.data || null}
             transcript={transcriptQuery.data || []}
+            onSelectRun={selectRun}
           />
         </aside>
       </main>

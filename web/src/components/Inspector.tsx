@@ -18,6 +18,7 @@ type Props = {
   approvals: ApprovalRow[];
   checkpoint: CheckpointRow | null;
   transcript: TranscriptTurn[];
+  onSelectRun?: (id: string) => void;
 };
 
 type Tab = "detail" | "run" | "context";
@@ -30,6 +31,7 @@ export function Inspector({
   approvals,
   checkpoint,
   transcript,
+  onSelectRun,
 }: Props) {
   const [tab, setTab] = useState<Tab>("detail");
   const toolCallId =
@@ -160,10 +162,18 @@ export function Inspector({
               <SectionTitle title="Run tree" meta={`${tree.length} nodes`} />
               <div className="tree-list">
                 {tree.map((item) => (
-                  <div key={item.id} className={item.parent_run_id ? "child" : ""}>
+                  <button
+                    type="button"
+                    key={item.id}
+                    className={`tree-item ${item.parent_run_id ? "child" : ""} ${
+                      item.id === run?.id ? "selected" : ""
+                    }`}
+                    onClick={() => onSelectRun?.(item.id)}
+                    data-testid={`tree-run-${item.id}`}
+                  >
                     <code>{item.id.slice(0, 12)}</code>
                     <span className={`status-text ${item.status}`}>{item.status}</span>
-                  </div>
+                  </button>
                 ))}
               </div>
             </section>
