@@ -1,34 +1,47 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { sseStore, type SseStatus } from "./sseStore";
 import type { EventRow } from "../api/client";
 
-export function useSse(enabled = true) {
-  const status = useSyncExternalStore(
-    sseStore.subscribe,
-    () => sseStore.status,
-    () => "closed" as SseStatus
-  );
-  const lastSeq = useSyncExternalStore(
-    sseStore.subscribe,
-    () => sseStore.lastSeq,
-    () => 0
-  );
-  const events = useSyncExternalStore(
-    sseStore.subscribe,
-    () => sseStore.events,
-    () => [] as EventRow[]
-  );
+const EMPTY_EVENTS: EventRow[] = [];
+const selectStatus = (store: typeof sseStore) => store.status;
+
+export function useSseSelector<T>(
+  selector: (store: typeof sseStore) => T,
+  serverSnapshot: () => T
+): T {
+  const getSnapshot = useCallback(() => selector(sseStore), [selector]);
+  return useSyncExternalStore(sseStore.subscribe, getSnapshot, serverSnapshot);
+}
+
+export function useSse(enabled = true, startAfter = 0) {
+  const status = useSseSelector(selectStatus, closedStatus);
 
   useEffect(() => {
     if (!enabled) return;
-    sseStore.connect(0);
+    sseStore.connect(startAfter);
     return () => sseStore.disconnect();
-  }, [enabled]);
+  }, [enabled, startAfter]);
 
-  return { status, lastSeq, events };
+  return { status };
 }
 
-export function useForceUpdate() {
-  const [, set] = useState(0);
-  return () => set((n) => n + 1);
+export function useSseEvents(): EventRow[] {
+  return useSseSelector(selectEvents, emptyEvents);
+}
+
+export function useSseEventsForRun(runId: string | null): EventRow[] {
+  const getSnapshot = useCallback(() => sseStore.eventsForRun(runId), [runId]);
+  return useSyncExternalStore(sseStore.subscribe, getSnapshot, emptyEvents);
+}
+
+function selectEvents(store: typeof sseStore): EventRow[] {
+  return store.events;
+}
+
+function closedStatus(): SseStatus {
+  return "closed";
+}
+
+function emptyEvents(): EventRow[] {
+  return EMPTY_EVENTS;
 }

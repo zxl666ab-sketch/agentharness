@@ -1,5 +1,5 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+﻿import { useCallback, useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   Clock3,
@@ -14,20 +14,12 @@ import { api, type EventRow, type RunRow } from "./api/client";
 import { Inspector } from "./components/Inspector";
 import { RunList } from "./components/RunList";
 import { Timeline } from "./components/Timeline";
+import { SseInvalidator } from "./store/SseInvalidator";
 import { useSse } from "./store/useSse";
-import {
-  extractUserMessageFromEvents,
-  extractUserMessageFromMessages,
-  isTerminalStatus,
-} from "./trace/buildTurnTrace";
+import { isTerminalStatus } from "./trace/buildTurnTrace";
+import { runStatusLabel } from "./runs/status";
 
 type MobileView = "runs" | "timeline" | "inspector";
-
-const ACTIVE_RUN_STATUSES = new Set([
-  "pending",
-  "running",
-  "waiting_approval",
-]);
 
 function readRunFromUrl(): string | null {
   try {
@@ -45,10 +37,7 @@ export default function App() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(() => readRunFromUrl());
   const [selectedEvent, setSelectedEvent] = useState<EventRow | null>(null);
   const [mobileView, setMobileView] = useState<MobileView>("runs");
-  const [userMessageByRunId, setUserMessageByRunId] = useState<Record<string, string>>({});
-  const queryClient = useQueryClient();
-  const { status: sseStatus, events: liveEvents, lastSeq } = useSse(true);
-  const lastHandledSeq = useRef(0);
+  const [sseStartSeq, setSseStartSeq] = useState<number | null>(null);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -59,6 +48,17 @@ export default function App() {
     queryFn: api.health,
     refetchInterval: 15_000,
   });
+
+  useEffect(() => {
+    if (sseStartSeq == null && healthQuery.data) {
+      setSseStartSeq(healthQuery.data.max_global_seq);
+    }
+  }, [healthQuery.data, sseStartSeq]);
+
+  const { status: sseStatus } = useSse(
+    sseStartSeq != null,
+    sseStartSeq ?? 0
+  );
 
   const runsQuery = useQuery({
     queryKey: ["runs"],
@@ -86,12 +86,17 @@ export default function App() {
 
   const selectedFromList = runs.find((run) => run.id === selectedRunId) || null;
   const selectedIsTerminal = isTerminalStatus(selectedFromList?.status);
+  // Gate child-tree fetches: only runs with known children need the tree endpoint.
+  const selectedChildCount = selectedFromList?.child_count ?? 0;
+  // Approvals only mutate while a run is actively awaiting a decision.
+  const selectedIsWaitingApproval = selectedFromList?.status === "waiting_approval";
 
   const runQuery = useQuery({
     queryKey: ["run", selectedRunId],
     queryFn: () => api.run(selectedRunId!),
     enabled: !!selectedRunId,
     refetchInterval: selectedIsTerminal ? false : 4_000,
+    staleTime: selectedIsTerminal ? Infinity : 0,
   });
 
   const eventsQuery = useQuery({
@@ -106,7 +111,8 @@ export default function App() {
   const treeQuery = useQuery({
     queryKey: ["tree", selectedRunId],
     queryFn: () => api.tree(selectedRunId!),
-    enabled: !!selectedRunId,
+    // Only runs with children have a meaningful tree; skip the request otherwise.
+    enabled: !!selectedRunId && selectedChildCount > 0,
     refetchInterval: selectedIsTerminal ? false : 5_000,
     staleTime: selectedIsTerminal ? Infinity : 2_000,
   });
@@ -123,8 +129,9 @@ export default function App() {
     queryKey: ["approvals", selectedRunId],
     queryFn: () => api.approvals(selectedRunId!),
     enabled: !!selectedRunId,
-    refetchInterval: selectedIsTerminal ? false : 5_000,
-    staleTime: selectedIsTerminal ? Infinity : 2_000,
+    // Poll only while a decision is pending; otherwise treat as immutable.
+    refetchInterval: selectedIsWaitingApproval ? 5_000 : false,
+    staleTime: selectedIsWaitingApproval ? 2_000 : Infinity,
   });
 
   const checkpointQuery = useQuery({
@@ -143,120 +150,10 @@ export default function App() {
     queryKey: ["transcript", selectedRun?.session_id],
     queryFn: () => api.transcript(selectedRun!.session_id),
     enabled: !!selectedRun?.session_id,
-    staleTime: 5_000,
+    // Session transcript only grows on new turns (SSE invalidates runs); a terminal
+    // selection is stable, so avoid refetching when re-selecting the same run.
+    staleTime: selectedIsTerminal ? Infinity : 5_000,
   });
-
-  // Smart SSE invalidation: only refresh what the new events require.
-  useEffect(() => {
-    if (!liveEvents.length) return;
-    const fresh = liveEvents.filter((event) => event.global_seq > lastHandledSeq.current);
-    if (!fresh.length) return;
-    lastHandledSeq.current = Math.max(...fresh.map((event) => event.global_seq));
-
-    const touchesRuns = fresh.some((event) =>
-      [
-        "run_started",
-        "run_status",
-        "run_completed",
-        "run_failed",
-        "run_cancelled",
-        "run_interrupted",
-        "child_run_started",
-        "child_run_ended",
-      ].includes(event.type)
-    );
-    if (touchesRuns) {
-      void queryClient.invalidateQueries({ queryKey: ["runs"] });
-    }
-
-    if (!selectedRunId) return;
-    const forSelected = fresh.filter((event) => event.run_id === selectedRunId);
-    if (!forSelected.length) return;
-
-    // Events for selected run are merged from liveEvents; avoid full events refetch.
-    const needsMessages = forSelected.some((event) =>
-      ["tool_call_end", "tool_result", "model_turn_end", "run_completed", "run_failed"].includes(
-        event.type
-      )
-    );
-    const needsApprovals = forSelected.some((event) =>
-      ["approval_requested", "approval_resolved"].includes(event.type)
-    );
-    const needsTree = forSelected.some((event) =>
-      ["child_run_started", "child_run_ended"].includes(event.type)
-    );
-    const needsRun = forSelected.some((event) =>
-      [
-        "run_status",
-        "run_completed",
-        "run_failed",
-        "run_cancelled",
-        "run_interrupted",
-        "budget_warning",
-      ].includes(event.type)
-    );
-    const needsCheckpoint = forSelected.some((event) => event.type === "checkpoint");
-
-    if (needsRun) void queryClient.invalidateQueries({ queryKey: ["run", selectedRunId] });
-    if (needsMessages) void queryClient.invalidateQueries({ queryKey: ["messages", selectedRunId] });
-    if (needsApprovals)
-      void queryClient.invalidateQueries({ queryKey: ["approvals", selectedRunId] });
-    if (needsTree) void queryClient.invalidateQueries({ queryKey: ["tree", selectedRunId] });
-    if (needsCheckpoint)
-      void queryClient.invalidateQueries({ queryKey: ["checkpoint", selectedRunId] });
-  }, [liveEvents, lastSeq, queryClient, selectedRunId]);
-
-  const events = useMemo(() => {
-    const merged = new Map<number, EventRow>();
-    for (const event of eventsQuery.data || []) merged.set(event.global_seq, event);
-    for (const event of liveEvents) {
-      if (event.run_id === selectedRunId) merged.set(event.global_seq, event);
-    }
-    return [...merged.values()].sort((left, right) => left.global_seq - right.global_seq);
-  }, [eventsQuery.data, liveEvents, selectedRunId]);
-
-  // Seed list summaries from selected run messages / run_started.
-  useEffect(() => {
-    if (!selectedRunId) return;
-    const fromMessages = extractUserMessageFromMessages(messagesQuery.data || []);
-    const fromEvents = extractUserMessageFromEvents(events);
-    const user = fromMessages || fromEvents;
-    if (!user) return;
-    setUserMessageByRunId((prev) =>
-      prev[selectedRunId] === user ? prev : { ...prev, [selectedRunId]: user }
-    );
-  }, [selectedRunId, messagesQuery.data, events]);
-
-  // Best-effort: hydrate user messages for visible runs via run_started peek (batched lightly).
-  useEffect(() => {
-    let cancelled = false;
-    const missing = runs
-      .filter((run) => !userMessageByRunId[run.id] && !ACTIVE_RUN_STATUSES.has(run.status))
-      .slice(0, 12);
-    if (!missing.length) return;
-    (async () => {
-      for (const run of missing) {
-        if (cancelled) return;
-        try {
-          // Cheap: messages endpoint is enough for user role; only first page needed.
-          const messages = await api.messages(run.id);
-          const user = extractUserMessageFromMessages(messages);
-          if (user && !cancelled) {
-            setUserMessageByRunId((prev) =>
-              prev[run.id] ? prev : { ...prev, [run.id]: user }
-            );
-          }
-        } catch {
-          // ignore individual failures
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // Only re-run when run ids set changes meaningfully.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runs.map((run) => run.id).join(",")]);
 
   useEffect(() => {
     if (selectedEvent && selectedEvent.run_id !== selectedRunId) setSelectedEvent(null);
@@ -278,39 +175,56 @@ export default function App() {
   const duration = selectedRun
     ? formatDuration(selectedRun.created_at, selectedRun.finished_at)
     : "-";
+  const connectionStatus = healthQuery.isLoading
+    ? "connecting"
+    : healthQuery.isError
+      ? "error"
+      : sseStatus;
+  const connectionLabel = healthQuery.isError ? "服务异常" : sseStatusText(connectionStatus);
 
   return (
     <div className="app-shell">
+      <SseInvalidator selectedRunId={selectedRunId} />
       <header className="app-header">
         <div className="product-mark">
           <TerminalSquare size={17} aria-hidden="true" />
           <div>
             <h1>Agent Harness</h1>
-            <span>Run inspector</span>
+            <span>运行检查器</span>
           </div>
         </div>
         <div className="header-context" title={healthQuery.data?.data_dir || ""}>
           {selectedRun ? (
             <>
               <code>{selectedRun.id.slice(0, 12)}</code>
-              <span className={`status-text ${selectedRun.status}`}>{selectedRun.status}</span>
+              <span className={`status-text ${selectedRun.status}`}>
+                {runStatusLabel(selectedRun)}
+              </span>
             </>
           ) : (
-            <span>No run selected</span>
+            <span>未选择运行</span>
           )}
         </div>
         <div className="header-actions">
-          <span className={`live-state ${sseStatus}`}>
-            <span aria-hidden="true" /> {sseStatus === "live" ? "Live" : sseStatus}
+          <span
+            className={`live-state ${connectionStatus}`}
+            role="status"
+            aria-live="polite"
+          >
+            <span aria-hidden="true" /> {connectionLabel}
           </span>
           <button
             type="button"
             className="icon-button"
             onClick={() => setTheme((value) => (value === "light" ? "dark" : "light"))}
-            aria-label="Toggle theme"
-            title="Toggle theme"
+            aria-label="切换主题"
+            title="切换主题"
           >
-            {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
+            {theme === "light" ? (
+              <Moon size={16} aria-hidden="true" />
+            ) : (
+              <Sun size={16} aria-hidden="true" />
+            )}
           </button>
         </div>
       </header>
@@ -320,12 +234,13 @@ export default function App() {
           className={`workspace-panel runs-panel ${mobileView === "runs" ? "mobile-visible" : ""}`}
           data-testid="runs-panel"
         >
-          <PanelHeader title="Runs" meta={`${runs.length} total`} />
+          <PanelHeader title="运行" meta={`共 ${runs.length} 个`} />
           <RunList
             runs={runs}
             selectedId={selectedRunId}
             onSelect={selectRun}
-            userMessageByRunId={userMessageByRunId}
+            loading={runsQuery.isLoading}
+            error={runsQuery.error ? errorMessage(runsQuery.error) : null}
           />
         </section>
 
@@ -335,26 +250,35 @@ export default function App() {
           }`}
           data-testid="timeline-panel"
         >
-          <PanelHeader title="Timeline" meta={selectedRun ? selectedRun.id.slice(0, 12) : "-"} />
+          <PanelHeader title="追踪" meta={selectedRun ? selectedRun.id.slice(0, 12) : "-"} />
           <div className="run-overview" data-testid="run-overview">
-            <Metric icon={<Activity size={14} />} label="Status" value={selectedRun?.status || "-"} />
-            <Metric icon={<Clock3 size={14} />} label="Duration" value={duration} />
+            <Metric
+              icon={<Activity size={14} />}
+              label="状态"
+              value={selectedRun ? runStatusLabel(selectedRun) : "-"}
+            />
+            <Metric icon={<Clock3 size={14} />} label="耗时" value={duration} />
             <Metric
               icon={<Zap size={14} />}
-              label="Tokens"
+              label="令牌"
               value={`${numberValue(usage?.total_tokens)} / ${numberValue(budget?.max_tokens)}`}
             />
             <Metric
               icon={<ListTree size={14} />}
-              label="Steps"
+              label="步骤"
               value={`${selectedRun?.steps || 0} / ${numberValue(budget?.max_steps)}`}
             />
           </div>
           <Timeline
-            events={events}
+            runId={selectedRunId}
+            events={eventsQuery.data || []}
             messages={messagesQuery.data || []}
             selectedId={selectedEvent?.event_id || null}
             onSelect={selectEvent}
+            onSelectRun={selectRun}
+            runStatus={selectedRun?.status || null}
+            loading={eventsQuery.isLoading || messagesQuery.isLoading}
+            error={eventsQuery.error ? errorMessage(eventsQuery.error) : null}
           />
         </section>
 
@@ -364,7 +288,7 @@ export default function App() {
           }`}
           data-testid="inspector-panel"
         >
-          <PanelHeader title="Inspector" meta={selectedEvent?.type || "run"} />
+          <PanelHeader title="检查器" meta={selectedEvent?.type || "run"} />
           <Inspector
             run={selectedRun}
             event={selectedEvent}
@@ -374,28 +298,30 @@ export default function App() {
             checkpoint={checkpointQuery.data || null}
             transcript={transcriptQuery.data || []}
             onSelectRun={selectRun}
+            loading={!!selectedRunId && runQuery.isLoading}
+            error={runQuery.error ? errorMessage(runQuery.error) : null}
           />
         </aside>
       </main>
 
-      <nav className="mobile-tabs" data-testid="mobile-tabs" aria-label="Workspace view">
+      <nav className="mobile-tabs" data-testid="mobile-tabs" aria-label="工作区视图">
         <MobileTab
           active={mobileView === "runs"}
           onClick={() => setMobileView("runs")}
           icon={<ListTree size={16} />}
-          label="Runs"
+          label="运行"
         />
         <MobileTab
           active={mobileView === "timeline"}
           onClick={() => setMobileView("timeline")}
           icon={<Activity size={16} />}
-          label="Timeline"
+          label="追踪"
         />
         <MobileTab
           active={mobileView === "inspector"}
           onClick={() => setMobileView("inspector")}
           icon={<PanelRight size={16} />}
-          label="Inspector"
+          label="检查器"
         />
       </nav>
     </div>
@@ -422,7 +348,7 @@ function Metric({
 }) {
   return (
     <div className="metric">
-      <span className="metric-icon">{icon}</span>
+      <span className="metric-icon" aria-hidden="true">{icon}</span>
       <span>
         <small>{label}</small>
         <strong>{value}</strong>
@@ -443,8 +369,13 @@ function MobileTab({
   label: string;
 }) {
   return (
-    <button type="button" className={active ? "active" : ""} onClick={onClick}>
-      {icon}
+    <button
+      type="button"
+      className={active ? "active" : ""}
+      onClick={onClick}
+      aria-current={active ? "page" : undefined}
+    >
+      <span aria-hidden="true">{icon}</span>
       {label}
     </button>
   );
@@ -474,7 +405,20 @@ function formatDuration(start: string, end?: string | null): string {
   const finished = end ? new Date(end).getTime() : Date.now();
   if (Number.isNaN(started) || Number.isNaN(finished)) return "-";
   const milliseconds = Math.max(0, finished - started);
-  if (milliseconds < 1000) return `${milliseconds} ms`;
-  if (milliseconds < 60_000) return `${(milliseconds / 1000).toFixed(2)} s`;
-  return `${(milliseconds / 60_000).toFixed(1)} min`;
+  if (milliseconds < 1000) return `${milliseconds} 毫秒`;
+  if (milliseconds < 60_000) return `${(milliseconds / 1000).toFixed(2)} 秒`;
+  return `${(milliseconds / 60_000).toFixed(1)} 分钟`;
+}
+
+function sseStatusText(status: string): string {
+  return {
+    connecting: "连接中",
+    live: "实时",
+    error: "连接异常",
+    closed: "已断开",
+  }[status] || status;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

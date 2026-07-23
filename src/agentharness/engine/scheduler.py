@@ -82,4 +82,6 @@ class EffectScheduler:
         for i, e, f, b in serial:
             await _one(i, e, f, b)
 
-        return [r for r in results if r is not None]  # type: ignore[misc]
+        # Preserve position + count: every slot was assigned by _one. Filtering None
+        # here would drop legitimate None returns and misalign results with inputs.
+        return results  # type: ignore[return-value]

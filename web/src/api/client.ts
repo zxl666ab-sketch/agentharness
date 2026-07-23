@@ -11,6 +11,10 @@ export type RunRow = {
   approval?: string;
   cwd?: string;
   delegate_depth?: number;
+  depth?: number;
+  child_count?: number;
+  user_summary?: string | null;
+  actor?: string;
   allow_write?: number;
   error?: string | null;
   output_summary?: string | null;
@@ -120,8 +124,8 @@ export const api = {
   session: (id: string) => getJson<SessionRow>(`/api/sessions/${id}`),
   transcript: (sessionId: string) =>
     getJson<TranscriptTurn[]>(`/api/sessions/${sessionId}/transcript`),
-  runs: (sessionId?: string, limit = 100) => {
-    const q = new URLSearchParams({ limit: String(limit) });
+  runs: (sessionId?: string, limit = 100, offset = 0) => {
+    const q = new URLSearchParams({ limit: String(limit), offset: String(offset) });
     if (sessionId) q.set("session_id", sessionId);
     return getJson<RunRow[]>(`/api/runs?${q}`);
   },

@@ -6,7 +6,8 @@ import asyncio
 import json
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from contextlib import ExitStack, suppress
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -38,8 +39,8 @@ from agentharness.engine.context import assemble_context, estimate_tokens
 from agentharness.engine.scheduler import EffectScheduler
 from agentharness.security.approval import auto_decision
 from agentharness.security.redaction import Redactor, default_redactor
-
 from agentharness.storage.sqlite import Storage
+from agentharness.tools.summary import summarize_tool_arguments
 
 ApprovalCallback = Callable[[ApprovalRequest], Awaitable[ApprovalDecision]]
 
@@ -52,45 +53,35 @@ _RESUMABLE_STATUSES = frozenset(
 )
 
 
+@dataclass
+class RunContext:
+    """All per-run in-memory engine state, grouped so a run's state is created and
+    torn down atomically. Replacing 13 parallel ``dict[run_id, ...]`` maps with one
+    ``dict[run_id, RunContext]`` means cleanup is a single ``pop`` — a newly added
+    field cannot be forgotten in ``_cleanup_run_state``, and a failure mid-teardown
+    cannot leave some fields lingering while others are freed.
+    """
+
+    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    allow_effects: set[EffectKind] = field(default_factory=set)
+    child_runs: list[str] = field(default_factory=list)
+    delta_buf: list[str] = field(default_factory=list)
+    delta_buf_size: int = 0
+    delta_last_flush: float = 0.0
+    # Completed tool ids must survive interrupt/cancel checkpoints for resume.
+    completed_tool_ids: set[str] = field(default_factory=set)
+    pending_tool_calls: list[ToolCall] = field(default_factory=list)
+    stop_mode: str | None = None  # "cancel" | "interrupt"
+    # In-memory message list (incl. session-history splice) for resume-safe checkpoints.
+    run_messages: list[Message] = field(default_factory=list)
+    provider_owner_task: asyncio.Task[Any] | None = None
 
 
-def _summarize_tool_arguments(arguments: Any) -> str:
-    """Compact tool args for event payloads (no large blobs / secrets)."""
-    if arguments is None:
-        return ""
-    if not isinstance(arguments, dict):
-        text = str(arguments)
-        return text if len(text) <= 160 else text[:159] + "…"
-    preferred = (
-        "action",
-        "url",
-        "path",
-        "command",
-        "query",
-        "method",
-        "selector",
-        "name",
-        "skill",
-        "memory",
-        "context_id",
-    )
-    parts: list[str] = []
-    for key in preferred:
-        if key in arguments and arguments[key] not in (None, ""):
-            val = arguments[key]
-            if isinstance(val, str) and len(val) > 80:
-                val = val[:79] + "…"
-            parts.append(f"{key}={val}")
-    if not parts:
-        for key, val in list(arguments.items())[:4]:
-            kl = str(key).lower()
-            if kl in {"api_key", "token", "password", "authorization", "secret", "key"} or "token" in kl:
-                parts.append(f"{key}=[REDACTED]")
-            else:
-                rendered = val if not isinstance(val, str) or len(val) <= 60 else val[:59] + "…"
-                parts.append(f"{key}={rendered}")
-    text = " ".join(parts)
-    return text if len(text) <= 160 else text[:159] + "…"
+
+
+# Tool-argument summarizer lives in one place (shared with the CLI / event payloads);
+# keep the private alias so existing call sites read unchanged.
+_summarize_tool_arguments = summarize_tool_arguments
 
 
 class RunEngine:
@@ -111,22 +102,27 @@ class RunEngine:
         self.approval_callback = approval_callback
         self.harness = harness
         self.scheduler = EffectScheduler()
-        self._cancel_events: dict[str, asyncio.Event] = {}
-        self._run_allow_effects: dict[str, set[EffectKind]] = {}
-        self._active_processes: dict[str, list[Any]] = {}  # run_id -> process handles
-        self._child_runs: dict[str, list[str]] = {}
-        self._delta_buf: dict[str, list[str]] = {}
-        self._delta_buf_size: dict[str, int] = {}
-        self._delta_last_flush: dict[str, float] = {}
-        # Per-run completed tool ids (must survive interrupt/cancel checkpoints for resume)
-        self._completed_tool_ids: dict[str, set[str]] = {}
-        self._pending_tool_calls: dict[str, list[ToolCall]] = {}
-        self._stop_mode: dict[str, str] = {}  # run_id -> "cancel" | "interrupt"
-        # In-memory message lists (include session history splice) for resume-safe checkpoints
-        self._run_messages: dict[str, list[Message]] = {}
-        self._provider_owner_tasks: dict[str, asyncio.Task[Any]] = {}
+        # One RunContext per active run; see RunContext for why this replaces 13 maps.
+        self._runs: dict[str, RunContext] = {}
+        # Process handles per run. Kept separate from RunContext because the shell tools
+        # share this dict by reference (harness wires its own registry in), registering
+        # handles the engine later kills — a per-run field could not be shared that way.
+        self._active_processes: dict[str, list[Any]] = {}
         self._active_run_ids: set[str] = set()
         self.active_run_id: str | None = None
+
+    def _ctx(self, run_id: str) -> RunContext:
+        """Return (creating if needed) the RunContext for a run."""
+        ctx = self._runs.get(run_id)
+        if ctx is None:
+            ctx = RunContext()
+            self._runs[run_id] = ctx
+        return ctx
+
+    def child_run_ids(self, run_id: str) -> list[str]:
+        """Child run ids spawned by a run (used by the delegate concurrency limiter)."""
+        ctx = self._runs.get(run_id)
+        return list(ctx.child_runs) if ctx else []
 
     def _activate_run(self, run_id: str) -> None:
         self._active_run_ids.add(run_id)
@@ -138,47 +134,41 @@ class RunEngine:
             self.active_run_id = next(iter(self._active_run_ids), None)
 
     async def _cleanup_run_state(self, run_id: str) -> None:
-        seen: set[int] = set()
-        for tool in self.tools.values():
-            if id(tool) in seen:
-                continue
-            seen.add(id(tool))
-            release_run = getattr(tool, "release_run", None)
-            if callable(release_run):
-                try:
-                    result = release_run(run_id)
-                    if asyncio.iscoroutine(result):
-                        await result
-                except Exception:  # noqa: BLE001
-                    pass
-        for mapping in (
-            self._cancel_events,
-            self._run_allow_effects,
-            self._active_processes,
-            self._delta_buf,
-            self._delta_buf_size,
-            self._delta_last_flush,
-            self._completed_tool_ids,
-            self._pending_tool_calls,
-            self._stop_mode,
-            self._run_messages,
-            self._provider_owner_tasks,
-        ):
-            mapping.pop(run_id, None)
-        self._child_runs.pop(run_id, None)
-        for parent_id, children in list(self._child_runs.items()):
-            if run_id in children:
-                self._child_runs[parent_id] = [child for child in children if child != run_id]
+        # ExitStack guarantees the RunContext pop and child-link scrub run even if a
+        # tool's release_run raises. Per-run state is one dict entry, so teardown is
+        # atomic and no field can be left dangling.
+        with ExitStack() as stack:
+            stack.callback(self._forget_run, run_id)
+            seen: set[int] = set()
+            for tool in self.tools.values():
+                if id(tool) in seen:
+                    continue
+                seen.add(id(tool))
+                release_run = getattr(tool, "release_run", None)
+                if callable(release_run):
+                    try:
+                        result = release_run(run_id)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception:  # noqa: BLE001
+                        pass
+
+    def _forget_run(self, run_id: str) -> None:
+        """Drop all in-memory state for a run and unlink it from any parent's children."""
+        self._runs.pop(run_id, None)
+        self._active_processes.pop(run_id, None)
+        for ctx in self._runs.values():
+            if run_id in ctx.child_runs:
+                ctx.child_runs = [child for child in ctx.child_runs if child != run_id]
 
     def get_cancel_event(self, run_id: str) -> asyncio.Event:
-        if run_id not in self._cancel_events:
-            self._cancel_events[run_id] = asyncio.Event()
-        return self._cancel_events[run_id]
+        return self._ctx(run_id).cancel_event
 
     async def _kill_descendants(self, run_id: str) -> None:
         """Propagate cancel signal, kill shell trees, clear process registry."""
         self.get_cancel_event(run_id).set()
-        for child_id in list(self._child_runs.get(run_id, [])):
+        ctx = self._runs.get(run_id)
+        for child_id in list(ctx.child_runs if ctx else []):
             await self._kill_descendants(child_id)
         for proc in list(self._active_processes.get(run_id, [])):
             try:
@@ -192,21 +182,29 @@ class RunEngine:
             cancel_run = getattr(tool, "cancel_run", None)
             if callable(cancel_run):
                 await cast(Callable[[str], Awaitable[None]], cancel_run)(run_id)
-        provider_owner = self._provider_owner_tasks.get(run_id)
+        provider_owner = ctx.provider_owner_task if ctx else None
         if provider_owner is not None and provider_owner is not asyncio.current_task():
             provider_owner.cancel()
 
     async def _watch_stop_request(self, run_id: str, cancel: asyncio.Event) -> None:
+        # Poll external (cross-process) stop requests. The read is on the RO
+        # connection now, so ~0.2s is responsive enough without spinning the
+        # writer lock 20x/s. In-process cancel/interrupt set `cancel` directly
+        # and don't wait on this loop.
         while not cancel.is_set():
             mode = self.storage.get_stop_request(run_id)
             if mode:
-                self._stop_mode[run_id] = mode
+                self._ctx(run_id).stop_mode = mode
                 await self._kill_descendants(run_id)
                 return
-            await asyncio.sleep(0.05)
+            try:
+                await asyncio.wait_for(cancel.wait(), timeout=0.2)
+            except TimeoutError:
+                pass
 
     def _stop_status(self, run_id: str) -> RunStatus:
-        mode = self._stop_mode.get(run_id, "cancel")
+        ctx = self._runs.get(run_id)
+        mode = (ctx.stop_mode if ctx else None) or "cancel"
         return RunStatus.interrupted if mode == "interrupt" else RunStatus.cancelled
 
     def _checkpoint_messages_for_run(self, run_id: str) -> list[Message]:
@@ -215,7 +213,8 @@ class RunEngine:
         Storage only holds this run's messages; multi-turn history lives in the
         in-memory list / prior checkpoint and must survive interrupt/resume.
         """
-        mem = self._run_messages.get(run_id)
+        ctx = self._runs.get(run_id)
+        mem = ctx.run_messages if ctx else None
         cp = self.storage.load_checkpoint(run_id)
         stored = self.storage.get_messages(run_id)
         candidates: list[list[Message]] = []
@@ -239,8 +238,9 @@ class RunEngine:
     ) -> None:
         """Checkpoint without wiping completed tool ids (resume safety)."""
         cp = self.storage.load_checkpoint(run_id)
-        completed = set(self._completed_tool_ids.get(run_id, set()))
-        pending = list(self._pending_tool_calls.get(run_id, []))
+        ctx = self._ctx(run_id)
+        completed = set(ctx.completed_tool_ids)
+        pending = list(ctx.pending_tool_calls)
         step = 0
         usage = Usage()
         if cp:
@@ -262,7 +262,7 @@ class RunEngine:
                 status=status,
             )
         )
-        self._completed_tool_ids[run_id] = completed
+        ctx.completed_tool_ids = completed
 
     async def cancel(self, run_id: str) -> None:
         """Signal cancel, kill process trees + children. Active loop finishes as cancelled."""
@@ -276,7 +276,7 @@ class RunEngine:
             raise RuntimeError(
                 f"run {run_id} is not cancellable from status {status.value}"
             )
-        self._stop_mode[run_id] = "cancel"
+        self._ctx(run_id).stop_mode = "cancel"
         self.storage.request_stop(run_id, "cancel")
         await self._kill_descendants(run_id)
         self._preserve_checkpoint(run_id, status=RunStatus.cancelled)
@@ -303,7 +303,7 @@ class RunEngine:
 
     async def interrupt(self, run_id: str, reason: str = "interrupted") -> None:
         """Ctrl+C / CancelledError: kill trees, preserve resume state, finish as interrupted."""
-        self._stop_mode[run_id] = "interrupt"
+        self._ctx(run_id).stop_mode = "interrupt"
         self.storage.request_stop(run_id, "interrupt")
         await self._kill_descendants(run_id)
         self._preserve_checkpoint(run_id, status=RunStatus.interrupted)
@@ -361,14 +361,35 @@ class RunEngine:
             },
         )
         if parent_run_id:
-            self._child_runs.setdefault(parent_run_id, []).append(run_id)
+            self._ctx(parent_run_id).child_runs.append(run_id)
+            parent = self.storage.get_run(parent_run_id)
+            if parent:
+                self._emit_and_update(
+                    parent_run_id,
+                    events=[
+                        self._event(
+                            parent,
+                            EventType.child_run_started,
+                            {
+                                "child_run_id": run_id,
+                                "parent_tool_call_id": request.metadata.get(
+                                    "parent_tool_call_id"
+                                ),
+                                "actor": request.metadata.get("actor", "delegate"),
+                                "depth": request.delegate_depth,
+                                "status": RunStatus.running.value,
+                            },
+                        )
+                    ],
+                )
         elif is_top_level:
             # Top-level dialogue updates session sort order; delegates do not.
             self.storage.update_session(session_id, touch=True)
 
         cancel = self.get_cancel_event(run_id)
-        self._completed_tool_ids[run_id] = set()
-        self._pending_tool_calls[run_id] = []
+        ctx = self._ctx(run_id)
+        ctx.completed_tool_ids = set()
+        ctx.pending_tool_calls = []
         self._activate_run(run_id)
 
         # Multi-turn context: load completed top-level history when session already exists.
@@ -382,7 +403,7 @@ class RunEngine:
         # Persist only this run's user message (history messages belong to prior runs).
         self.storage.save_message(run_id, session_id, user_msg, seq=0)
         # Register early so interrupt/cancel before _loop still keeps multi-turn context.
-        self._run_messages[run_id] = messages
+        ctx.run_messages = messages
 
         run_row = self.storage.get_run(run_id)
         assert run_row is not None
@@ -416,7 +437,7 @@ class RunEngine:
                     messages=messages,
                     step=0,
                     usage=Usage(),
-                    completed_tool_ids=self._completed_tool_ids[run_id],
+                    completed_tool_ids=ctx.completed_tool_ids,
                     cancel=cancel,
                 )
         except TimeoutError:
@@ -445,6 +466,28 @@ class RunEngine:
             stop_watcher.cancel()
             with suppress(asyncio.CancelledError):
                 await stop_watcher
+            if parent_run_id:
+                parent = self.storage.get_run(parent_run_id)
+                child = self.storage.get_run(run_id)
+                if parent and child:
+                    self._emit_and_update(
+                        parent_run_id,
+                        events=[
+                            self._event(
+                                parent,
+                                EventType.child_run_ended,
+                                {
+                                    "child_run_id": run_id,
+                                    "parent_tool_call_id": request.metadata.get(
+                                        "parent_tool_call_id"
+                                    ),
+                                    "actor": request.metadata.get("actor", "delegate"),
+                                    "depth": request.delegate_depth,
+                                    "status": child["status"],
+                                },
+                            )
+                        ],
+                    )
             self._deactivate_run(run_id)
             await self._cleanup_run_state(run_id)
 
@@ -496,9 +539,10 @@ class RunEngine:
         pending = [tc for tc in cp.pending_tool_calls if tc.id not in completed]
 
         self._activate_run(run_id)
-        self._run_messages[run_id] = messages
-        self._completed_tool_ids[run_id] = completed
-        self._pending_tool_calls[run_id] = list(pending)
+        resume_ctx = self._ctx(run_id)
+        resume_ctx.run_messages = messages
+        resume_ctx.completed_tool_ids = completed
+        resume_ctx.pending_tool_calls = list(pending)
 
         self.storage.update_run(run_id, status=RunStatus.running)
         self._emit_and_update(
@@ -584,7 +628,7 @@ class RunEngine:
         output_parts: list[str] = []
         output_length = 0
         # Keep reference so interrupt/cancel checkpoints retain multi-turn context.
-        self._run_messages[run_id] = messages
+        self._ctx(run_id).run_messages = messages
 
         while True:
             if cancel.is_set():
@@ -677,7 +721,7 @@ class RunEngine:
             stream = provider.stream(model_req).__aiter__()
             provider_owner = asyncio.current_task()
             if provider_owner is not None:
-                self._provider_owner_tasks[run_id] = provider_owner
+                self._ctx(run_id).provider_owner_task = provider_owner
             try:
                 async for item in stream:
                     if cancel.is_set():
@@ -776,8 +820,9 @@ class RunEngine:
                 error_msg = str(exc)
                 error_kind = "provider"
             finally:
-                if self._provider_owner_tasks.get(run_id) is provider_owner:
-                    self._provider_owner_tasks.pop(run_id, None)
+                owner_ctx = self._runs.get(run_id)
+                if owner_ctx is not None and owner_ctx.provider_owner_task is provider_owner:
+                    owner_ctx.provider_owner_task = None
                 close_stream = getattr(stream, "aclose", None)
                 if callable(close_stream):
                     with suppress(Exception):
@@ -921,8 +966,9 @@ class RunEngine:
         if not pending:
             return
 
-        self._completed_tool_ids[run_id] = set(completed_tool_ids)
-        self._pending_tool_calls[run_id] = list(pending)
+        batch_ctx = self._ctx(run_id)
+        batch_ctx.completed_tool_ids = set(completed_tool_ids)
+        batch_ctx.pending_tool_calls = list(pending)
 
         self._checkpoint(
             run_id,
@@ -949,8 +995,7 @@ class RunEngine:
                 completed_tool_ids.add(tc.id)
                 continue
 
-            spec: ToolSpec = tool.spec
-            effect = spec.effect
+            effect = self._effect_for(tool, tc)
             # Child runs default readonly — block write effects without grant
             if not request.allow_write and effect in (
                 EffectKind.workspace_write,
@@ -968,7 +1013,8 @@ class RunEngine:
 
             decision = auto_decision(effect, request.approval)
             # Run-level allow list
-            if decision is None and effect in self._run_allow_effects.get(run_id, set()):
+            run_ctx = self._runs.get(run_id)
+            if decision is None and run_ctx is not None and effect in run_ctx.allow_effects:
                 decision = ApprovalDecision.allow_once
 
             if decision is None:
@@ -992,6 +1038,7 @@ class RunEngine:
                             EventType.approval_requested,
                             {
                                 "approval_id": apr.id,
+                                "tool_call_id": tc.id,
                                 "tool": tc.name,
                                 "effect": effect.value,
                                 "arguments_summary": apr.arguments_summary,
@@ -1054,6 +1101,7 @@ class RunEngine:
                             EventType.approval_resolved,
                             {
                                 "approval_id": apr.id,
+                                "tool_call_id": tc.id,
                                 "decision": decision.value,
                                 "tool": tc.name,
                             },
@@ -1061,7 +1109,7 @@ class RunEngine:
                     ],
                 )
                 if decision == ApprovalDecision.allow_run:
-                    self._run_allow_effects.setdefault(run_id, set()).add(effect)
+                    self._ctx(run_id).allow_effects.add(effect)
                 if cancelled_while_waiting:
                     return
 
@@ -1112,6 +1160,7 @@ class RunEngine:
                 metadata={
                     "root_run_id": root_run_id,
                     "parent_run_id": parent_run_id,
+                    "tool_call_id": tc.id,
                     "delegate_depth": request.delegate_depth,
                     "budget": request.budget.model_dump(),
                     "provider": request.provider,
@@ -1190,7 +1239,7 @@ class RunEngine:
         items: list[tuple[EffectKind, Any, str | None]] = []
         for tc in allowed:
             tool = self.tools[tc.name]
-            effect = tool.spec.effect
+            effect = self._effect_for(tool, tc)
             browser_id = self._resolve_browser_context_id(tc)
             items.append((effect, lambda tc=tc: make_runner(tc), browser_id))
 
@@ -1204,23 +1253,43 @@ class RunEngine:
                 if incomplete:
                     continue
                 completed_tool_ids.add(result.tool_call_id)
-                self._completed_tool_ids.setdefault(run_id, set()).add(result.tool_call_id)
+                self._ctx(run_id).completed_tool_ids.add(result.tool_call_id)
 
         # Drop finished tools from pending; incomplete stay for resume
-        self._pending_tool_calls[run_id] = [
+        batch_ctx = self._ctx(run_id)
+        batch_ctx.pending_tool_calls = [
             tc for tc in pending if tc.id not in completed_tool_ids
         ]
-        self._completed_tool_ids[run_id] = set(completed_tool_ids)
+        batch_ctx.completed_tool_ids = set(completed_tool_ids)
 
         self._checkpoint(
             run_id,
             phase="tool_batch",
             step=step,
             messages=messages,
-            pending=self._pending_tool_calls[run_id],
+            pending=batch_ctx.pending_tool_calls,
             completed=completed_tool_ids,
             usage=usage,
         )
+
+    def _effect_for(self, tool: Any, tc: ToolCall) -> EffectKind:
+        """Resolve the *dynamic* effect of a call, falling back to the static spec.
+
+        Tools like MCP expose ``effect_for(arguments)`` so a bare ``list_tools`` is
+        ``pure`` while ``call_tool`` is ``destructive``. Approval gating and the
+        scheduler batch both use this so they act on the real blast radius, not the
+        lowest-common-denominator spec label.
+        """
+        effect_for = getattr(tool, "effect_for", None)
+        if callable(effect_for):
+            args = tc.arguments if isinstance(tc.arguments, dict) else {}
+            try:
+                dynamic = effect_for(args)
+            except Exception:  # noqa: BLE001
+                dynamic = None
+            if isinstance(dynamic, EffectKind):
+                return dynamic
+        return tool.spec.effect
 
     def _resolve_browser_context_id(self, tc: ToolCall) -> str | None:
         """Browser ops always share a context key (default 'default' when omitted).
@@ -1381,25 +1450,24 @@ class RunEngine:
     async def _buffer_delta(
         self, run_id: str, run_row: dict[str, Any], text: str, span_id: str
     ) -> None:
-        buf = self._delta_buf.setdefault(run_id, [])
-        buf.append(text)
-        size = self._delta_buf_size.get(run_id, 0) + len(text)
-        self._delta_buf_size[run_id] = size
+        ctx = self._ctx(run_id)
+        ctx.delta_buf.append(text)
+        ctx.delta_buf_size += len(text)
         now = time.monotonic()
-        last = self._delta_last_flush.get(run_id, 0.0)
-        if size >= 256 or (now - last) >= 0.15:
+        if ctx.delta_buf_size >= 256 or (now - ctx.delta_last_flush) >= 0.15:
             await self._flush_delta(run_id, run_row, span_id)
 
     async def _flush_delta(
         self, run_id: str, run_row: dict[str, Any], span_id: str | None
     ) -> None:
-        buf = self._delta_buf.get(run_id) or []
-        if not buf:
+        ctx = self._runs.get(run_id)
+        buf = ctx.delta_buf if ctx else []
+        if not buf or ctx is None:
             return
         text = "".join(buf)
-        self._delta_buf[run_id] = []
-        self._delta_buf_size[run_id] = 0
-        self._delta_last_flush[run_id] = time.monotonic()
+        ctx.delta_buf = []
+        ctx.delta_buf_size = 0
+        ctx.delta_last_flush = time.monotonic()
         self._emit_and_update(
             run_id,
             events=[
@@ -1462,8 +1530,9 @@ class RunEngine:
             RunStatus.interrupted: EventType.run_interrupted,
         }.get(status, EventType.run_status)
         if run:
+            finish_ctx = self._runs.get(run_id)
             # Never wipe completed tool ids — resume must skip finished tools.
-            completed = set(self._completed_tool_ids.get(run_id, set()))
+            completed = set(finish_ctx.completed_tool_ids if finish_ctx else set())
             cp = self.storage.load_checkpoint(run_id)
             if cp:
                 completed |= set(cp.completed_tool_call_ids)
@@ -1472,7 +1541,7 @@ class RunEngine:
                 pending = [
                     tc
                     for tc in (
-                        self._pending_tool_calls.get(run_id)
+                        (finish_ctx.pending_tool_calls if finish_ctx else None)
                         or (cp.pending_tool_calls if cp else [])
                     )
                     if tc.id not in completed
@@ -1480,7 +1549,7 @@ class RunEngine:
             # Keep multi-turn session history in the terminal checkpoint for resume.
             # Do NOT replace with storage-only rows (they lack prior-run context).
             if messages is not None:
-                self._run_messages[run_id] = messages
+                self._ctx(run_id).run_messages = messages
             finish_messages = self._checkpoint_messages_for_run(run_id)
             if messages is not None and len(messages) >= len(finish_messages):
                 finish_messages = list(messages)

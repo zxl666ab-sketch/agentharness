@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from agentharness.contracts import (
+    ApprovalDecision,
     ApprovalMode,
     BudgetConfig,
     ModelStreamItem,
@@ -24,8 +25,21 @@ from agentharness.contracts import (
 )
 from agentharness.harness import Harness
 from agentharness.providers.fake import FakeModelAdapter
+from agentharness.security.egress import EgressPolicy
 from agentharness.security.redaction import Redactor
 from agentharness.tools.mcp_tool import MCPBridge
+
+
+def _loopback_policy() -> EgressPolicy:
+    """Egress policy that trusts loopback for tests hitting a local HTTP server.
+
+    This is an explicit, test-only trusted allowlist injected via DI — the
+    production default policy still blocks loopback/private ranges.
+    """
+    return EgressPolicy.from_config(
+        allow_hosts=["127.0.0.1", "localhost"],
+        allow_cidrs=["127.0.0.0/8", "::1/128"],
+    )
 
 
 class _LocalHandler(BaseHTTPRequestHandler):
@@ -83,7 +97,7 @@ def local_http_url():
 async def test_http_tool_uses_local_service_and_enforces_timeout(
     data_dir: Path, workspace: Path, local_http_url: str
 ):
-    harness = Harness(data_dir=data_dir)
+    harness = Harness(data_dir=data_dir, egress_policy=_loopback_policy())
     try:
         success = await harness.run(
             RunRequest(
@@ -119,7 +133,7 @@ async def test_http_tool_uses_local_service_and_enforces_timeout(
 async def test_http_tool_stops_reading_after_response_limit(
     data_dir: Path, workspace: Path, local_http_url: str
 ):
-    harness = Harness(data_dir=data_dir)
+    harness = Harness(data_dir=data_dir, egress_policy=_loopback_policy())
     try:
         result = await harness.run(
             RunRequest(
@@ -185,7 +199,9 @@ async def test_browser_tool_real_local_flow_and_harness_cleanup(
             {"kind": "text", "text": "browser flow complete"},
         ]
     )
-    harness = Harness(data_dir=data_dir, providers={"fake": provider})
+    harness = Harness(
+        data_dir=data_dir, providers={"fake": provider}, egress_policy=_loopback_policy()
+    )
     browser = harness.tools["browser"]
     try:
         result = await asyncio.wait_for(
@@ -250,7 +266,9 @@ async def test_browser_goto_honors_timeout_and_cleanup(
             {"kind": "text", "text": "timeout observed"},
         ]
     )
-    harness = Harness(data_dir=data_dir, providers={"fake": provider})
+    harness = Harness(
+        data_dir=data_dir, providers={"fake": provider}, egress_policy=_loopback_policy()
+    )
     started = time.monotonic()
     try:
         result = await asyncio.wait_for(
@@ -275,6 +293,12 @@ async def test_browser_goto_honors_timeout_and_cleanup(
 @pytest.mark.asyncio
 async def test_mcp_unavailable_is_isolated_as_tool_error(data_dir: Path, workspace: Path):
     harness = Harness(data_dir=data_dir)
+
+    async def approve(_request):
+        # call_tool runs arbitrary remote code → destructive → requires approval.
+        return ApprovalDecision.allow_once
+
+    harness.set_approval_callback(approve)
     try:
         result = await harness.run(
             RunRequest(
@@ -499,7 +523,8 @@ async def test_read_file_limit_does_not_load_large_tail(
         await harness.aclose()
 
     assert result.status == RunStatus.completed
-    assert any(message.content == "head" for message in messages)
+    # read_file now preserves the trailing newline verbatim (no splitlines strip).
+    assert any(message.content == "head\n" for message in messages)
     assert peak < 8 * 1024 * 1024
 
 

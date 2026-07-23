@@ -36,6 +36,93 @@ def _cli_env() -> dict[str, str]:
     return env
 
 
+class _FakeCompletion:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _FakeCompleteState:
+    def __init__(self, current: _FakeCompletion | None) -> None:
+        self.current_completion = current
+
+
+class _FakeBuffer:
+    """Minimal prompt_toolkit Buffer stand-in that records handler effects."""
+
+    def __init__(self, current_completion: _FakeCompletion | None = None) -> None:
+        self.complete_state = (
+            _FakeCompleteState(current_completion) if current_completion else None
+        )
+        self.applied: _FakeCompletion | None = None
+        self.validated = False
+        self.cancelled = False
+        self.inserted = ""
+
+    def apply_completion(self, completion: _FakeCompletion) -> None:
+        self.applied = completion
+
+    def validate_and_handle(self) -> None:
+        self.validated = True
+
+    def cancel_completion(self) -> None:
+        self.cancelled = True
+
+    def insert_text(self, text: str) -> None:
+        self.inserted += text
+
+
+class _FakeEvent:
+    def __init__(self, buffer: _FakeBuffer) -> None:
+        self.current_buffer = buffer
+
+
+def _handler_for(keys: tuple[str, ...]):
+    from agentharness.cli.input import _composer_key_bindings
+
+    def _key_value(key: object) -> str:
+        return getattr(key, "value", str(key))
+
+    for binding in _composer_key_bindings().bindings:
+        if tuple(_key_value(k) for k in binding.keys) == keys:
+            return binding.handler
+    raise AssertionError(f"no binding for keys {keys}")
+
+
+def test_composer_enter_selects_active_completion_else_submits() -> None:
+    """Goal 6: Enter applies the highlighted completion, otherwise submits the line."""
+    enter = _handler_for(("c-m",))
+
+    # A completion is highlighted → Enter selects it, does not submit.
+    completion = _FakeCompletion("/model")
+    buffer = _FakeBuffer(current_completion=completion)
+    enter(_FakeEvent(buffer))
+    assert buffer.applied is completion
+    assert buffer.validated is False
+
+    # No completion highlighted → Enter submits the line.
+    plain = _FakeBuffer(current_completion=None)
+    enter(_FakeEvent(plain))
+    assert plain.applied is None
+    assert plain.validated is True
+
+
+def test_composer_alt_enter_inserts_newline() -> None:
+    """Goal 6: Alt+Enter (escape,enter) inserts a newline instead of submitting."""
+    handler = _handler_for(("escape", "c-m"))
+    buffer = _FakeBuffer()
+    handler(_FakeEvent(buffer))
+    assert buffer.inserted == "\n"
+    assert buffer.validated is False
+
+
+def test_composer_escape_closes_completion_menu() -> None:
+    """Goal 6: Esc cancels the open completion menu."""
+    handler = _handler_for(("escape",))
+    buffer = _FakeBuffer(current_completion=_FakeCompletion("/model"))
+    handler(_FakeEvent(buffer))
+    assert buffer.cancelled is True
+
+
 def test_bare_command_opens_interactive_help_and_quits(
     data_dir: Path, workspace: Path
 ) -> None:

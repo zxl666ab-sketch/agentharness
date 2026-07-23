@@ -13,9 +13,9 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.table import Table
 
-from agentharness.cli.input import async_redirected_input
 from agentharness.cli.config_store import apply_settings_to_harness, resolve_runtime_settings
-from agentharness.cli.provider_defaults import resolve_default_model, resolve_default_provider
+from agentharness.cli.input import async_redirected_input, async_tty_input
+from agentharness.cli.provider_defaults import resolve_default_provider
 from agentharness.contracts import (
     ApprovalDecision,
     ApprovalMode,
@@ -76,67 +76,10 @@ def _make_harness(
     return h
 
 
-def _resolve_input_future(
-    future: asyncio.Future[str], value: str | None, error: BaseException | None
-) -> None:
-    if future.done():
-        return
-    if error is not None:
-        future.set_exception(error)
-    else:
-        future.set_result(value or "")
-
-
 async def _console_input(prompt: str) -> str:
     """Cancellation-aware console input for approval prompts."""
-    if sys.platform == "win32" and sys.stdin.isatty():
-        import msvcrt
-
-        console.print(prompt, end="", markup=False, highlight=False)
-        chars: list[str] = []
-        while True:
-            while msvcrt.kbhit():
-                char = msvcrt.getwch()
-                if char in {"\x00", "\xe0"}:
-                    if msvcrt.kbhit():
-                        msvcrt.getwch()
-                    continue
-                if char in {"\r", "\n"}:
-                    console.print()
-                    return "".join(chars)
-                if char == "\x03":
-                    raise KeyboardInterrupt
-                if char == "\b":
-                    if chars:
-                        chars.pop()
-                        console.print("\b \b", end="", markup=False)
-                    continue
-                chars.append(char)
-                console.print(char, end="", markup=False, highlight=False)
-            await asyncio.sleep(0.03)
-
     if sys.stdin.isatty():
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        console.print(prompt, end="", markup=False, highlight=False)
-
-        def ready() -> None:
-            try:
-                value = sys.stdin.readline()
-                if value == "":
-                    raise EOFError
-                _resolve_input_future(future, value.rstrip("\r\n"), None)
-            except BaseException as exc:
-                _resolve_input_future(future, None, exc)
-
-        try:
-            loop.add_reader(sys.stdin.fileno(), ready)
-        except (AttributeError, NotImplementedError, OSError):
-            return await async_redirected_input(console, prompt)
-        try:
-            return await future
-        finally:
-            loop.remove_reader(sys.stdin.fileno())
+        return await async_tty_input(prompt)
 
     return await async_redirected_input(console, prompt)
 
@@ -206,8 +149,8 @@ def _root(
         run_interactive(
             harness=h,
             console=console,
-            provider=settings.provider,
-            model=settings.model,
+            provider=provider or "auto",
+            model=model,
             approval=approval,
             cwd=work,
             session_id=session,

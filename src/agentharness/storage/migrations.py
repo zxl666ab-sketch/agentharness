@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -143,6 +143,12 @@ MIGRATIONS: dict[int, str] = {
         requested_at TEXT NOT NULL,
         FOREIGN KEY (run_id) REFERENCES runs(id)
     );
+    """,
+    4: """
+    -- Covering index for the run-scoped events read path
+    -- (/api/runs/{id}/events, get_events(run_id=..., after_global_seq=...)).
+    -- Lets the filter+ORDER BY global_seq run off one index with no temp B-tree.
+    CREATE INDEX IF NOT EXISTS idx_events_run_global ON events(run_id, global_seq);
     """,
 }
 

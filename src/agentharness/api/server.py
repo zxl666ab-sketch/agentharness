@@ -16,6 +16,19 @@ from fastapi.staticfiles import StaticFiles
 from agentharness.harness import Harness
 
 
+def _dev_cors_origins() -> list[str]:
+    """Explicit dev origins from AGENTHARNESS_CORS_ORIGINS (comma-separated).
+
+    Empty by default: the web UI is served same-origin, so no cross-origin access
+    is granted in production. A wildcard (``*``) is never used — cross-origin is an
+    explicit, operator-set opt-in only.
+    """
+    import os
+
+    raw = os.environ.get("AGENTHARNESS_CORS_ORIGINS", "")
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
+
 def create_app(
     harness: Harness | None = None,
     data_dir: str | Path | None = None,
@@ -41,12 +54,16 @@ def create_app(
     app.state.harness = harness
     redactor = harness.redactor
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["GET", "HEAD", "OPTIONS"],
-        allow_headers=["*"],
-    )
+    # Same-origin by default (no CORS headers). Cross-origin access is only granted
+    # to explicit dev origins set via AGENTHARNESS_CORS_ORIGINS — never a wildcard.
+    cors_origins = _dev_cors_origins()
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_methods=["GET", "HEAD", "OPTIONS"],
+            allow_headers=["*"],
+        )
 
     # Reject all write methods globally
     @app.middleware("http")
@@ -93,9 +110,10 @@ def create_app(
     async def runs(
         session_id: str | None = None,
         limit: int = Query(100, ge=1, le=1000),
+        offset: int = Query(0, ge=0),
     ) -> list[dict[str, Any]]:
         return redactor.redact_obj(
-            harness.list_runs(session_id=session_id, limit=limit)
+            harness.list_runs(session_id=session_id, limit=limit, offset=offset)
         )
 
     @app.get("/api/runs/{run_id}")
@@ -170,15 +188,31 @@ def create_app(
         last_event_id: str | None = Header(None, alias="Last-Event-ID"),
         after: int | None = Query(None),
     ) -> StreamingResponse:
-        """SSE stream by global_seq with Last-Event-ID, replay, dedupe, heartbeat."""
-        start_seq = 0
-        if after is not None:
-            start_seq = after
-        elif last_event_id:
+        """SSE stream by global_seq with Last-Event-ID, replay, dedupe, heartbeat.
+
+        Resume-point priority (highest wins):
+          1. ``Last-Event-ID`` header — sent automatically by the browser EventSource on
+             reconnect (from the ``id:`` lines we emit). Always takes precedence: the stream
+             resumes at ``max(after, Last-Event-ID)`` so a reconnect never rewinds behind, nor
+             re-replays, events the client already saw.
+          2. ``after`` query param — explicit resume cursor for the initial connection.
+          3. Neither present — start at the current head (``max_global_seq``), i.e. live-only,
+             so a fresh client is not flooded with full history.
+
+        When both ``after`` and ``Last-Event-ID`` are present they are reconciled with
+        ``max(...)`` rather than one silently overriding the other; this keeps an idle
+        reconnect (stale ``after``, fresh ``Last-Event-ID``) from replaying old events.
+        """
+        if after is None and not last_event_id:
+            start_seq = harness.storage.max_global_seq()
+        else:
+            start_seq = after or 0
+        if last_event_id:
             try:
-                start_seq = int(last_event_id)
+                # Last-Event-ID wins on conflict: never resume behind what the client acked.
+                start_seq = max(start_seq, int(last_event_id))
             except ValueError:
-                start_seq = 0
+                pass
 
         async def event_generator():
             cursor = start_seq

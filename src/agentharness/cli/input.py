@@ -1,4 +1,4 @@
-﻿"""Shared redirected-stdin reader and TTY slash-command completion."""
+"""Redirected input and the prompt-toolkit TTY composer."""
 
 from __future__ import annotations
 
@@ -7,12 +7,21 @@ import os
 import queue
 import sys
 import threading
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
+from pathlib import Path
 from typing import Any
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.application.current import get_app
+from prompt_toolkit.completion import CompleteEvent, Completer, Completion, WordCompleter
+from prompt_toolkit.document import Document
+from prompt_toolkit.filters import has_completions
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import FileHistory, History, InMemoryHistory
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 
-# Slash commands offered for Tab completion in interactive mode.
 SLASH_COMMANDS: tuple[str, ...] = (
     "/help",
     "/new",
@@ -20,10 +29,45 @@ SLASH_COMMANDS: tuple[str, ...] = (
     "/use",
     "/model",
     "/provider",
+    "/profile",
     "/config",
     "/quit",
     "/exit",
 )
+
+COMMAND_DESCRIPTIONS: dict[str, str] = {
+    "/help": "Show interactive commands",
+    "/new": "Start a new session",
+    "/sessions": "List recent sessions",
+    "/use": "Continue a session",
+    "/model": "Choose or set the next model",
+    "/provider": "Choose the next provider",
+    "/profile": "Show, create, or activate a profile",
+    "/config": "Show or update masked configuration",
+    "/quit": "Exit the CLI",
+    "/exit": "Exit the CLI",
+}
+
+
+class SlashCommandCompleter(Completer):
+    """Offer commands immediately after `/` without requiring Tab."""
+
+    def __init__(self, commands: Sequence[str] = SLASH_COMMANDS) -> None:
+        self.commands = commands
+
+    def get_completions(
+        self, document: Document, complete_event: CompleteEvent
+    ) -> Iterable[Completion]:
+        before = document.text_before_cursor.lstrip()
+        if not before.startswith("/") or " " in before:
+            return
+        for command in match_slash_commands(before, self.commands):
+            yield Completion(
+                command,
+                start_position=-len(before),
+                display=command,
+                display_meta=COMMAND_DESCRIPTIONS.get(command, ""),
+            )
 
 
 class _RedirectedLineReader:
@@ -122,39 +166,130 @@ async def async_redirected_input(console: Console, prompt: str) -> str:
             await asyncio.sleep(0.03)
 
 
-def match_slash_commands(prefix: str, commands: Sequence[str] = SLASH_COMMANDS) -> list[str]:
-    """Return slash commands that start with ``prefix`` (case-sensitive)."""
+async def async_tty_input(prompt: str) -> str:
+    """Cancellation-aware prompt used while a run waits for approval."""
+    session: PromptSession[str] = PromptSession()
+    with patch_stdout(raw=True):
+        return await session.prompt_async(prompt)
+
+
+def match_slash_commands(
+    prefix: str, commands: Sequence[str] = SLASH_COMMANDS
+) -> list[str]:
     if not prefix.startswith("/"):
         return []
-    return [cmd for cmd in commands if cmd.startswith(prefix)]
+    return [command for command in commands if command.startswith(prefix)]
 
 
-def complete_slash_line(line: str, commands: Sequence[str] = SLASH_COMMANDS) -> tuple[str, list[str]]:
-    """Complete a partial slash command line.
-
-    Returns ``(new_line, candidates)``. When exactly one candidate matches,
-    ``new_line`` is that command (with a trailing space for multi-arg cmds).
-    """
+def complete_slash_line(
+    line: str, commands: Sequence[str] = SLASH_COMMANDS
+) -> tuple[str, list[str]]:
     stripped = line.lstrip()
-    if not stripped.startswith("/"):
-        return line, []
-    # Only complete the command token (before first space).
-    if " " in stripped:
+    if not stripped.startswith("/") or " " in stripped:
         return line, []
     matches = match_slash_commands(stripped, commands)
     if not matches:
         return line, []
     if len(matches) == 1:
-        cmd = matches[0]
-        # Commands that usually take an argument get a trailing space.
-        if cmd in {"/use", "/model", "/provider", "/config"}:
-            return cmd + " ", matches
-        return cmd, matches
-    # Expand shared prefix among matches.
-    shared = os.path.commonprefix(list(matches))
-    if shared and shared != stripped:
-        return shared, matches
-    return line, matches
+        command = matches[0]
+        if command in {"/use", "/model", "/provider", "/profile", "/config"}:
+            return command + " ", matches
+        return command, matches
+    shared = os.path.commonprefix(matches)
+    return (shared if shared and shared != stripped else line), matches
+
+
+def _composer_key_bindings() -> KeyBindings:
+    bindings = KeyBindings()
+
+    @bindings.add("enter")
+    def submit_or_select(event: Any) -> None:
+        buffer = event.current_buffer
+        if buffer.complete_state and buffer.complete_state.current_completion:
+            buffer.apply_completion(buffer.complete_state.current_completion)
+            return
+        buffer.validate_and_handle()
+
+    @bindings.add("escape", filter=has_completions)
+    def close_menu(event: Any) -> None:
+        event.current_buffer.cancel_completion()
+
+    @bindings.add("escape", "enter")
+    def insert_newline(event: Any) -> None:
+        event.current_buffer.insert_text("\n")
+
+    return bindings
+
+
+class TtyComposer:
+    """Bottom prompt whose prior output stays available in terminal scrollback."""
+
+    def __init__(
+        self,
+        commands: Sequence[str] = SLASH_COMMANDS,
+        *,
+        history_path: str | Path | None = None,
+    ) -> None:
+        history: History
+        if history_path is not None:
+            try:
+                Path(history_path).parent.mkdir(parents=True, exist_ok=True)
+                history = FileHistory(str(history_path))
+            except OSError:
+                history = InMemoryHistory()
+        else:
+            history = InMemoryHistory()
+        self._session: PromptSession[str] = PromptSession(
+            completer=SlashCommandCompleter(commands),
+            complete_while_typing=True,
+            key_bindings=_composer_key_bindings(),
+            multiline=True,
+            reserve_space_for_menu=min(12, len(commands)),
+            complete_in_thread=False,
+            history=history,
+        )
+
+    def read(self) -> str:
+        with patch_stdout(raw=True):
+            return self._session.prompt(
+                HTML("<ansicyan><b>you&gt;</b></ansicyan> "),
+                bottom_toolbar=HTML(
+                    " <b>Enter</b> send/select  <b>Alt+Enter</b> newline  "
+                    "<b>Tab</b> complete  <b>Esc</b> close "
+                ),
+            )
+
+    def choose(
+        self, title: str, choices: Sequence[str], current: str | None = None
+    ) -> str | None:
+        if not choices:
+            return None
+        bindings = KeyBindings()
+
+        @bindings.add("enter")
+        def accept_choice(event: Any) -> None:
+            buffer = event.current_buffer
+            if buffer.complete_state and buffer.complete_state.current_completion:
+                buffer.apply_completion(buffer.complete_state.current_completion)
+            buffer.validate_and_handle()
+
+        session: PromptSession[str] = PromptSession(
+            completer=WordCompleter(list(choices), sentence=True),
+            complete_while_typing=True,
+            key_bindings=bindings,
+            reserve_space_for_menu=min(10, len(choices)),
+        )
+
+        def open_menu() -> None:
+            get_app().current_buffer.start_completion(select_first=True)
+
+        with patch_stdout(raw=True):
+            value = session.prompt(
+                HTML(f"<ansicyan><b>{title}&gt;</b></ansicyan> "),
+                pre_run=open_menu,
+                bottom_toolbar=f" current: {current or '(provider default)'} ",
+            ).strip()
+        return value or None
 
 
 def readline_with_completion(
@@ -163,106 +298,7 @@ def readline_with_completion(
     *,
     commands: Sequence[str] = SLASH_COMMANDS,
 ) -> str:
-    """Read a line; on TTY, support Tab completion for slash commands.
-
-    Non-TTY / redirected stdin keeps the existing line-reader behaviour so
-    subprocess tests continue to work.
-    """
+    """Use prompt-toolkit only for a real TTY; keep redirected input stable."""
     if not sys.stdin.isatty():
         return redirected_input(console, prompt)
-
-    if sys.platform == "win32":
-        return _win_readline_with_completion(console, prompt, commands=commands)
-
-    # POSIX: prefer readline if available.
-    try:
-        import readline
-    except ImportError:
-        console.print(prompt, end="", markup=False, highlight=False)
-        return sys.stdin.readline().rstrip("\r\n")
-
-    def completer(text: str, state: int) -> str | None:
-        buf = readline.get_line_buffer()
-        if not buf.lstrip().startswith("/"):
-            return None
-        matches = match_slash_commands(buf.lstrip() if " " not in buf.lstrip() else text, commands)
-        # Prefer completing from the start of the token.
-        token = buf.lstrip().split(" ", 1)[0] if buf.lstrip().startswith("/") else text
-        matches = match_slash_commands(token, commands)
-        if state < len(matches):
-            return matches[state]
-        return None
-
-    prev = readline.get_completer()
-    readline.set_completer(completer)
-    try:
-        readline.parse_and_bind("tab: complete")
-    except Exception:
-        pass
-    try:
-        # rich Console.input uses prompt_toolkit-less input
-        return console.input(prompt)
-    finally:
-        readline.set_completer(prev)
-
-
-def _win_readline_with_completion(
-    console: Console,
-    prompt: str,
-    *,
-    commands: Sequence[str],
-) -> str:
-    import msvcrt
-
-    # Render prompt via Rich then read raw keys for Tab handling.
-    console.print(prompt, end="", markup=True, highlight=False)
-    chars: list[str] = []
-    while True:
-        ch = msvcrt.getwch()
-        if ch in {"\x00", "\xe0"}:
-            # Arrow / function keys — consume the follow-up scan code.
-            if msvcrt.kbhit() or True:
-                msvcrt.getwch()
-            continue
-        if ch in {"\r", "\n"}:
-            console.print()
-            return "".join(chars)
-        if ch == "\x03":
-            raise KeyboardInterrupt
-        if ch == "\x1a":  # Ctrl+Z → EOF on Windows consoles
-            raise EOFError
-        if ch == "\b":
-            if chars:
-                chars.pop()
-                sys.stdout.write("\b \b")
-                sys.stdout.flush()
-            continue
-        if ch == "\t":
-            line = "".join(chars)
-            new_line, matches = complete_slash_line(line, commands)
-            if not matches:
-                continue
-            if len(matches) == 1 or new_line != line:
-                # Replace visible input with completed text.
-                for _ in chars:
-                    sys.stdout.write("\b \b")
-                chars = list(new_line)
-                sys.stdout.write(new_line)
-                sys.stdout.flush()
-            else:
-                # Show candidates on the next line, re-draw prompt + buffer.
-                sys.stdout.write("\n")
-                sys.stdout.write("  " + "  ".join(matches) + "\n")
-                sys.stdout.flush()
-                # Re-print prompt without Rich markup for simplicity.
-                plain = prompt
-                # strip simple rich tags roughly
-                import re
-
-                plain = re.sub(r"\[/?[^\]]+\]", "", prompt)
-                sys.stdout.write(plain + "".join(chars))
-                sys.stdout.flush()
-            continue
-        chars.append(ch)
-        sys.stdout.write(ch)
-        sys.stdout.flush()
+    return TtyComposer(commands).read()

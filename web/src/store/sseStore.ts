@@ -6,7 +6,7 @@ type Listener = () => void;
 
 export type SseStatus = "connecting" | "live" | "error" | "closed";
 
-class SseStore {
+export class SseStore {
   status: SseStatus = "closed";
   lastSeq = 0;
   events: EventRow[] = [];
@@ -14,6 +14,10 @@ class SseStore {
   private listeners = new Set<Listener>();
   private reconnectTimer: number | null = null;
   private intentionalClose = false;
+  // Requested resume point of the live connection; used to dedupe redundant connect() calls.
+  private connectedAfter: number | null = null;
+  private pendingEmit = false;
+  private runEventSnapshots = new Map<string, EventRow[]>();
 
   subscribe = (fn: Listener) => {
     this.listeners.add(fn);
@@ -24,25 +28,49 @@ class SseStore {
     for (const fn of this.listeners) fn();
   }
 
+  private scheduleEmit() {
+    if (typeof globalThis.requestAnimationFrame !== "function") {
+      this.emit();
+      return;
+    }
+    if (this.pendingEmit) return;
+    this.pendingEmit = true;
+    globalThis.requestAnimationFrame(() => {
+      this.pendingEmit = false;
+      this.emit();
+    });
+  }
+
   connect(after = 0) {
+    // Dedupe: an active (connecting/live) stream at the same resume point needs no rebuild.
+    // Prevents StrictMode double-invoke and repeated connect() from restarting the stream
+    // and re-replaying history.
+    if (
+      this.source &&
+      this.connectedAfter === after &&
+      (this.status === "connecting" || this.status === "live")
+    ) {
+      return;
+    }
     this.disconnect(false);
     this.intentionalClose = false;
+    this.connectedAfter = after;
     this.status = "connecting";
     this.lastSeq = Math.max(this.lastSeq, after);
-    this.emit();
+    this.scheduleEmit();
     const url = `/api/stream?after=${this.lastSeq}`;
     const es = new EventSource(url);
     this.source = es;
 
     es.onopen = () => {
       this.status = "live";
-      this.emit();
+      this.scheduleEmit();
     };
 
     es.onerror = () => {
       if (this.intentionalClose) return;
       this.status = "error";
-      this.emit();
+      this.scheduleEmit();
       // Close broken stream and resume from lastSeq (avoids after=0 replay storms).
       try {
         es.close();
@@ -99,9 +127,12 @@ class SseStore {
       if (typeof data.global_seq !== "number") return;
       if (data.global_seq <= this.lastSeq) return;
       this.lastSeq = data.global_seq;
+      const evicted = this.events.length >= 2000 ? this.events[0] : undefined;
       this.events = [...this.events, data].slice(-2000);
+      this.runEventSnapshots.delete(data.run_id);
+      if (evicted) this.runEventSnapshots.delete(evicted.run_id);
       this.status = "live";
-      this.emit();
+      this.scheduleEmit();
     } catch {
       // ignore heartbeat comments / parse errors
     }
@@ -117,21 +148,30 @@ class SseStore {
       this.source.close();
       this.source = null;
     }
+    this.connectedAfter = null;
     if (markClosed) {
       this.status = "closed";
-      this.emit();
+      this.scheduleEmit();
     }
   }
 
-  eventsForRun(runId: string): EventRow[] {
-    return this.events.filter((e) => e.run_id === runId);
+  eventsForRun(runId: string | null): EventRow[] {
+    if (!runId) return EMPTY_EVENTS;
+    const cached = this.runEventSnapshots.get(runId);
+    if (cached) return cached;
+    const events = this.events.filter((event) => event.run_id === runId);
+    this.runEventSnapshots.set(runId, events);
+    return events;
   }
 
   clear() {
     this.events = [];
     this.lastSeq = 0;
-    this.emit();
+    this.runEventSnapshots.clear();
+    this.scheduleEmit();
   }
 }
+
+const EMPTY_EVENTS: EventRow[] = [];
 
 export const sseStore = new SseStore();

@@ -45,7 +45,9 @@ class ReadFileTool:
             parts: list[str] = []
             truncated = False
             chunks_seen = 0
-            with target.open("r", encoding="utf-8", errors="replace") as handle:
+            with target.open(
+                "r", encoding="utf-8", errors="replace", newline=""
+            ) as handle:
                 line_number = 0
                 while line_number < offset:
                     segment = handle.readline(64 * 1024)
@@ -94,7 +96,9 @@ class ReadFileTool:
                             )
                         await asyncio.sleep(0)
 
-            body = "\n".join("".join(parts)[:100_000].splitlines())
+            # Preserve original bytes/newlines verbatim (no splitlines normalization,
+            # which would collapse \r\n / \r and Unicode line separators).
+            body = "".join(parts)[:100_000]
             if truncated:
                 body += "\n...[truncated]"
             return ToolResult(tool_call_id="", name="read_file", content=body)

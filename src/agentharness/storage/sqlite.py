@@ -57,10 +57,42 @@ class Storage:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         with self._lock:
             apply_migrations(self._conn)
+        # Per-thread read-only connections. WAL lets readers run concurrently with the
+        # single writer (self._conn) without acquiring self._lock, so API reads no longer
+        # contend with child-run event writes. Each thread gets its own RO connection
+        # because a single sqlite3 connection is not safe for concurrent use.
+        self._read_local = threading.local()
+        self._read_conns: list[sqlite3.Connection] = []
+        self._read_conns_lock = threading.Lock()
+
+    def _reader(self) -> sqlite3.Connection:
+        """Return this thread's read-only connection, creating it on first use."""
+        conn = getattr(self._read_local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(
+                f"file:{self.db_path}?mode=ro",
+                uri=True,
+                check_same_thread=False,
+                isolation_level=None,
+            )
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            self._read_local.conn = conn
+            with self._read_conns_lock:
+                self._read_conns.append(conn)
+        return conn
 
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+        with self._read_conns_lock:
+            for conn in self._read_conns:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            self._read_conns.clear()
+        self._read_local = threading.local()
 
     def integrity_check(self) -> str:
         with self._lock:
@@ -116,22 +148,29 @@ class Storage:
                 )
 
     def list_sessions(self, limit: int = 100) -> list[dict[str, Any]]:
-        with self._lock:
-            rows = self._conn.execute(
-                """
-                SELECT sessions.*
-                FROM sessions
-                LEFT JOIN (
-                    SELECT session_id, MAX(rowid) AS activity_order
-                    FROM runs
-                    WHERE parent_run_id IS NULL
-                    GROUP BY session_id
-                ) AS recent ON recent.session_id = sessions.id
-                ORDER BY COALESCE(recent.activity_order, 0) DESC, sessions.rowid DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+        # Enrich the latest top-level run (status/id/error) in the SAME query via a
+        # join on the recent-activity rowid, so the observer UI left column needs no
+        # per-session follow-up query (was an N+1 in Harness._enrich_session). Reader
+        # connection — no writer-lock contention.
+        rows = self._reader().execute(
+            """
+            SELECT sessions.*,
+                   latest.id AS latest_run_id,
+                   latest.status AS latest_status,
+                   latest.error AS latest_error
+            FROM sessions
+            LEFT JOIN (
+                SELECT session_id, MAX(rowid) AS activity_order
+                FROM runs
+                WHERE parent_run_id IS NULL
+                GROUP BY session_id
+            ) AS recent ON recent.session_id = sessions.id
+            LEFT JOIN runs AS latest ON latest.rowid = recent.activity_order
+            ORDER BY COALESCE(recent.activity_order, 0) DESC, sessions.rowid DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
         return [dict(r) for r in rows]
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
@@ -148,7 +187,7 @@ class Storage:
                 """SELECT * FROM runs
                    WHERE session_id = ?
                      AND (parent_run_id IS NULL OR parent_run_id = '')
-                   ORDER BY created_at ASC, id ASC""",
+                   ORDER BY created_at ASC, rowid ASC""",
                 (session_id,),
             ).fetchall()
         return [dict(r) for r in rows]
@@ -161,7 +200,7 @@ class Storage:
                    WHERE session_id = ?
                      AND (parent_run_id IS NULL OR parent_run_id = '')
                      AND status = 'completed'
-                   ORDER BY created_at ASC, id ASC""",
+                   ORDER BY created_at ASC, rowid ASC""",
                 (session_id,),
             ).fetchall()
         return [dict(r) for r in rows]
@@ -283,41 +322,106 @@ class Storage:
                 raise
         return assigned
 
+    # Single enrichment projection reused by get_run / list_runs / get_run_tree so
+    # child_count + user_summary + depth come from one statement (no per-row N+1)
+    # and every read runs on the RO connection (no writer-lock contention).
+    _RUN_PROJECTION = """
+        SELECT r.*,
+               substr((
+                   SELECT m.content FROM messages AS m
+                   WHERE m.run_id = r.id AND m.role = 'user'
+                   ORDER BY m.seq ASC LIMIT 1
+               ), 1, 500) AS user_summary,
+               COALESCE(r.delegate_depth, 0) AS depth,
+               (
+                   SELECT COUNT(*) FROM runs AS child
+                   WHERE child.parent_run_id = r.id
+               ) AS child_count
+        FROM runs AS r
+    """
+
     def get_run(self, run_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            row = self._conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
-        return dict(row) if row else None
+        row = self._reader().execute(
+            self._RUN_PROJECTION + " WHERE r.id = ?", (run_id,)
+        ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        self._decorate_run_observability(result)
+        return result
 
     def list_runs(
         self,
         session_id: str | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
-        with self._lock:
-            if session_id:
-                rows = self._conn.execute(
-                    "SELECT * FROM runs WHERE session_id = ? ORDER BY created_at DESC LIMIT ?",
-                    (session_id, limit),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT * FROM runs ORDER BY created_at DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
-        return [dict(r) for r in rows]
+        reader = self._reader()
+        if session_id:
+            rows = reader.execute(
+                self._RUN_PROJECTION
+                + " WHERE r.session_id = ? "
+                "ORDER BY r.created_at DESC, r.rowid DESC LIMIT ? OFFSET ?",
+                (session_id, limit, offset),
+            ).fetchall()
+        else:
+            rows = reader.execute(
+                self._RUN_PROJECTION
+                + " ORDER BY r.created_at DESC, r.rowid DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        result = [dict(r) for r in rows]
+        for row in result:
+            self._decorate_run_observability(row)
+        return result
+
+    def _decorate_run_observability(self, row: dict[str, Any]) -> None:
+        metadata: dict[str, Any] = {}
+        try:
+            decoded = json.loads(row.get("metadata_json") or "{}")
+            if isinstance(decoded, dict):
+                metadata = decoded
+        except (TypeError, json.JSONDecodeError):
+            pass
+        row.setdefault(
+            "actor",
+            metadata.get("actor") or ("delegate" if row.get("parent_run_id") else "user"),
+        )
+        row.setdefault("depth", int(row.get("delegate_depth") or 0))
+        if "child_count" not in row:
+            with self._lock:
+                child = self._conn.execute(
+                    "SELECT COUNT(*) FROM runs WHERE parent_run_id = ?", (row["id"],)
+                ).fetchone()
+            row["child_count"] = int(child[0]) if child else 0
+        if "user_summary" not in row:
+            with self._lock:
+                summary = self._conn.execute(
+                    """SELECT substr(content, 1, 500) FROM messages
+                       WHERE run_id = ? AND role = 'user'
+                       ORDER BY seq ASC LIMIT 1""",
+                    (row["id"],),
+                ).fetchone()
+            row["user_summary"] = summary[0] if summary else None
 
     def get_run_tree(self, run_id: str) -> list[dict[str, Any]]:
-        """Return run and all descendants."""
-        run = self.get_run(run_id)
-        if not run:
+        """Return run and all descendants (reader path, enriched in one query each)."""
+        reader = self._reader()
+        head = reader.execute(
+            "SELECT root_run_id FROM runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if not head:
             return []
-        root = run["root_run_id"] or run_id
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM runs WHERE root_run_id = ? ORDER BY created_at ASC",
-                (root,),
-            ).fetchall()
-        return [dict(r) for r in rows]
+        root = head["root_run_id"] or run_id
+        rows = reader.execute(
+            self._RUN_PROJECTION
+            + " WHERE r.root_run_id = ? ORDER BY r.created_at ASC, r.rowid ASC",
+            (root,),
+        ).fetchall()
+        result = [dict(r) for r in rows]
+        for row in result:
+            self._decorate_run_observability(row)
+        return result
 
     def request_stop(self, run_id: str, mode: str) -> None:
         with self._lock:
@@ -330,10 +434,11 @@ class Storage:
             )
 
     def get_stop_request(self, run_id: str) -> str | None:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT mode FROM stop_requests WHERE run_id = ?", (run_id,)
-            ).fetchone()
+        # Hot-path watcher poll: use the RO connection so polling never contends
+        # with the writer lock. WAL gives the reader the latest committed value.
+        row = self._reader().execute(
+            "SELECT mode FROM stop_requests WHERE run_id = ?", (run_id,)
+        ).fetchone()
         return str(row[0]) if row else None
 
     def clear_stop_request(self, run_id: str) -> None:
@@ -403,30 +508,38 @@ class Storage:
         after_global_seq: int = 0,
         limit: int = 500,
     ) -> list[EventEnvelope]:
-        with self._lock:
-            if run_id:
-                rows = self._conn.execute(
-                    """SELECT * FROM events
-                       WHERE run_id = ? AND global_seq > ?
-                       ORDER BY global_seq ASC LIMIT ?""",
-                    (run_id, after_global_seq, limit),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    """SELECT * FROM events
-                       WHERE global_seq > ?
-                       ORDER BY global_seq ASC LIMIT ?""",
-                    (after_global_seq, limit),
-                ).fetchall()
+        reader = self._reader()
+        if run_id:
+            rows = reader.execute(
+                """SELECT * FROM events
+                   WHERE run_id = ? AND global_seq > ?
+                   ORDER BY global_seq ASC LIMIT ?""",
+                (run_id, after_global_seq, limit),
+            ).fetchall()
+        else:
+            rows = reader.execute(
+                """SELECT * FROM events
+                   WHERE global_seq > ?
+                   ORDER BY global_seq ASC LIMIT ?""",
+                (after_global_seq, limit),
+            ).fetchall()
         return [self._row_to_event(r) for r in rows]
 
     def iter_events_after(self, after_global_seq: int = 0) -> Iterator[EventEnvelope]:
         yield from self.get_events(after_global_seq=after_global_seq, limit=10_000)
 
     def max_global_seq(self) -> int:
-        with self._lock:
-            row = self._conn.execute("SELECT COALESCE(MAX(global_seq), 0) FROM events").fetchone()
+        row = self._reader().execute(
+            "SELECT COALESCE(MAX(global_seq), 0) FROM events"
+        ).fetchone()
         return int(row[0])
+
+    def explain_query_plan(self, sql: str, params: tuple[Any, ...] = ()) -> list[str]:
+        """Return the EXPLAIN QUERY PLAN detail rows for a read query (test/diagnostics)."""
+        rows = self._reader().execute(
+            f"EXPLAIN QUERY PLAN {sql}", params
+        ).fetchall()
+        return [str(r["detail"]) for r in rows]
 
     def _row_to_event(self, row: sqlite3.Row) -> EventEnvelope:
         return EventEnvelope(

@@ -20,6 +20,7 @@ dependencies = [
     "aiosqlite>=0.20",
     "anyio>=4.4",
     "python-multipart>=0.0.9",
+    "prompt-toolkit>=3.0.48",
 ]
 
 [project.optional-dependencies]

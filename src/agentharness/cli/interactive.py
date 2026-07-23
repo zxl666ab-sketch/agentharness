@@ -7,19 +7,23 @@ import sys
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape as _escape
 from rich.table import Table
 
 from agentharness.cli.config_store import (
     KNOWN_PROVIDERS,
     RuntimeSettings,
+    activate_profile,
     apply_settings_to_harness,
     config_path,
+    create_profile,
     load_config,
     mask_secret,
+    model_choices,
     resolve_runtime_settings,
     update_provider_fields,
 )
-from agentharness.cli.input import SLASH_COMMANDS, readline_with_completion, redirected_input
+from agentharness.cli.input import SLASH_COMMANDS, TtyComposer, redirected_input
 from agentharness.contracts import ApprovalMode, EventType, RunRequest, RunResult
 from agentharness.harness import Harness
 
@@ -43,12 +47,17 @@ def _print_help(console: Console) -> None:
     table.add_row("/use <session>", "Continue an existing session")
     table.add_row("/model [name]", "Show or set model (persisted)")
     table.add_row("/provider [name]", "Show or set provider (fake|openai|anthropic)")
+    table.add_row("/profile [name]", "List or activate named profiles")
+    table.add_row("/profile create <name> <provider>", "Create and activate a profile")
     table.add_row("/config", "Show provider config (keys masked)")
     table.add_row("/config set <key> <value>", "Set api_key|base_url|model for active provider")
     table.add_row("/help", "Show this help")
     table.add_row("/quit", "Exit")
     console.print(table)
-    console.print("[dim]Tab completes slash commands in a TTY. Secrets stay in data-dir cli_config.json.[/dim]")
+    console.print(
+        "[dim]Slash commands open as you type. Alt+Enter inserts a newline. "
+        "Secrets stay in data-dir cli_config.json.[/dim]"
+    )
 
 
 def _print_sessions(harness: Harness, console: Console) -> None:
@@ -105,6 +114,7 @@ def _print_config(console: Console, data_dir: Path, settings: RuntimeSettings) -
     table.add_row("data_dir", str(data_dir))
     table.add_row("config_file", str(config_path(data_dir)))
     table.add_row("provider", settings.provider)
+    table.add_row("profile", settings.profile or "(legacy/default)")
     table.add_row("model", settings.model or "(provider default)")
     table.add_row("source", settings.source)
     table.add_row("api_key", mask_secret(pcfg.get("api_key") or settings.api_key))
@@ -166,12 +176,25 @@ def _handle_model_command(
     console: Console,
     data_dir: Path,
     settings: RuntimeSettings,
+    composer: TtyComposer | None = None,
 ) -> RuntimeSettings:
     parts = line.split(maxsplit=1)
     if len(parts) == 1:
-        console.print(f"model=[cyan]{settings.model or '(provider default)'}[/cyan]  provider={settings.provider}")
-        return settings
-    name = parts[1].strip()
+        choices = model_choices(data_dir, settings.profile)
+        if composer is not None and choices:
+            name = composer.choose("model", choices, settings.model)
+            if name is None:
+                return settings
+        else:
+            console.print(
+                f"model=[cyan]{settings.model or '(provider default)'}[/cyan]  "
+                f"provider={settings.provider}"
+            )
+            if choices:
+                console.print("models: " + ", ".join(choices), markup=False)
+            return settings
+    else:
+        name = parts[1].strip()
     if not name:
         console.print("[yellow]Usage: /model <name>[/yellow]")
         return settings
@@ -179,6 +202,71 @@ def _handle_model_command(
     settings = resolve_runtime_settings(data_dir, provider=settings.provider, model=name)
     apply_settings_to_harness(harness, settings)
     console.print(f"[green]model set[/green]: {settings.model} (provider={settings.provider})")
+    return settings
+
+
+def _print_profiles(console: Console, data_dir: Path, active: str | None) -> None:
+    profiles = load_config(data_dir).get("profiles") or {}
+    if not profiles:
+        console.print("[dim]No named profiles yet.[/dim]")
+        return
+    table = Table(title="Profiles", box=None)
+    table.add_column("active", no_wrap=True)
+    table.add_column("name", style="cyan")
+    table.add_column("provider")
+    table.add_column("model")
+    for name, entry in profiles.items():
+        table.add_row(
+            "*" if name == active else "",
+            str(name),
+            str(entry.get("provider") or "-"),
+            str(entry.get("model") or "(default)"),
+        )
+    console.print(table)
+
+
+def _handle_profile_command(
+    line: str,
+    *,
+    harness: Harness,
+    console: Console,
+    data_dir: Path,
+    settings: RuntimeSettings,
+    composer: TtyComposer | None = None,
+) -> RuntimeSettings:
+    parts = line.split()
+    profiles = load_config(data_dir).get("profiles") or {}
+    if len(parts) == 1:
+        if composer is None:
+            _print_profiles(console, data_dir, settings.profile)
+            return settings
+        name = composer.choose("profile", list(profiles), settings.profile)
+        if name is None:
+            return settings
+    elif len(parts) == 4 and parts[1] == "create":
+        name, provider = parts[2], parts[3].lower()
+        if provider not in KNOWN_PROVIDERS:
+            console.print(f"[yellow]Unknown provider:[/yellow] {provider}")
+            return settings
+        create_profile(data_dir, name, provider=provider)
+    elif len(parts) == 3 and parts[1] == "use":
+        name = parts[2]
+    elif len(parts) == 2:
+        name = parts[1]
+    else:
+        console.print("[yellow]Usage: /profile [name] | /profile use <name> | /profile create <name> <provider>[/yellow]")
+        return settings
+    try:
+        activate_profile(data_dir, name)
+    except KeyError:
+        console.print(f"[yellow]Profile not found:[/yellow] {name}")
+        return settings
+    settings = resolve_runtime_settings(data_dir)
+    apply_settings_to_harness(harness, settings)
+    console.print(
+        f"[green]profile set[/green]: {name}  provider={settings.provider}  "
+        f"model={settings.model or '(default)'}"
+    )
     return settings
 
 
@@ -224,20 +312,50 @@ def _run_turn(
 ) -> RunResult | None:
     saw_text = False
     active_run_id: str | None = None
+    line_open = False  # cursor is mid-line (after prompt prefix or a text delta)
+
+    def _newline_if_open() -> None:
+        nonlocal line_open
+        if line_open:
+            console.print()
+            line_open = False
 
     def on_event(event) -> None:
-        nonlocal saw_text, active_run_id
+        nonlocal saw_text, active_run_id, line_open
         event_type = event.type.value if hasattr(event.type, "value") else str(event.type)
         if event_type == EventType.run_started.value:
             active_run_id = event.run_id
-        if event_type == EventType.text_delta.value:
+        elif event_type == EventType.text_delta.value:
             text = str(event.payload.get("text") or "")
             if text:
                 saw_text = True
                 console.print(text, end="", markup=False, highlight=False, soft_wrap=True)
+                line_open = True
+        elif event_type == EventType.tool_call_start.value:
+            _newline_if_open()
+            name = _escape(str(event.payload.get("name") or "tool"))
+            console.print(f"[cyan]•[/cyan] [bold]{name}[/bold]")
+        elif event_type == EventType.tool_call_end.value:
+            args = str(event.payload.get("arguments_summary") or "").strip()
+            if args:
+                console.print(f"    [dim]{_escape(args)}[/dim]")
+        elif event_type == EventType.tool_result.value:
+            is_error = bool(event.payload.get("is_error"))
+            duration = event.payload.get("duration_ms")
+            preview = str(event.payload.get("content_preview") or "")
+            preview = " ".join(preview.split())
+            if len(preview) > 120:
+                preview = preview[:119] + "…"
+            tag = "[red]err[/red]" if is_error else "[green]ok[/green]"
+            dur = f" {int(duration)}ms" if isinstance(duration, (int, float)) else ""
+            line = f"    {tag}{dur}"
+            if preview:
+                line += f"  [dim]{_escape(preview)}[/dim]"
+            console.print(line)
 
     unsubscribe = harness.subscribe_events(on_event)
     console.print("[bold green]agent>[/bold green] ", end="")
+    line_open = True
     try:
         result = runner.run(
             harness.run(
@@ -252,23 +370,33 @@ def _run_turn(
             )
         )
     except KeyboardInterrupt:
-        console.print()
+        _newline_if_open()
         suffix = f" {active_run_id[:12]}" if active_run_id else ""
         console.print(
             f"[yellow]Interrupted{suffix}. Use `agentharness resume <run_id>` "
             "to continue.[/yellow]"
         )
         return None
+    except Exception as exc:  # keep the REPL alive on provider/tool faults
+        _newline_if_open()
+        console.print(f"[red]error:[/red] {_escape(str(exc))}")
+        return None
     finally:
         unsubscribe()
 
     if not saw_text and result.output:
+        _newline_if_open()
         console.print(result.output, markup=False, highlight=False, soft_wrap=True)
     else:
-        console.print()
+        _newline_if_open()
+    usage = result.usage
+    tokens = ""
+    if usage and (usage.input_tokens or usage.output_tokens):
+        tokens = f"  tokens={usage.input_tokens}/{usage.output_tokens}"
     console.print(
         f"[dim]status={result.status.value}  run={result.run_id[:12]}  "
-        f"session={result.session_id[:12]}  provider={provider}  model={model or '-'}[/dim]"
+        f"session={result.session_id[:12]}  provider={provider}  model={model or '-'}"
+        f"{tokens}[/dim]"
     )
     if result.error:
         console.print(f"[red]error:[/red] {result.error}")
@@ -311,16 +439,17 @@ def run_interactive(
     apply_settings_to_harness(harness, settings)
     _print_banner(console, settings, approval)
     current_session_id = session_id
+    composer = (
+        TtyComposer(SLASH_COMMANDS, history_path=dd / "cli_history")
+        if sys.stdin.isatty()
+        else None
+    )
     runner = asyncio.Runner()
     try:
         while True:
             try:
-                if sys.stdin.isatty():
-                    raw_line = readline_with_completion(
-                        console,
-                        "[bold cyan]you>[/bold cyan] ",
-                        commands=SLASH_COMMANDS,
-                    )
+                if composer is not None:
+                    raw_line = composer.read()
                 else:
                     raw_line = redirected_input(console, "you> ")
                 line = raw_line.lstrip("\ufeff").strip()
@@ -328,8 +457,8 @@ def run_interactive(
                 console.print()
                 return
             except KeyboardInterrupt:
-                console.print("\n[yellow]No run is active. Use /quit to exit.[/yellow]")
-                continue
+                console.print("\n[yellow]No run is active; exiting.[/yellow]")
+                return
 
             if not line:
                 continue
@@ -355,12 +484,27 @@ def run_interactive(
                 continue
             if line == "/model" or line.startswith("/model "):
                 settings = _handle_model_command(
-                    line, harness=harness, console=console, data_dir=dd, settings=settings
+                    line,
+                    harness=harness,
+                    console=console,
+                    data_dir=dd,
+                    settings=settings,
+                    composer=composer,
                 )
                 continue
             if line == "/provider" or line.startswith("/provider "):
                 settings = _handle_provider_command(
                     line, harness=harness, console=console, data_dir=dd, settings=settings
+                )
+                continue
+            if line == "/profile" or line.startswith("/profile "):
+                settings = _handle_profile_command(
+                    line,
+                    harness=harness,
+                    console=console,
+                    data_dir=dd,
+                    settings=settings,
+                    composer=composer,
                 )
                 continue
             if line == "/config" or line.startswith("/config "):

@@ -24,6 +24,7 @@ from agentharness.engine.runtime import ApprovalCallback, RunEngine
 from agentharness.providers.anthropic_adapter import AnthropicMessagesAdapter
 from agentharness.providers.fake import FakeModelAdapter
 from agentharness.providers.openai_adapter import OpenAIResponsesAdapter
+from agentharness.security.egress import EgressPolicy, default_policy
 from agentharness.security.redaction import Redactor, default_redactor
 from agentharness.storage.sqlite import Storage
 from agentharness.tools import create_default_tools
@@ -43,18 +44,23 @@ class Harness:
         approval_callback: ApprovalCallback | None = None,
         providers: dict[str, Any] | None = None,
         tools: dict[str, Any] | None = None,
+        egress_policy: EgressPolicy | None = None,
     ) -> None:
         if data_dir is None:
             data_dir = Path.home() / ".agentharness"
         self.data_dir = Path(data_dir).expanduser()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.redactor = redactor or default_redactor
+        # Default-secure egress policy shared by every outbound tool (http/browser/MCP).
+        # Trusted hosts/CIDRs come only from injected config, never from model arguments.
+        self.egress_policy = egress_policy or default_policy()
         self.storage = Storage(self.data_dir, redactor=self.redactor)
-        self.mcp_bridge = MCPBridge(redactor=self.redactor)
+        self.mcp_bridge = MCPBridge(redactor=self.redactor, policy=self.egress_policy)
         self._process_registry: dict[str, list[Any]] = {}
         self.tools: dict[str, Any] = tools or create_default_tools(
             process_registry=self._process_registry,
             mcp_bridge=self.mcp_bridge,
+            egress_policy=self.egress_policy,
         )
         self.providers: dict[str, Any] = providers or {
             "fake": FakeModelAdapter(),
@@ -104,9 +110,9 @@ class Harness:
         return self.storage.get_run(run_id)
 
     def list_runs(
-        self, session_id: str | None = None, limit: int = 100
+        self, session_id: str | None = None, limit: int = 100, offset: int = 0
     ) -> list[dict[str, Any]]:
-        return self.storage.list_runs(session_id=session_id, limit=limit)
+        return self.storage.list_runs(session_id=session_id, limit=limit, offset=offset)
 
     def list_sessions(self, limit: int = 100) -> list[dict[str, Any]]:
         """List sessions with latest top-level run status for the observer UI."""
@@ -120,10 +126,20 @@ class Harness:
         return self._enrich_session(sess)
 
     def _enrich_session(self, sess: dict[str, Any]) -> dict[str, Any]:
-        """Attach latest top-level run status / id / error for UI left column."""
+        """Attach latest top-level run status / id / error for UI left column.
+
+        list_sessions already resolves these in one SQL query. For get_session (a
+        bare session row without the join), fall back to a single scoped list_runs.
+        """
         out = dict(sess)
         sid = out.get("id")
         if not sid:
+            return out
+        if "latest_status" in out or "latest_run_id" in out:
+            # Already enriched by list_sessions' join — normalize missing keys.
+            out.setdefault("latest_status", None)
+            out.setdefault("latest_run_id", None)
+            out.setdefault("latest_error", None)
             return out
         runs = self.storage.list_runs(session_id=sid, limit=50)
         top = [r for r in runs if not r.get("parent_run_id")]

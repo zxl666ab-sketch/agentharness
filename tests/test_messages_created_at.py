@@ -1,5 +1,5 @@
-﻿from pathlib import Path
-from datetime import datetime, timezone
+﻿from datetime import UTC, datetime
+from pathlib import Path
 
 from agentharness.contracts import Message, MessageRole, RunStatus
 from agentharness.storage.sqlite import Storage
@@ -20,7 +20,7 @@ def test_get_messages_preserves_created_at(tmp_path: Path) -> None:
             approval="auto",
             cwd=str(tmp_path),
         )
-        stamped = datetime(2026, 7, 23, 4, 36, 27, tzinfo=timezone.utc)
+        stamped = datetime(2026, 7, 23, 4, 36, 27, tzinfo=UTC)
         storage.save_message(
             run_id,
             sid,

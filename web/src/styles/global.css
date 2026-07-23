@@ -80,6 +80,22 @@ pre {
   font-family: var(--mono);
 }
 
+/* Goal 8: long JSON / tool args / results must wrap, never force horizontal scroll.
+   Applies to every <pre> (inspector JSON, tool output) and the trace/timeline rows. */
+pre,
+.inspector-json,
+.timeline-row,
+.trace-row {
+  min-width: 0;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+pre,
+.inspector-json {
+  white-space: pre-wrap;
+}
+
 .app-shell {
   display: flex;
   width: 100%;
@@ -296,7 +312,11 @@ pre {
 .run-list {
   min-height: 0;
   flex: 1;
-  overflow: auto;
+  overflow: hidden;
+}
+
+.run-list-virtual {
+  height: 100%;
 }
 
 .run-item {
@@ -714,6 +734,17 @@ pre {
   color: var(--danger);
 }
 
+.failure-section {
+  border-left: 2px solid var(--danger);
+  background: var(--danger-soft);
+}
+
+.recovery-command code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+}
+
 .definition pre {
   grid-column: 1 / -1;
   max-height: 260px;
@@ -792,6 +823,17 @@ pre {
   font-size: 10px;
 }
 
+.tree-identity {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.tree-identity small {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
 .context-section details {
   border-top: 1px solid var(--border);
 }
@@ -839,15 +881,80 @@ pre {
   font-size: 10px;
 }
 
-.empty-state {
-  display: grid;
+.panel-state {
+  display: flex;
   min-height: 120px;
   flex: 1;
-  place-items: center;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
   padding: 24px;
   color: var(--text-muted);
+  text-align: left;
+}
+
+.panel-state > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.panel-state strong {
+  color: var(--text);
   font-size: 11px;
-  text-align: center;
+  font-weight: 600;
+}
+
+.panel-state small {
+  max-width: 300px;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+}
+
+.panel-state.error {
+  color: var(--danger);
+}
+
+.panel-state.streaming,
+.panel-state.done {
+  color: var(--accent);
+}
+
+.panel-state.compact {
+  min-height: 32px;
+  flex: 0 0 32px;
+  justify-content: flex-start;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-subtle);
+}
+
+.panel-state.compact > span {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.panel-state.loading svg {
+  animation: state-spin 900ms linear infinite;
+}
+
+.panel-state.streaming svg,
+.live-state.live > span {
+  animation: live-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes state-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes live-pulse {
+  50% {
+    opacity: 0.45;
+  }
 }
 
 .mobile-tabs {
@@ -875,6 +982,19 @@ pre {
 .mobile-tabs button.active {
   color: var(--accent);
   box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.mobile-tabs button > span {
+  display: grid;
+  place-items: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel-state.loading svg,
+  .panel-state.streaming svg,
+  .live-state.live > span {
+    animation: none;
+  }
 }
 
 @media (max-width: 1180px) and (min-width: 861px) {

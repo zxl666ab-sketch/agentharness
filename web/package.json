@@ -9,7 +9,7 @@
     "lint": "eslint . --ext ts,tsx --max-warnings 0",
     "test": "vitest run",
     "preview": "vite preview",
-    "e2e": "playwright test"
+    "e2e": "npm run build && playwright test"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.51.0",

@@ -79,7 +79,8 @@ async def test_cli_approval_deny(data_dir, workspace):
     assert result.status == RunStatus.completed
     assert not (workspace / "x.txt").exists()
     events = h.get_events(run_id=result.run_id)
-    assert any(e.type == "approval_requested" for e in events)
+    approval = next(e for e in events if e.type == "approval_requested")
+    assert approval.payload["tool_call_id"]
     h.close()
 
 
@@ -107,6 +108,22 @@ async def test_parent_child_delegate_and_failure_isolation(data_dir, workspace):
     child = [r for r in tree if r["parent_run_id"] == result.run_id]
     assert child
     assert child[0]["status"] == "completed"
+    parent_events = h.get_events(run_id=result.run_id)
+    child_started = next(e for e in parent_events if e.type == "child_run_started")
+    child_ended = next(e for e in parent_events if e.type == "child_run_ended")
+    assert child_started.payload == {
+        "child_run_id": child[0]["id"],
+        "parent_tool_call_id": child_started.payload["parent_tool_call_id"],
+        "actor": "delegate",
+        "depth": 1,
+        "status": "running",
+    }
+    assert child_started.payload["parent_tool_call_id"]
+    assert child_ended.payload["child_run_id"] == child[0]["id"]
+    assert child_ended.payload["parent_tool_call_id"] == child_started.payload["parent_tool_call_id"]
+    assert child_ended.payload["actor"] == "delegate"
+    assert child_ended.payload["depth"] == 1
+    assert child_ended.payload["status"] == "completed"
 
     # Failure isolation: child error must not fail parent hard-crash
     result2 = await h.run(

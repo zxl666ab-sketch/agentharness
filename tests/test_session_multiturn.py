@@ -217,7 +217,8 @@ async def test_resume_preserves_multiturn_history_without_resplice(harness, work
     for _ in range(50):
         await asyncio.sleep(0.05)
         rid = harness.engine.active_run_id
-        if rid and rid in harness.engine._run_messages:
+        ctx = harness.engine._runs.get(rid) if rid else None
+        if rid and ctx is not None and ctx.run_messages:
             break
     assert rid, "turn2 never became active"
     await harness.interrupt(rid)

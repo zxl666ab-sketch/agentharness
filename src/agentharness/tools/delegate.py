@@ -73,7 +73,7 @@ class DelegateTool:
         # Concurrent children limit checked via active children
         engine = getattr(harness, "engine", None)
         if engine is not None:
-            children = engine._child_runs.get(ctx.run_id, [])
+            children = engine.child_run_ids(ctx.run_id)
             # count still running
             running = 0
             for cid in children:
@@ -105,7 +105,11 @@ class DelegateTool:
             delegate_depth=depth + 1,
             allow_write=allow_write and ctx.allow_write,
             tools=tools,
-            metadata={"delegated_from": ctx.run_id},
+            metadata={
+                "delegated_from": ctx.run_id,
+                "parent_tool_call_id": (ctx.metadata or {}).get("tool_call_id"),
+                "actor": "delegate",
+            },
         )
 
         try:
