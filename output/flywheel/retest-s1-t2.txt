@@ -1,0 +1,5 @@
+
+status=completed  run_id=7753611d1aae4350b2ff9f2691be8574  
+session=356f8f979ade431694711fbe050566ec  tokens=932/3  last=63580/2469  
+est≈932  turns=1  est-fallback
+BLUE_MANGO_7                                                                   

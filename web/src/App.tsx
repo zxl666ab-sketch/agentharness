@@ -18,8 +18,11 @@ import { SseInvalidator } from "./store/SseInvalidator";
 import { useSse } from "./store/useSse";
 import { isTerminalStatus } from "./trace/buildTurnTrace";
 import { runStatusLabel } from "./runs/status";
+import { EvalReportView } from "./eval/EvalReportView";
 
 type MobileView = "runs" | "timeline" | "inspector";
+
+type AppView = "inspector" | "eval";
 
 function readRunFromUrl(): string | null {
   try {
@@ -37,6 +40,7 @@ export default function App() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(() => readRunFromUrl());
   const [selectedEvent, setSelectedEvent] = useState<EventRow | null>(null);
   const [mobileView, setMobileView] = useState<MobileView>("runs");
+  const [appView, setAppView] = useState<AppView>("inspector");
   const [sseStartSeq, setSseStartSeq] = useState<number | null>(null);
 
   useEffect(() => {
@@ -164,6 +168,12 @@ export default function App() {
     setSelectedEvent(null);
     setMobileView("timeline");
   }, []);
+  const openRunFromEval = useCallback((id: string) => {
+    setSelectedRunId(id);
+    setSelectedEvent(null);
+    setAppView("inspector");
+    setMobileView("timeline");
+  }, []);
   const selectEvent = useCallback((event: EventRow) => {
     setSelectedEvent(event);
     if (window.matchMedia?.("(max-width: 860px)").matches) setMobileView("inspector");
@@ -190,9 +200,26 @@ export default function App() {
           <TerminalSquare size={17} aria-hidden="true" />
           <div>
             <h1>Agent Harness</h1>
-            <span>运行检查器</span>
+            <span>{appView === "eval" ? "Eval 报告" : "运行检查器"}</span>
           </div>
         </div>
+        <nav className="header-nav" data-testid="header-nav" aria-label="主视图">
+          <button
+            type="button"
+            className={appView === "inspector" ? "active" : ""}
+            onClick={() => setAppView("inspector")}
+          >
+            检查器
+          </button>
+          <button
+            type="button"
+            className={appView === "eval" ? "active" : ""}
+            onClick={() => setAppView("eval")}
+            data-testid="nav-eval"
+          >
+            Eval
+          </button>
+        </nav>
         <div className="header-context" title={healthQuery.data?.data_dir || ""}>
           {selectedRun ? (
             <>
@@ -229,6 +256,11 @@ export default function App() {
         </div>
       </header>
 
+      {appView === "eval" ? (
+        <main className="workbench eval-workbench" data-testid="eval-panel">
+          <EvalReportView onOpenRun={openRunFromEval} />
+        </main>
+      ) : (
       <main className="workbench">
         <section
           className={`workspace-panel runs-panel ${mobileView === "runs" ? "mobile-visible" : ""}`}
@@ -303,7 +335,9 @@ export default function App() {
           />
         </aside>
       </main>
+      )}
 
+      {appView === "inspector" && (
       <nav className="mobile-tabs" data-testid="mobile-tabs" aria-label="工作区视图">
         <MobileTab
           active={mobileView === "runs"}
@@ -324,6 +358,7 @@ export default function App() {
           label="检查器"
         />
       </nav>
+      )}
     </div>
   );
 }

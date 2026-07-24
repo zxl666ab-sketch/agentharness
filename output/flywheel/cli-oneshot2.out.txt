@@ -1,0 +1,5 @@
+
+status=completed  run_id=4fc4e511a2dc4bedabde3c46f920c139  
+session=bfaa190fad7341c29eab72909110cc6b  tokens=2792/50  last=2792/50  est≈946
+turns=1
+CLI_OK                                                                         

@@ -104,8 +104,9 @@ class ShellTool:
         return ToolSpec(
             name="shell",
             description=(
-                "Run a shell command in the workspace cwd. Shell commands are treated as "
-                "destructive and always require approval. Has timeout and output limits."
+                "Run a shell command in the workspace cwd. Classified as a process effect: "
+                "allowed under --approval auto, still gated under ask/never. "
+                "Has timeout and output limits. Prefer read_file/search_files when possible."
             ),
             parameters={
                 "type": "object",
@@ -115,7 +116,7 @@ class ShellTool:
                 },
                 "required": ["command"],
             },
-            effect=EffectKind.destructive,
+            effect=EffectKind.process,
         )
 
     async def run(self, ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:

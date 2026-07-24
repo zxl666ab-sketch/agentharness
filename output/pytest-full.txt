@@ -1,0 +1,13 @@
+.........................................................ss............. [ 26%]
+........................................................................ [ 53%]
+........................................................................ [ 80%]
+....................................F................                    [100%]
+================================== FAILURES ===================================
+E   AssertionError: assert <EffectKind.p...ss: 'process'> == <EffectKind.d...'destructive'>
+      
+      - destructive
+      + process
+D:\个人通用agentharness\tests\test_tool_effects.py:14: AssertionError: assert <EffectKind.p...ss: 'process'> == <EffectKind.d...'destructive'>
+=========================== short test summary info ===========================
+FAILED tests/test_tool_effects.py::test_shell_uses_enforceable_destructive_approval_default
+1 failed, 266 passed, 2 skipped in 50.08s

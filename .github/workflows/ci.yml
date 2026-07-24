@@ -1,4 +1,4 @@
-name: CI
+﻿name: CI
 
 on:
   push:
@@ -44,6 +44,20 @@ jobs:
 
       - name: pyright
         run: uv run pyright
+
+      - name: offline eval smoke
+        run: |
+          uv run agentharness eval evals/smoke.yaml --report-json output/eval-smoke.json --report-junit output/eval-smoke.xml
+
+      - name: upload eval smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-smoke-${{ matrix.os }}
+          path: |
+            output/eval-smoke.json
+            output/eval-smoke.xml
+          if-no-files-found: ignore
 
   web:
     name: web (test, lint, tsc, e2e)

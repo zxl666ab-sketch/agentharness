@@ -1,0 +1,5 @@
+Usage: agentharness run [OPTIONS] {message}
+Try 'agentharness run --help' for help.
+┌─ Error ─────────────────────────────────────────────────────────────────────┐
+│ Got unexpected extra argument(s) (with exactly: QUOTA_OK. No tools.)        │
+└─────────────────────────────────────────────────────────────────────────────┘

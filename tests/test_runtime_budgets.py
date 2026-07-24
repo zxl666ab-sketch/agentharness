@@ -240,8 +240,11 @@ async def test_token_limit_is_passed_to_provider_and_enforced(
         harness.close()
 
     assert provider.requests[0].max_tokens == 5
-    assert result.status == RunStatus.failed
-    assert result.error == "max_tokens exceeded"
+    # Final answer already produced: do not false-fail solely for budget overage.
+    assert result.status == RunStatus.completed
+    assert result.output == "ok"
+    assert result.usage is not None
+    assert result.usage.total_tokens == 6
 
 
 @pytest.mark.asyncio

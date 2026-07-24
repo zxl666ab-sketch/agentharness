@@ -40,6 +40,7 @@ describe("run inspector shell", () => {
     expect(html).toContain('data-testid="runs-panel"');
     expect(html).toContain('data-testid="timeline-panel"');
     expect(html).toContain('data-testid="inspector-panel"');
+    expect(html).toContain('data-testid="nav-eval"');
     expect(html).toContain("运行");
     expect(html).toContain("追踪");
     expect(html).toContain("检查器");

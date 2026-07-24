@@ -21,6 +21,7 @@ dependencies = [
     "anyio>=4.4",
     "python-multipart>=0.0.9",
     "prompt-toolkit>=3.0.48",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -59,6 +60,7 @@ filterwarnings = ["ignore::DeprecationWarning"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+exclude = ["output", ".venv", "web/node_modules", "web/dist"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B"]

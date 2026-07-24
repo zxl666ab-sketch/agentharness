@@ -8,16 +8,12 @@ import queue
 import sys
 import threading
 from collections.abc import Iterable, Sequence
-from pathlib import Path
 from typing import Any
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.application.current import get_app
-from prompt_toolkit.completion import CompleteEvent, Completer, Completion, WordCompleter
+from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import has_completions
-from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.history import FileHistory, History, InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
@@ -221,84 +217,3 @@ def _composer_key_bindings() -> KeyBindings:
     return bindings
 
 
-class TtyComposer:
-    """Bottom prompt whose prior output stays available in terminal scrollback."""
-
-    def __init__(
-        self,
-        commands: Sequence[str] = SLASH_COMMANDS,
-        *,
-        history_path: str | Path | None = None,
-    ) -> None:
-        history: History
-        if history_path is not None:
-            try:
-                Path(history_path).parent.mkdir(parents=True, exist_ok=True)
-                history = FileHistory(str(history_path))
-            except OSError:
-                history = InMemoryHistory()
-        else:
-            history = InMemoryHistory()
-        self._session: PromptSession[str] = PromptSession(
-            completer=SlashCommandCompleter(commands),
-            complete_while_typing=True,
-            key_bindings=_composer_key_bindings(),
-            multiline=True,
-            reserve_space_for_menu=min(12, len(commands)),
-            complete_in_thread=False,
-            history=history,
-        )
-
-    def read(self) -> str:
-        with patch_stdout(raw=True):
-            return self._session.prompt(
-                HTML("<ansicyan><b>you&gt;</b></ansicyan> "),
-                bottom_toolbar=HTML(
-                    " <b>Enter</b> send/select  <b>Alt+Enter</b> newline  "
-                    "<b>Tab</b> complete  <b>Esc</b> close "
-                ),
-            )
-
-    def choose(
-        self, title: str, choices: Sequence[str], current: str | None = None
-    ) -> str | None:
-        if not choices:
-            return None
-        bindings = KeyBindings()
-
-        @bindings.add("enter")
-        def accept_choice(event: Any) -> None:
-            buffer = event.current_buffer
-            if buffer.complete_state and buffer.complete_state.current_completion:
-                buffer.apply_completion(buffer.complete_state.current_completion)
-            buffer.validate_and_handle()
-
-        session: PromptSession[str] = PromptSession(
-            completer=WordCompleter(list(choices), sentence=True),
-            complete_while_typing=True,
-            key_bindings=bindings,
-            reserve_space_for_menu=min(10, len(choices)),
-        )
-
-        def open_menu() -> None:
-            get_app().current_buffer.start_completion(select_first=True)
-
-        with patch_stdout(raw=True):
-            value = session.prompt(
-                HTML(f"<ansicyan><b>{title}&gt;</b></ansicyan> "),
-                pre_run=open_menu,
-                bottom_toolbar=f" current: {current or '(provider default)'} ",
-            ).strip()
-        return value or None
-
-
-def readline_with_completion(
-    console: Console,
-    prompt: str,
-    *,
-    commands: Sequence[str] = SLASH_COMMANDS,
-) -> str:
-    """Use prompt-toolkit only for a real TTY; keep redirected input stable."""
-    if not sys.stdin.isatty():
-        return redirected_input(console, prompt)
-    return TtyComposer(commands).read()
