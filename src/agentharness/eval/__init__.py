@@ -1,19 +1,62 @@
-"""Offline eval harness — run task suites and score success / cost / latency.
+﻿"""Eval package: offline suite runner, graders, baseline, reports."""
 
-Reuses the public Harness surface only (RunRequest -> RunResult), so it works
-against any provider (fake, openai, anthropic, or a local vLLM endpoint) with no
-changes to the engine. Metrics are grouped by provider/model so a base model, a
-LoRA-tuned model, and a frontier model can be compared on the same suite.
-"""
-
-from agentharness.eval.dataset import EvalCase, EvalSuite, load_suite
-from agentharness.eval.runner import CaseResult, SuiteReport, run_suite
+from agentharness.eval.baseline import (
+    BaselineGates,
+    RegressionReport,
+    compare_to_baseline,
+    load_baseline,
+)
+from agentharness.eval.dataset import (
+    AssertionSpec,
+    EvalCase,
+    EvalConfigError,
+    EvalSuite,
+    SuiteDefaults,
+    load_suite,
+)
+from agentharness.eval.graders import (
+    CompositeGrader,
+    DeterministicGrader,
+    GradeResult,
+    JudgeAdapter,
+    JudgeVerdict,
+    LLMJudgeGrader,
+    Trajectory,
+    TrajectoryGrader,
+)
+from agentharness.eval.report import (
+    SCHEMA_VERSION,
+    suite_report_to_dict,
+    write_json_report,
+    write_junit_xml,
+)
+from agentharness.eval.runner import CaseResult, GroupMetrics, SuiteReport, run_suite
 
 __all__ = [
-    "EvalCase",
-    "EvalSuite",
-    "load_suite",
+    "AssertionSpec",
+    "BaselineGates",
     "CaseResult",
+    "CompositeGrader",
+    "DeterministicGrader",
+    "EvalCase",
+    "EvalConfigError",
+    "EvalSuite",
+    "GradeResult",
+    "GroupMetrics",
+    "JudgeAdapter",
+    "JudgeVerdict",
+    "LLMJudgeGrader",
+    "RegressionReport",
+    "SCHEMA_VERSION",
+    "SuiteDefaults",
     "SuiteReport",
+    "Trajectory",
+    "TrajectoryGrader",
+    "compare_to_baseline",
+    "load_baseline",
+    "load_suite",
     "run_suite",
+    "suite_report_to_dict",
+    "write_json_report",
+    "write_junit_xml",
 ]

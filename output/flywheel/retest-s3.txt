@@ -1,0 +1,5 @@
+
+status=completed  run_id=589fd4534d9743f5b1ac16504aee8744  
+session=9d192788469242df8f25999b733675ba  tokens=1868/1090  last=27892/470  
+est≈942  turns=2  est-fallback
+                                 Agent Harness                                 

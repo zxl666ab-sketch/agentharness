@@ -1,0 +1,26 @@
+﻿# Offline smoke suite — fake provider only. No max_latency_s / clock-dependent gates.
+name: smoke
+defaults:
+  provider: fake
+  system: "You are a concise test agent."
+cases:
+  - id: text-echo
+    prompt: "[fake:text]smoke-ok"
+    tags: [smoke, offline]
+    assert:
+      status: completed
+      contains: ["smoke-ok"]
+      max_steps: 10
+      max_tokens: 5000
+
+  - id: tools-order
+    # read_file is workspace_read — allowed under eval approval=never
+    prompt: |
+      [fake:tools]read_file|read_file
+      [{"path":"README.md"},{"path":"pyproject.toml"}]
+    tags: [smoke, tools]
+    assert:
+      status: completed
+      tools_used: [read_file]
+      tools_order: [read_file, read_file]
+      max_steps: 20

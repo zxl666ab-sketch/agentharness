@@ -1,4 +1,4 @@
-"""CLI entrypoints: interactive prompt, run, resume, cancel, runs, web, doctor."""
+"""CLI entrypoints: interactive prompt, run, resume, cancel, runs, web, eval, doctor."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from rich.markdown import Markdown
 from rich.table import Table
 
 from agentharness.cli.config_store import apply_settings_to_harness, resolve_runtime_settings
+from agentharness.cli.envfile import load_project_env
 from agentharness.cli.input import async_redirected_input, async_tty_input
 from agentharness.cli.provider_defaults import resolve_default_provider
 from agentharness.contracts import (
@@ -136,6 +137,7 @@ def _root(
     session: str | None = typer.Option(None, "--session"),
 ) -> None:
     """With no subcommand, open the line-oriented multi-turn CLI."""
+    load_project_env()
     if ctx.invoked_subcommand is not None:
         return
     dd = _data_dir(data_dir)
@@ -332,6 +334,171 @@ def web(
         h.close()
 
 
+
+@app.command("eval")
+def eval_cmd(
+    suite: Path = typer.Argument(..., help="Suite file: .yaml / .json / .jsonl"),
+    provider: str | None = typer.Option(
+        None, "--provider", "-p", help="Default provider (overridden by case)"
+    ),
+    model: str | None = typer.Option(
+        None, "--model", "-m", help="Default model (overridden by case)"
+    ),
+    concurrency: int = typer.Option(3, "--concurrency", min=1, help="Max parallel cases"),
+    baseline: Path | None = typer.Option(
+        None, "--baseline", help="Prior JSON report for regression gates"
+    ),
+    report_json: Path | None = typer.Option(
+        None, "--report-json", help="Write JSON report (also usable as next baseline)"
+    ),
+    report_junit: Path | None = typer.Option(
+        None, "--report-junit", help="Write JUnit XML for CI"
+    ),
+    fail_on_regression: bool = typer.Option(
+        False,
+        "--fail-on-regression",
+        help="Exit 1 when baseline gates / new failures trigger (requires --baseline)",
+    ),
+    data_dir: str | None = typer.Option(
+        None,
+        "--data-dir",
+        help="Persist runs here for Web Inspector deep-links (default: temp)",
+    ),
+    min_pass_rate: float | None = typer.Option(
+        None, "--min-pass-rate", help="Baseline gate: minimum pass rate"
+    ),
+    min_mean_score: float | None = typer.Option(
+        None, "--min-mean-score", help="Baseline gate: minimum mean score"
+    ),
+    max_score_regression: float | None = typer.Option(
+        None, "--max-score-regression", help="Baseline gate: max absolute score drop"
+    ),
+    max_token_regression: float | None = typer.Option(
+        None, "--max-token-regression", help="Baseline gate: max token increase ratio"
+    ),
+    max_latency_regression: float | None = typer.Option(
+        None,
+        "--max-latency-regression",
+        help="Baseline gate: max mean-latency increase ratio",
+    ),
+) -> None:
+    """Run an offline eval suite and write optional JSON/JUnit reports.
+
+    Exit codes:
+      0 - all cases passed (and no regression when --fail-on-regression)
+      1 - case/grader failure or regression gate triggered
+      2 - suite/CLI/baseline configuration error
+    """
+    from agentharness.eval.baseline import BaselineGates, compare_to_baseline
+    from agentharness.eval.dataset import EvalConfigError, load_suite
+    from agentharness.eval.report import suite_report_to_dict, write_json_report, write_junit_xml
+    from agentharness.eval.runner import run_suite
+
+    try:
+        loaded = load_suite(suite)
+    except EvalConfigError as exc:
+        console.print(f"[red]config error:[/red] {exc}")
+        raise typer.Exit(2) from None
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]config error:[/red] {exc}")
+        raise typer.Exit(2) from None
+
+    try:
+        report = asyncio.run(
+            run_suite(
+                loaded,
+                provider=provider,
+                model=model,
+                concurrency=concurrency,
+                data_dir=data_dir,
+            )
+        )
+    except EvalConfigError as exc:
+        console.print(f"[red]config error:[/red] {exc}")
+        raise typer.Exit(2) from None
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]eval failed:[/red] {exc}")
+        raise typer.Exit(1) from None
+
+    payload = suite_report_to_dict(report)
+
+    json_path: Path | None = None
+    junit_path: Path | None = None
+    if report_json is not None:
+        json_path = write_json_report(report, report_json)
+    if report_junit is not None:
+        junit_path = write_junit_xml(report, report_junit)
+
+    table = Table(title=f"Eval · {report.suite}", show_header=True, header_style="bold")
+    table.add_column("case")
+    table.add_column("pass")
+    table.add_column("score")
+    table.add_column("tokens")
+    table.add_column("steps")
+    table.add_column("latency")
+    table.add_column("status")
+    for r in report.results:
+        style = "green" if r.passed else "red"
+        table.add_row(
+            r.case_id,
+            "Y" if r.passed else "N",
+            f"{r.score:.2f}",
+            str(r.total_tokens),
+            str(r.steps),
+            f"{r.latency_s:.3f}s",
+            f"[{style}]{r.status}[/{style}]",
+        )
+    console.print(table)
+    console.print(
+        f"pass_rate={report.pass_rate:.2%}  mean_score={report.mean_score:.3f}  "
+        f"total={report.total}  passed={report.passed}"
+    )
+
+    if json_path is not None:
+        console.print(f"[green]JSON report[/green] {json_path}")
+    if junit_path is not None:
+        console.print(f"[green]JUnit report[/green] {junit_path}")
+    if data_dir:
+        console.print(
+            f"[dim]Web Inspector:[/dim] uv run agentharness web --data-dir {data_dir}"
+        )
+        console.print(
+            "[dim]Load the JSON report in the Eval view, then open failed cases via run_id.[/dim]"
+        )
+    else:
+        console.print(
+            "[dim]Default data_dir was temporary - deep-link trajectories are not retained. "
+            "Re-run with --data-dir to inspect runs in the Web UI.[/dim]"
+        )
+
+    regression_failed = False
+    if baseline is not None:
+        try:
+            gates = BaselineGates(
+                min_pass_rate=min_pass_rate,
+                min_mean_score=min_mean_score,
+                max_score_regression=max_score_regression,
+                max_token_regression=max_token_regression,
+                max_latency_regression=max_latency_regression,
+            )
+            reg = compare_to_baseline(payload, baseline, gates)
+        except EvalConfigError as exc:
+            console.print(f"[red]baseline error:[/red] {exc}")
+            raise typer.Exit(2) from None
+        console.print(
+            f"regression failed={reg.failed}  new_failures={len(reg.new_failures)}"
+        )
+        for g in reg.gates:
+            mark = "FAIL" if g.triggered else "ok"
+            console.print(f"  [{mark}] {g.gate}: {g.message}")
+        if fail_on_regression and reg.failed:
+            regression_failed = True
+
+    if report.passed < report.total or regression_failed:
+        raise typer.Exit(1)
+    raise typer.Exit(0)
+
+
 @app.command()
 def doctor(
     data_dir: str | None = typer.Option(None, "--data-dir"),
@@ -364,6 +531,7 @@ def doctor(
 
 
 def main() -> None:
+    load_project_env()
     app()
 
 

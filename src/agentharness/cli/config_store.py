@@ -1,4 +1,4 @@
-﻿"""Persistent CLI provider/model profile stored under the harness data dir.
+"""Persistent CLI provider/model profile stored under the harness data dir.
 
 Secrets live only in ``cli_config.json`` under the data directory (default
 ``~/.agentharness``). They are never sent to the Web API or written to git.
@@ -282,9 +282,11 @@ def resolve_runtime_settings(
     provider: str | None = None,
     model: str | None = None,
 ) -> RuntimeSettings:
-    """Priority: CLI flag > saved profile > environment > fake.
+    """Priority: CLI flag > environment (incl. project ``.env``) > saved profile > fake.
 
-    Does **not** load a project ``.env`` file. Export vars or use ``/config``.
+    The CLI loads a project ``.env`` into the process environment at startup
+    (unless ``AGENTHARNESS_NO_DOTENV=1``). Flags and ``/config`` still override
+    when you pass them explicitly or when no live provider env is present.
     """
     from agentharness.cli.provider_defaults import resolve_default_model, resolve_default_provider
 
@@ -295,16 +297,19 @@ def resolve_runtime_settings(
     if not isinstance(profile, dict):
         profile = {}
 
+    env_prov = resolve_default_provider(None)
     if provider and provider not in ("auto", ""):
         prov = provider
         source = "flag"
+    elif env_prov != "fake":
+        prov = env_prov
+        source = "env"
     elif profile.get("provider") or cfg.get("provider"):
         prov = str(profile.get("provider") or cfg["provider"])
         source = "profile"
     else:
-        env_prov = resolve_default_provider(None)
-        prov = env_prov
-        source = "env" if env_prov != "fake" else "fake"
+        prov = "fake"
+        source = "fake"
 
     if profile.get("provider") == prov:
         pcfg = profile
@@ -317,6 +322,11 @@ def resolve_runtime_settings(
         mod: str | None = model
         if source != "flag":
             source = "flag"
+    elif source == "env":
+        # Prefer OPENAI_MODEL / ANTHROPIC_MODEL from env (.env) over saved profile.
+        mod = resolve_default_model(prov, None) or (
+            str(pcfg["model"]) if pcfg.get("model") else None
+        )
     elif cfg.get("model") and (cfg.get("provider") in (None, prov) or not cfg.get("provider")):
         mod = str(cfg["model"]) if cfg.get("model") else None
         if source == "fake":
@@ -328,8 +338,13 @@ def resolve_runtime_settings(
     else:
         mod = resolve_default_model(prov, None)
 
-    api_key = pcfg.get("api_key") or None
-    base_url = pcfg.get("base_url") or None
+    if source == "env":
+        # Keep credentials in the process environment so project .env wins.
+        api_key = None
+        base_url = None
+    else:
+        api_key = pcfg.get("api_key") or None
+        base_url = pcfg.get("base_url") or None
     if isinstance(api_key, str):
         api_key = api_key.strip() or None
     if isinstance(base_url, str):

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
+
+# Keep offline tests isolated from any project-level .env credentials.
+os.environ.setdefault("AGENTHARNESS_NO_DOTENV", "1")
 
 from agentharness.contracts import ApprovalDecision, ApprovalRequest
 from agentharness.harness import Harness

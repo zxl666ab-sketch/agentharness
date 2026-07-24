@@ -104,10 +104,50 @@ class EventType(StrEnum):
 
 
 class Usage(BaseModel):
+    """Token accounting for a run.
+
+    ``input_tokens`` / ``output_tokens`` / ``total_tokens`` are **cumulative**
+    across model turns (used for budget enforcement). ``last_*`` describe only
+    the most recent model call; ``last_local_estimate`` is the harness-side
+    context size estimate (~4 chars/token) for that call — useful when a
+    provider gateway reports inflated prompt_tokens.
+    """
+
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
     estimated: bool = False
+    last_input_tokens: int = 0
+    last_output_tokens: int = 0
+    last_local_estimate: int = 0
+    model_turns: int = 0
+
+
+def format_usage_brief(usage: Usage | None, *, budget_max: int | None = None) -> str:
+    """Human-readable usage line for CLI status (empty when nothing to show)."""
+    if usage is None:
+        return ""
+    if not (
+        usage.input_tokens
+        or usage.output_tokens
+        or usage.last_input_tokens
+        or usage.last_local_estimate
+    ):
+        return ""
+    parts = [f"tokens={usage.input_tokens}/{usage.output_tokens}"]
+    if usage.model_turns > 0 or usage.last_input_tokens or usage.last_output_tokens:
+        parts.append(f"last={usage.last_input_tokens}/{usage.last_output_tokens}")
+    if usage.last_local_estimate:
+        parts.append(f"est≈{usage.last_local_estimate}")
+    if usage.model_turns:
+        parts.append(f"turns={usage.model_turns}")
+    if budget_max is not None and budget_max > 0:
+        parts.append(f"budget={usage.total_tokens}/{budget_max}")
+    if usage.estimated and not usage.input_tokens:
+        parts.append("estimated")
+    elif usage.estimated:
+        parts.append("est-fallback")
+    return "  ".join(parts)
 
 
 class Message(BaseModel):

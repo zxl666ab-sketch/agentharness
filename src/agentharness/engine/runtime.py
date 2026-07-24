@@ -35,7 +35,7 @@ from agentharness.contracts import (
     Usage,
     new_id,
 )
-from agentharness.engine.context import assemble_context, estimate_tokens
+from agentharness.engine.context import assemble_context, billable_turn_usage, estimate_tokens
 from agentharness.engine.scheduler import EffectScheduler
 from agentharness.security.approval import auto_decision
 from agentharness.security.redaction import Redactor, default_redactor
@@ -843,16 +843,34 @@ class RunEngine:
                 )
                 turn_usage.total_tokens = turn_usage.input_tokens + turn_usage.output_tokens
 
-            usage.input_tokens += turn_usage.input_tokens
-            usage.output_tokens += turn_usage.output_tokens
-            usage.total_tokens += turn_usage.total_tokens
-            usage.estimated = usage.estimated or turn_usage.estimated
-
-            if usage.total_tokens > budget.max_tokens and error_msg is None:
-                error_msg = "max_tokens exceeded"
-                error_kind = "budget"
+            local_est = int(ctx_meta.get("token_estimate") or 0)
+            # Preserve raw provider numbers for inspector last_*; charge budget with
+            # de-inflated billable counts so gateway token lies cannot fail real work.
+            raw_in = turn_usage.input_tokens
+            raw_out = turn_usage.output_tokens
+            billable = billable_turn_usage(
+                provider_usage=turn_usage,
+                local_input_estimate=local_est,
+                output_text=text,
+            )
+            usage.input_tokens += billable.input_tokens
+            usage.output_tokens += billable.output_tokens
+            usage.total_tokens += billable.total_tokens
+            usage.estimated = usage.estimated or billable.estimated
+            usage.last_input_tokens = raw_in
+            usage.last_output_tokens = raw_out
+            usage.last_local_estimate = local_est
+            usage.model_turns = step + 1
 
             tool_calls = [tool_acc[i] for i in order if i in tool_acc]
+
+            if usage.total_tokens > budget.max_tokens and error_msg is None:
+                # Final answer already produced: complete rather than false-fail.
+                if not tool_calls and (text or output_parts):
+                    pass
+                else:
+                    error_msg = "max_tokens exceeded"
+                    error_kind = "budget"
 
             assistant_msg = Message(
                 role=MessageRole.assistant,

@@ -187,6 +187,32 @@ def test_env_used_when_no_profile(tmp_path: Path, monkeypatch) -> None:
     assert settings.source == "env"
 
 
+def test_env_beats_saved_profile(tmp_path: Path, monkeypatch) -> None:
+    save_config(
+        tmp_path,
+        {
+            "provider": "openai",
+            "model": "from-profile",
+            "providers": {
+                "openai": {
+                    "model": "from-profile",
+                    "api_key": "sk-profile",
+                    "base_url": "https://profile.example/v1",
+                }
+            },
+        },
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+    monkeypatch.setenv("OPENAI_MODEL", "from-env")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://env.example/v1")
+    settings = resolve_runtime_settings(tmp_path)
+    assert settings.provider == "openai"
+    assert settings.model == "from-env"
+    assert settings.source == "env"
+    assert settings.api_key is None
+    assert settings.base_url is None
+
+
 def test_update_provider_fields_persists(tmp_path: Path) -> None:
     update_provider_fields(tmp_path, "openai", api_key="abc123456789", model="m1")
     cfg = load_config(tmp_path)
@@ -310,18 +336,29 @@ def test_named_profile_switch_applies_to_the_next_piped_run(
 
 
 def test_idle_tty_ctrl_c_exits_cleanly(tmp_path: Path, monkeypatch) -> None:
-    class InterruptingComposer:
-        def __init__(self, _commands, **_kwargs) -> None:
-            pass
+    class InterruptingWorkbench:
+        def __init__(self, **_kwargs) -> None:
+            from agentharness.cli.view_model import CliViewModel
+
+            self.vm = CliViewModel()
+
+        def configure(self, **_kwargs) -> None:
+            return None
 
         def read(self) -> str:
             raise KeyboardInterrupt
+
+        def append_system(self, text: str) -> None:
+            return None
+
+        def choose(self, *args, **kwargs):  # noqa: ANN001
+            return None
 
     harness = Harness(data_dir=tmp_path)
     console = Console(file=StringIO(), force_terminal=False, color_system=None)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr(
-        "agentharness.cli.interactive.TtyComposer", InterruptingComposer
+        "agentharness.cli.interactive.Workbench", InterruptingWorkbench
     )
 
     run_interactive(

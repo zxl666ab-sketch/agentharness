@@ -1,9 +1,11 @@
-﻿"""Line-oriented interactive CLI for long-lived multi-turn sessions."""
+"""Interactive CLI: full-screen TTY workbench or line-oriented non-TTY REPL."""
 
 from __future__ import annotations
 
 import asyncio
 import sys
+import time
+from io import StringIO
 from pathlib import Path
 
 from rich.console import Console
@@ -23,8 +25,15 @@ from agentharness.cli.config_store import (
     resolve_runtime_settings,
     update_provider_fields,
 )
-from agentharness.cli.input import SLASH_COMMANDS, TtyComposer, redirected_input
-from agentharness.contracts import ApprovalMode, EventType, RunRequest, RunResult
+from agentharness.cli.input import redirected_input
+from agentharness.cli.workbench import LiveRedrawController, Workbench
+from agentharness.contracts import (
+    ApprovalMode,
+    EventType,
+    RunRequest,
+    RunResult,
+    format_usage_brief,
+)
 from agentharness.harness import Harness
 
 
@@ -36,6 +45,24 @@ def _enable_windows_ctrl_c() -> None:
     # Processes created in a new Windows process group inherit Ctrl+C disabled.
     # Restore normal handling so asyncio.Runner can turn Ctrl+C into cancellation.
     ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)  # type: ignore[attr-defined]
+
+
+def _ui_console(console: Console, workbench: Workbench | None) -> tuple[Console, StringIO | None]:
+    """When the workbench owns the screen, capture Rich output into the run area."""
+    if workbench is None:
+        return console, None
+    buf = StringIO()
+    return (
+        Console(file=buf, force_terminal=False, color_system=None, width=100),
+        buf,
+    )
+
+
+def _flush_ui(workbench: Workbench | None, buf: StringIO | None) -> None:
+    if workbench is not None and buf is not None:
+        text = buf.getvalue().rstrip()
+        if text:
+            workbench.append_system(text)
 
 
 def _print_help(console: Console) -> None:
@@ -84,16 +111,12 @@ def _resolve_session(harness: Harness, value: str) -> tuple[str | None, str | No
     value = value.strip()
     if not value:
         return None, "Usage: /use <session>"
-    matches = [
-        str(session["id"])
-        for session in harness.list_sessions(limit=1000)
-        if str(session.get("id", "")).startswith(value)
-    ]
-    if len(matches) == 1:
-        return matches[0], None
-    if not matches:
-        return None, f"Session not found: {value}"
-    return None, f"Session prefix is ambiguous: {value}"
+    try:
+        return harness.resolve_session_id(value), None
+    except KeyError as exc:
+        return None, str(exc)
+    except ValueError as exc:
+        return None, str(exc)
 
 
 def _print_banner(console: Console, settings: RuntimeSettings, approval: str) -> None:
@@ -124,7 +147,7 @@ def _print_config(console: Console, data_dir: Path, settings: RuntimeSettings) -
         "[dim]Set with: /config set api_key <value> | /config set base_url <url> | "
         "/config set model <name>[/dim]"
     )
-    console.print("[dim]Project .env is not auto-loaded; export env vars or use /config.[/dim]")
+    console.print("[dim]Project .env is auto-loaded at startup (existing process env wins). Use /config to persist overrides.[/dim]")
 
 
 def _handle_config_command(
@@ -176,7 +199,7 @@ def _handle_model_command(
     console: Console,
     data_dir: Path,
     settings: RuntimeSettings,
-    composer: TtyComposer | None = None,
+    composer: Workbench | None = None,
 ) -> RuntimeSettings:
     parts = line.split(maxsplit=1)
     if len(parts) == 1:
@@ -232,7 +255,7 @@ def _handle_profile_command(
     console: Console,
     data_dir: Path,
     settings: RuntimeSettings,
-    composer: TtyComposer | None = None,
+    composer: Workbench | None = None,
 ) -> RuntimeSettings:
     parts = line.split()
     profiles = load_config(data_dir).get("profiles") or {}
@@ -254,7 +277,10 @@ def _handle_profile_command(
     elif len(parts) == 2:
         name = parts[1]
     else:
-        console.print("[yellow]Usage: /profile [name] | /profile use <name> | /profile create <name> <provider>[/yellow]")
+        console.print(
+            "[yellow]Usage: /profile [name] | /profile use <name> | "
+            "/profile create <name> <provider>[/yellow]"
+        )
         return settings
     try:
         activate_profile(data_dir, name)
@@ -287,7 +313,9 @@ def _handle_provider_command(
         return settings
     name = parts[1].strip().lower()
     if name not in KNOWN_PROVIDERS:
-        console.print(f"[yellow]Unknown provider:[/yellow] {name}. Choose: {', '.join(KNOWN_PROVIDERS)}")
+        console.print(
+            f"[yellow]Unknown provider:[/yellow] {name}. Choose: {', '.join(KNOWN_PROVIDERS)}"
+        )
         return settings
     update_provider_fields(data_dir, name, set_active=True)
     settings = resolve_runtime_settings(data_dir, provider=name, model=None)
@@ -309,10 +337,12 @@ def _run_turn(
     model: str | None,
     approval: str,
     cwd: str,
+    workbench: Workbench | None = None,
 ) -> RunResult | None:
     saw_text = False
     active_run_id: str | None = None
     line_open = False  # cursor is mid-line (after prompt prefix or a text delta)
+    started = time.monotonic()
 
     def _newline_if_open() -> None:
         nonlocal line_open
@@ -322,6 +352,16 @@ def _run_turn(
 
     def on_event(event) -> None:
         nonlocal saw_text, active_run_id, line_open
+        if workbench is not None:
+            workbench.on_event(event)
+            event_type = event.type.value if hasattr(event.type, "value") else str(event.type)
+            if event_type == EventType.run_started.value:
+                active_run_id = event.run_id
+            elif event_type == EventType.text_delta.value:
+                if str(event.payload.get("text") or ""):
+                    saw_text = True
+            return
+
         event_type = event.type.value if hasattr(event.type, "value") else str(event.type)
         if event_type == EventType.run_started.value:
             active_run_id = event.run_id
@@ -354,8 +394,14 @@ def _run_turn(
             console.print(line)
 
     unsubscribe = harness.subscribe_events(on_event)
-    console.print("[bold green]agent>[/bold green] ", end="")
-    line_open = True
+    if workbench is not None:
+        workbench.begin_user_turn(message)
+        live = LiveRedrawController(workbench)
+        live.__enter__()
+    else:
+        live = None
+        console.print("[bold green]agent>[/bold green] ", end="")
+        line_open = True
     try:
         result = runner.run(
             harness.run(
@@ -370,32 +416,60 @@ def _run_turn(
             )
         )
     except KeyboardInterrupt:
-        _newline_if_open()
-        suffix = f" {active_run_id[:12]}" if active_run_id else ""
-        console.print(
-            f"[yellow]Interrupted{suffix}. Use `agentharness resume <run_id>` "
-            "to continue.[/yellow]"
-        )
+        if workbench is not None:
+            workbench.mark_interrupted(active_run_id)
+        else:
+            _newline_if_open()
+            suffix = f" {active_run_id[:12]}" if active_run_id else ""
+            console.print(
+                f"[yellow]Interrupted{suffix}. Use `agentharness resume <run_id>` "
+                "to continue.[/yellow]"
+            )
         return None
     except Exception as exc:  # keep the REPL alive on provider/tool faults
-        _newline_if_open()
-        console.print(f"[red]error:[/red] {_escape(str(exc))}")
+        if workbench is not None:
+            workbench.mark_error(str(exc))
+        else:
+            _newline_if_open()
+            console.print(f"[red]error:[/red] {_escape(str(exc))}")
         return None
     finally:
         unsubscribe()
+        if live is not None:
+            live.__exit__(None, None, None)
+
+    elapsed = time.monotonic() - started
+    usage = result.usage
+    tokens_in = usage.input_tokens if usage else 0
+    tokens_out = usage.output_tokens if usage else 0
+    usage_line = format_usage_brief(usage)
+
+    if workbench is not None:
+        final_output = None if saw_text else result.output
+        workbench.finish_turn(
+            status=result.status.value,
+            run_id=result.run_id,
+            session_id=result.session_id,
+            provider=provider,
+            model=model,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            error=result.error,
+            duration_s=elapsed,
+            final_output=final_output,
+            usage_detail=usage_line,
+        )
+        return result
 
     if not saw_text and result.output:
         _newline_if_open()
         console.print(result.output, markup=False, highlight=False, soft_wrap=True)
     else:
         _newline_if_open()
-    usage = result.usage
-    tokens = ""
-    if usage and (usage.input_tokens or usage.output_tokens):
-        tokens = f"  tokens={usage.input_tokens}/{usage.output_tokens}"
+    tokens = f"  {usage_line}" if usage_line else ""
     console.print(
         f"[dim]status={result.status.value}  run={result.run_id[:12]}  "
-        f"session={result.session_id[:12]}  provider={provider}  model={model or '-'}"
+        f"session={result.session_id}  provider={provider}  model={model or '-'}"
         f"{tokens}[/dim]"
     )
     if result.error:
@@ -435,15 +509,28 @@ def run_interactive(
             api_key=refreshed.api_key,
             base_url=refreshed.base_url,
             source="flag",
+            profile=refreshed.profile,
         )
     apply_settings_to_harness(harness, settings)
-    _print_banner(console, settings, approval)
+
+    workbench: Workbench | None = None
+    composer: Workbench | None = None
+    if sys.stdin.isatty():
+        workbench = Workbench(history_path=dd / "cli_history")
+        workbench.configure(
+            cwd=cwd,
+            provider=settings.provider,
+            model=settings.model,
+            approval=approval,
+            profile=settings.profile,
+        )
+        composer = workbench
+        # First paint is the full-screen idle chrome (no bare you> prompt).
+        workbench.vm.set_idle()
+    else:
+        _print_banner(console, settings, approval)
+
     current_session_id = session_id
-    composer = (
-        TtyComposer(SLASH_COMMANDS, history_path=dd / "cli_history")
-        if sys.stdin.isatty()
-        else None
-    )
     runner = asyncio.Runner()
     try:
         while True:
@@ -454,66 +541,116 @@ def run_interactive(
                     raw_line = redirected_input(console, "you> ")
                 line = raw_line.lstrip("\ufeff").strip()
             except EOFError:
-                console.print()
+                if workbench is None:
+                    console.print()
                 return
             except KeyboardInterrupt:
-                console.print("\n[yellow]No run is active; exiting.[/yellow]")
+                msg = "No run is active; exiting."
+                if workbench is not None:
+                    workbench.append_system(msg)
+                    # Ensure message is visible on exit for tests/users.
+                    console.print(f"[yellow]{msg}[/yellow]")
+                else:
+                    console.print(f"\n[yellow]{msg}[/yellow]")
                 return
 
             if not line:
                 continue
             if line in {"/quit", "/exit"}:
                 return
+
+            ui, buf = _ui_console(console, workbench)
             if line == "/help":
-                _print_help(console)
+                _print_help(ui)
+                _flush_ui(workbench, buf)
                 continue
             if line == "/new":
                 current_session_id = None
-                console.print("[green]New session ready.[/green]")
+                ui.print("[green]New session ready.[/green]")
+                _flush_ui(workbench, buf)
                 continue
             if line == "/sessions":
-                _print_sessions(harness, console)
+                _print_sessions(harness, ui)
+                _flush_ui(workbench, buf)
                 continue
             if line == "/use" or line.startswith("/use "):
                 selected, error = _resolve_session(harness, line[4:])
                 if error:
-                    console.print(f"[yellow]{error}[/yellow]")
+                    ui.print(f"[yellow]{error}[/yellow]")
                 elif selected is not None:
                     current_session_id = selected
-                    console.print(f"[green]Using session {selected[:12]}.[/green]")
+                    ui.print(f"[green]Using session {selected[:12]}.[/green]")
+                _flush_ui(workbench, buf)
                 continue
             if line == "/model" or line.startswith("/model "):
                 settings = _handle_model_command(
                     line,
                     harness=harness,
-                    console=console,
+                    console=ui,
                     data_dir=dd,
                     settings=settings,
                     composer=composer,
                 )
+                _flush_ui(workbench, buf)
+                if workbench is not None:
+                    workbench.configure(
+                        cwd=cwd,
+                        provider=settings.provider,
+                        model=settings.model,
+                        approval=approval,
+                        profile=settings.profile,
+                    )
                 continue
             if line == "/provider" or line.startswith("/provider "):
                 settings = _handle_provider_command(
-                    line, harness=harness, console=console, data_dir=dd, settings=settings
+                    line, harness=harness, console=ui, data_dir=dd, settings=settings
                 )
+                _flush_ui(workbench, buf)
+                if workbench is not None:
+                    workbench.configure(
+                        cwd=cwd,
+                        provider=settings.provider,
+                        model=settings.model,
+                        approval=approval,
+                        profile=settings.profile,
+                    )
                 continue
             if line == "/profile" or line.startswith("/profile "):
                 settings = _handle_profile_command(
                     line,
                     harness=harness,
-                    console=console,
+                    console=ui,
                     data_dir=dd,
                     settings=settings,
                     composer=composer,
                 )
+                _flush_ui(workbench, buf)
+                if workbench is not None:
+                    workbench.configure(
+                        cwd=cwd,
+                        provider=settings.provider,
+                        model=settings.model,
+                        approval=approval,
+                        profile=settings.profile,
+                    )
                 continue
             if line == "/config" or line.startswith("/config "):
                 settings = _handle_config_command(
-                    line, harness=harness, console=console, data_dir=dd, settings=settings
+                    line, harness=harness, console=ui, data_dir=dd, settings=settings
                 )
+                _flush_ui(workbench, buf)
+                if workbench is not None:
+                    workbench.configure(
+                        cwd=cwd,
+                        provider=settings.provider,
+                        model=settings.model,
+                        approval=approval,
+                        profile=settings.profile,
+                    )
                 continue
             if line.startswith("/"):
-                console.print(f"[yellow]Unknown command:[/yellow] {line}")
+                ui.print(f"[yellow]Unknown command:[/yellow] {line}")
+                _flush_ui(workbench, buf)
                 continue
 
             result = _run_turn(
@@ -526,6 +663,7 @@ def run_interactive(
                 model=settings.model,
                 approval=approval,
                 cwd=cwd,
+                workbench=workbench,
             )
             if result is not None:
                 current_session_id = result.session_id

@@ -380,7 +380,40 @@ def test_interactive_streams_turns_and_switches_sessions(
     assert len(sessions) == 2
 
 
-def test_interactive_prompts_for_destructive_shell_approval(
+def test_interactive_auto_allows_process_shell_without_prompt(
+    data_dir: Path, workspace: Path
+) -> None:
+    """Daily-assistant default: --approval auto runs shell (process) without a prompt."""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "agentharness.cli.main",
+            "--provider",
+            "fake",
+            "--approval",
+            "auto",
+            "--data-dir",
+            str(data_dir),
+            "--cwd",
+            str(workspace),
+        ],
+        input="shell echo approved-by-auto\n/quit\n",
+        text=True,
+        capture_output=True,
+        env=_cli_env(),
+        timeout=15,
+        check=False,
+    )
+
+    output = completed.stdout + completed.stderr
+    assert completed.returncode == 0, output
+    assert "审批请求" not in output
+    assert "approved-by-auto" in output
+    assert "status=completed" in output
+
+
+def test_interactive_ask_still_prompts_for_shell(
     data_dir: Path, workspace: Path
 ) -> None:
     completed = subprocess.run(
@@ -391,7 +424,7 @@ def test_interactive_prompts_for_destructive_shell_approval(
             "--provider",
             "fake",
             "--approval",
-            "auto",
+            "ask",
             "--data-dir",
             str(data_dir),
             "--cwd",
@@ -408,7 +441,6 @@ def test_interactive_prompts_for_destructive_shell_approval(
     output = completed.stdout + completed.stderr
     assert completed.returncode == 0, output
     assert "审批请求" in output
-    assert "destructive" in output
     assert "approved-by-user" in output
     assert "status=completed" in output
 
@@ -478,7 +510,7 @@ def test_ctrl_c_interrupts_run_kills_shell_tree_and_returns_to_prompt(
     child_alive_after_cli: bool | None = None
     try:
         assert process.stdin is not None
-        process.stdin.write(f"{command}\n1\n")
+        process.stdin.write(f"{command}\n")
         process.stdin.flush()
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline and not pid_file.exists():
@@ -563,7 +595,7 @@ def test_cancel_command_stops_run_owned_by_another_process(
     child_alive_after_cancel: bool | None = None
     try:
         assert run_process.stdin is not None
-        run_process.stdin.write("1\n")
+        # auto+process shell: no interactive approval needed
         run_process.stdin.flush()
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline and not pid_file.exists():

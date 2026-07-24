@@ -32,10 +32,16 @@ cd ..
 
 ## Start an interactive session
 
-The bare command opens the line-oriented, streaming multi-turn CLI:
+The bare command opens the interactive multi-turn CLI. It loads the nearest project `.env` (cwd and parents), then picks provider/model from flags, environment (`.env`), saved `/config` profile, or `fake`:
 
 ```bash
-uv run agentharness --provider fake --approval ask --cwd .
+uv run agentharness
+```
+
+Offline / scripted smoke without live credentials:
+
+```bash
+uv run agentharness --provider fake
 ```
 
 The same Harness and event loop stay alive across turns, so sessions, Browser contexts, MCP connections, approvals, and cancellation behave consistently. Commands available at the prompt:
@@ -53,19 +59,24 @@ The same Harness and event loop stay alive across turns, so sessions, Browser co
 Common launch options:
 
 ```bash
-uv run agentharness --provider openai --model MODEL --approval ask --cwd PATH
+uv run agentharness --provider openai --model MODEL
 uv run agentharness --session SESSION_ID --data-dir PATH
+uv run agentharness --approval auto --cwd PATH
 ```
 
-Provider selection is explicit `--provider`, then an explicitly exported `OPENAI_API_KEY`, then `ANTHROPIC_API_KEY`, then `fake`. The normal CLI never automatically reads a project or working-directory `.env` file.
+Provider selection order: explicit `--provider` ? `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` from the process env (including auto-loaded `.env`) ? saved profile ? `fake`.
+
+Model defaults: `--model` ? profile ? `OPENAI_MODEL` / `ANTHROPIC_MODEL` ? provider default.
+
+Disable `.env` loading with `AGENTHARNESS_NO_DOTENV=1`, or point at a file with `AGENTHARNESS_ENV_FILE=/path/to/.env`.
 
 ## Scriptable commands
 
 Run one task and exit:
 
 ```bash
-uv run agentharness run "Summarize README.md" \
-  --provider fake --approval auto --cwd .
+uv run agentharness run "Summarize README.md"
+uv run agentharness run "Summarize README.md" --provider fake --approval auto
 ```
 
 Exit codes:
@@ -115,10 +126,12 @@ The browser receives only real SQLite/API/SSE data. There is no fixture or mock 
 | Environment variable | Purpose |
 |---|---|
 | `AGENTHARNESS_DATA_DIR` | Default persistent data directory |
-| `OPENAI_API_KEY` | OpenAI credential exported by the caller |
+| `AGENTHARNESS_NO_DOTENV` | Set to `1` to skip auto-loading project `.env` |
+| `AGENTHARNESS_ENV_FILE` | Optional explicit `.env` path (still respects existing process env) |
+| `OPENAI_API_KEY` | OpenAI / OpenAI-compatible API key |
 | `OPENAI_BASE_URL` | Optional OpenAI-compatible endpoint |
 | `OPENAI_MODEL` | Default OpenAI model |
-| `ANTHROPIC_API_KEY` | Anthropic credential exported by the caller |
+| `ANTHROPIC_API_KEY` | Anthropic API key |
 | `ANTHROPIC_BASE_URL` | Optional Anthropic endpoint |
 | `ANTHROPIC_MODEL` | Default Anthropic model |
 
@@ -217,6 +230,65 @@ npx playwright test
 
 Live provider smoke tests are optional and must be explicitly enabled with caller-exported credentials. The normal test suite uses only the fake provider, local temporary services, and temporary data directories.
 
+## Offline eval suites
+
+Headless regression for agent behavior: load a YAML/JSON/JSONL suite, run each case through the real Harness with the fake (or live) provider, grade deterministically, and emit JSON + JUnit reports.
+
+### Minimal suite (YAML)
+
+```yaml
+name: demo
+defaults:
+  provider: fake
+cases:
+  - id: hello
+    prompt: "[fake:text]hello eval"
+    assert:
+      status: completed
+      contains: ["hello eval"]
+      max_steps: 10
+```
+
+Assertions supported: `status`, `contains`, `contains_any`, `regex`, `tools_used`, `tools_order` (subsequence), `max_tokens`, `max_steps`, `max_latency_s`, optional `rubric` (LLM judge, default off).
+
+### CLI
+
+```bash
+# Offline smoke (no API key)
+uv run agentharness eval evals/smoke.yaml \
+  --report-json output/eval-smoke.json \
+  --report-junit output/eval-smoke.xml
+
+# Keep trajectories for the Web Inspector
+uv run agentharness eval evals/smoke.yaml \
+  --data-dir output/eval-data \
+  --report-json output/eval-smoke.json
+
+# Compare against a prior JSON report
+uv run agentharness eval evals/smoke.yaml \
+  --baseline output/eval-smoke.json \
+  --fail-on-regression \
+  --min-pass-rate 1.0
+```
+
+Exit codes: `0` all cases passed (and no regression when `--fail-on-regression`); `1` case/grader failure or regression gate; `2` suite/CLI/baseline config error.
+
+Default `--data-dir` is a temp directory that is deleted after the run — deep-linking trajectories is expected to fail in that mode. Pass a stable `--data-dir` when you want to open failed cases in the Web UI.
+
+### Web Eval view
+
+1. Generate a JSON report (and optional matching `--data-dir`).
+2. Start the inspector against the same data dir:
+
+```bash
+uv run agentharness web --data-dir output/eval-data
+```
+
+3. Open the **Eval** tab, load `output/eval-smoke.json` (file picker or paste).
+4. Failed rows with a `run_id` offer **查看轨迹**, which switches to the existing Run Inspector (`?run=<run_id>`). Eval does not re-implement the Timeline.
+
+Optional second JSON file loads as baseline for new-failure / score-drop / token / latency summaries.
+
 ## Compatibility changes from the original prototype
 
 - The Textual fullscreen TUI, snapshot files, dependency, `chat`, `ui`, `run --ui`, and automatic Web/browser lifecycle were removed.
@@ -225,3 +297,4 @@ Live provider smoke tests are optional and must be explicitly enabled with calle
 - Web assets are built into and shipped inside the Python wheel.
 - `search_files` now treats queries as literal substrings; implicit Python regular-expression execution was removed so searches remain cancellable and resistant to regex denial of service.
 - Callers with live async Provider/Browser/MCP resources should use `await harness.aclose()`; synchronous `close()` remains safe when no async resource is open.
+

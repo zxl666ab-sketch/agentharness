@@ -119,6 +119,36 @@ class Harness:
         sessions = self.storage.list_sessions(limit=limit)
         return [self._enrich_session(s) for s in sessions]
 
+    def resolve_session_id(self, value: str, *, limit: int = 1000) -> str:
+        """Resolve a unique session id by exact id or unambiguous prefix.
+
+        Used by interactive ``/use`` and scriptable ``run --session`` so a
+        truncated CLI display id continues the real session instead of creating
+        a brand-new 12-char session. If both a short fake id and a longer id
+        share the same prefix, raise ambiguous rather than picking the short one.
+        """
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("session id is required")
+        matches = [
+            str(session["id"])
+            for session in self.storage.list_sessions(limit=limit)
+            if str(session.get("id", "")) == value
+            or str(session.get("id", "")).startswith(value)
+        ]
+        # de-dupe while preserving order
+        seen: set[str] = set()
+        unique: list[str] = []
+        for mid in matches:
+            if mid not in seen:
+                seen.add(mid)
+                unique.append(mid)
+        if len(unique) == 1:
+            return unique[0]
+        if not unique:
+            raise KeyError(f"Session not found: {value}")
+        raise ValueError(f"Session prefix is ambiguous: {value}")
+
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         sess = self.storage.get_session(session_id)
         if not sess:
