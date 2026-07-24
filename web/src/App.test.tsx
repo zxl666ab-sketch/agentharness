@@ -2,14 +2,29 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToString } from "react-dom/server";
 import { describe, it, expect } from "vitest";
 import App from "./App";
-import { api, type RunRow } from "./api/client";
+import { api, type RunRow, type SessionRow } from "./api/client";
 import { RunList } from "./components/RunList";
 import { Inspector } from "./components/Inspector";
 import { sseStore } from "./store/sseStore";
 import { categorizeEvent, groupEventsByCategory } from "./events/categories";
+import { readAppUrlState } from "./app/urlState";
+import { REQUIRED_API_SCHEMA_VERSION } from "./api/compatibility";
+
+describe("URL view state", () => {
+  it("keeps the selected run and evaluation view in a shareable URL", () => {
+    expect(readAppUrlState("?run=run-123&view=eval")).toEqual({
+      runId: "run-123",
+      view: "eval",
+    });
+    expect(readAppUrlState("?run=run-123&view=unknown")).toEqual({
+      runId: "run-123",
+      view: "inspector",
+    });
+  });
+});
 
 describe("api client shape", () => {
-  it("exposes readonly methods only including session transcript", () => {
+  it("exposes reads plus the narrow manual-grade action", () => {
     expect(typeof api.health).toBe("function");
     expect(typeof api.runs).toBe("function");
     expect(typeof api.events).toBe("function");
@@ -20,6 +35,8 @@ describe("api client shape", () => {
     expect(typeof api.messages).toBe("function");
     expect(typeof api.approvals).toBe("function");
     expect(typeof api.checkpoint).toBe("function");
+    expect(typeof api.evaluation).toBe("function");
+    expect(typeof api.gradeRun).toBe("function");
     expect((api as { createRun?: unknown }).createRun).toBeUndefined();
   });
 });
@@ -31,6 +48,13 @@ describe("run inspector shell", () => {
       value: () => ({ matches: false }),
     });
     const client = new QueryClient();
+    client.setQueryData(["health"], {
+      service: "agentharness",
+      status: "ok",
+      data_dir: "/tmp/data",
+      max_global_seq: 0,
+      api_schema_version: REQUIRED_API_SCHEMA_VERSION,
+    });
     const html = renderToString(
       <QueryClientProvider client={client}>
         <App />
@@ -46,7 +70,26 @@ describe("run inspector shell", () => {
     expect(html).toContain("检查器");
   });
 
-  it("renders run intent from the runs response without fetching messages", () => {
+  it("blocks all inspector UI when the backend API schema is stale", () => {
+    const client = new QueryClient();
+    client.setQueryData(["health"], {
+      service: "agentharness",
+      status: "ok",
+      data_dir: "/tmp/data",
+      max_global_seq: 0,
+    });
+    const html = renderToString(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>
+    );
+
+    expect(html).toContain('data-testid="compatibility-incompatible"');
+    expect(html).toContain("网页端与后端版本不一致");
+    expect(html).not.toContain('data-testid="runs-panel"');
+  });
+
+  it("renders one task row for a session and shows its turn count", () => {
     const run: RunRow = {
       id: "run-summary",
       session_id: "session",
@@ -61,12 +104,28 @@ describe("run inspector shell", () => {
       finished_at: "2026-07-23T04:36:28.000Z",
     };
 
+    const session: SessionRow = {
+      id: "session",
+      title: "Inspect the release tra…",
+      display_title: "Inspect the release trace without truncating this complete request",
+      latest_run_id: run.id,
+      latest_status: "completed",
+      run_count: 3,
+      created_at: run.created_at,
+      updated_at: run.updated_at,
+    };
     const html = renderToString(
-      <RunList runs={[run]} selectedId={run.id} onSelect={() => undefined} />
+      <RunList
+        sessions={[session]}
+        runs={[run]}
+        selectedId={session.id}
+        onSelect={() => undefined}
+      />
     );
 
-    expect(html).toContain("Inspect the release trace");
-    expect(html).toContain("2 个子运行");
+    expect(html).toContain("Inspect the release trace without truncating this complete request");
+    expect(html).toContain(">3<");
+    expect(html).toContain("轮");
   });
 
   it("opens failed run detail with checkpoint and readonly recovery guidance", () => {
@@ -84,6 +143,7 @@ describe("run inspector shell", () => {
     };
     const html = renderToString(
       <Inspector
+        initialTab="run"
         run={run}
         event={null}
         tree={[run]}
@@ -106,8 +166,33 @@ describe("run inspector shell", () => {
     expect(html).toContain("身份");
     expect(html).toContain("失败信息");
     expect(html).toContain("openai / gpt-test");
-    expect(html).toContain("model_turn");
+    expect(html).toContain("模型轮次");
     expect(html).toContain("agentharness resume failed-run");
+    expect(html).not.toContain("请选择追踪事件");
+  });
+
+  it("opens conversation context by default when no event is selected", () => {
+    const run: RunRow = {
+      id: "context-run",
+      session_id: "session",
+      root_run_id: "context-run",
+      status: "completed",
+      created_at: "2026-07-23T04:36:27.000Z",
+      updated_at: "2026-07-23T04:36:28.000Z",
+    };
+    const html = renderToString(
+      <Inspector
+        run={run}
+        event={null}
+        tree={[run]}
+        messages={[]}
+        approvals={[]}
+        checkpoint={null}
+        transcript={[]}
+      />
+    );
+    expect(html).toContain("对话记录");
+    expect(html).toContain("智能评测");
     expect(html).not.toContain("请选择追踪事件");
   });
 
@@ -120,8 +205,22 @@ describe("run inspector shell", () => {
       created_at: "2020-01-01T00:00:00.000Z",
       updated_at: "2020-01-01T00:00:00.000Z",
     };
+    const session: SessionRow = {
+      id: "session",
+      title: "stale task",
+      latest_run_id: run.id,
+      latest_status: "running",
+      run_count: 1,
+      created_at: run.created_at,
+      updated_at: run.updated_at,
+    };
     const html = renderToString(
-      <RunList runs={[run]} selectedId={run.id} onSelect={() => undefined} />
+      <RunList
+        sessions={[session]}
+        runs={[run]}
+        selectedId={session.id}
+        onSelect={() => undefined}
+      />
     );
 
     expect(html).toContain("陈旧 / 孤儿状态");
@@ -174,6 +273,8 @@ describe("event categories (Chinese)", () => {
     expect(categorizeEvent("approval_requested").group).toBe("approval");
     expect(categorizeEvent("run_failed").group).toBe("error");
     expect(categorizeEvent("run_failed").groupLabel).toBe("错误");
+    expect(categorizeEvent("span_start").label).toBe("执行跨度开始");
+    expect(categorizeEvent("span_end").label).toBe("执行跨度结束");
   });
 
   it("groups mixed events", () => {

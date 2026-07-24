@@ -1,0 +1,152 @@
+- generic [ref=f1e8]:
+  - banner [ref=f1e9]:
+    - generic [ref=f1e15]:
+      - heading "Agent Harness" [level=1] [ref=f1e16]
+      - text: 运行与质量工作台
+    - navigation "主视图" [ref=f1e17]:
+      - button "检查器" [ref=f1e18] [cursor=pointer]
+      - button "评测" [ref=f1e19] [cursor=pointer]
+    - generic [ref=f1e20]:
+      - status [ref=f1e21]: 实时
+      - button "切换主题" [ref=f1e24] [cursor=pointer]
+  - main [ref=f1e27]:
+    - article [ref=f1e28]:
+      - generic [ref=f1e29]:
+        - generic [ref=f1e30]:
+          - button "返回检查器" [ref=f1e31] [cursor=pointer]
+          - button "重新评测" [ref=f1e34] [cursor=pointer]
+        - generic [ref=f1e38]:
+          - text: 轨迹原生评测
+          - heading "请读取 README.md，并按发布流程验证结果。" [level=2] [ref=f1e39]
+          - paragraph [ref=f1e40]: 运行 73384eb7ad95 · 报告 9eed2c2ea31c · 策略版本 1 · 2026/7/25 00:19:07
+      - generic [ref=f1e41]:
+        - generic [ref=f1e42]:
+          - strong [ref=f1e43]: "83"
+          - generic [ref=f1e44]: / 100
+        - generic [ref=f1e48]:
+          - strong [ref=f1e49]: 未通过
+          - generic [ref=f1e50]: 确定性硬规则失败，分数不可覆盖
+        - generic [ref=f1e51]:
+          - generic [ref=f1e52]: 检查结果
+          - strong [ref=f1e53]: 5 通过 · 1 失败
+        - generic [ref=f1e54]:
+          - generic [ref=f1e55]: 未配置
+          - strong [ref=f1e56]: "0"
+        - generic [ref=f1e57]:
+          - generic [ref=f1e58]: 主要归因
+          - strong [ref=f1e59]: 工具选择错误
+      - tablist "评测视图" [ref=f1e60]:
+        - tab "总览" [ref=f1e61] [cursor=pointer]
+        - tab "轨迹" [ref=f1e64] [cursor=pointer]
+        - tab "根因" [active] [selected] [ref=f1e69] [cursor=pointer]
+        - tab "裁判模型" [ref=f1e75] [cursor=pointer]
+        - tab "回归" [ref=f1e80] [cursor=pointer]
+      - tabpanel [ref=f1e88]:
+        - generic [ref=f1e318]:
+          - main [ref=f1e319]:
+            - generic [ref=f1e320]:
+              - generic [ref=f1e321]:
+                - text: 根因诊断
+                - heading "工具选择错误" [level=3] [ref=f1e322]
+              - generic [ref=f1e323]: 90% 置信度
+            - generic [ref=f1e329]:
+              - strong [ref=f1e330]: 只读诊断
+              - generic [ref=f1e331]: 诊断不会自动修改提示词、工具、技能或运行配置。
+            - generic [ref=f1e332]:
+              - heading "诊断探针证据链" [level=3] [ref=f1e333]
+              - article [ref=f1e334]:
+                - generic [ref=f1e335]:
+                  - strong [ref=f1e336]: 工具规范探针
+                  - generic [ref=f1e337]: tool:read_file · tool_schema:3c9c75e8c7e06399159f8f21759b3d7bacbdb8dc56d4923262069f0974329489
+                - paragraph [ref=f1e338]: "工具 read_file 的调用参数为 {'path': 'README.md'}；规范指纹为 3c9c75e8c7e06399159f8f21759b3d7bacbdb8dc56d4923262069f0974329489。"
+                - 'button "跨度 7203589298 #10" [ref=f1e340] [cursor=pointer]':
+                  - generic [ref=f1e344]: 跨度 7203589298
+                  - code [ref=f1e345]: "#10"
+              - article [ref=f1e346]:
+                - generic [ref=f1e347]:
+                  - strong [ref=f1e348]: 提示词探针
+                  - generic [ref=f1e349]: prompt:bd2a312679f642a1eab436e76b0130518a587d60b046befd916958f49d85b98d
+                - paragraph [ref=f1e350]: 原始任务提示词指纹：bd2a312679f642a1eab436e76b0130518a587d60b046befd916958f49d85b98d。
+                - 'button "跨度 7203589298 #10" [ref=f1e352] [cursor=pointer]':
+                  - generic [ref=f1e356]: 跨度 7203589298
+                  - code [ref=f1e357]: "#10"
+              - article [ref=f1e358]:
+                - generic [ref=f1e359]:
+                  - strong [ref=f1e360]: 上下文清单探针
+                  - generic [ref=f1e361]: context:9c4964b4539b4b4152f7364e9c72767727de9d68c80579b5cde38c3942302bd3
+                - paragraph [ref=f1e362]: 上下文指纹：9c4964b4539b4b4152f7364e9c72767727de9d68c80579b5cde38c3942302bd3。
+                - 'button "跨度 3043f5af9c #2" [ref=f1e364] [cursor=pointer]':
+                  - generic [ref=f1e368]: 跨度 3043f5af9c
+                  - code [ref=f1e369]: "#2"
+              - article [ref=f1e370]:
+                - generic [ref=f1e371]:
+                  - strong [ref=f1e372]: 工作区规则探针
+                  - generic [ref=f1e373]: workspace_rule:C:\Users\86135\AppData\Local\Temp\agentharness-web-e2e-j_lu0ie8\workspace\AGENTS.md:3e89d207980061041b0cc375c658250b2a4a30252ca1d97496cfc302a547cd46
+                - paragraph [ref=f1e374]: 已以只读方式检查模型上下文引用的工作区规则。
+                - 'button "跨度 7203589298 #10" [ref=f1e376] [cursor=pointer]':
+                  - generic [ref=f1e380]: 跨度 7203589298
+                  - code [ref=f1e381]: "#10"
+              - article [ref=f1e382]:
+                - generic [ref=f1e383]:
+                  - strong [ref=f1e384]: 运行配置探针
+                  - generic [ref=f1e385]: runtime:e62abf1c2c8ae7a62548a66e4cab5ec40a27c473b94932777a362d4467f39af3 · provider:evaluation-demo · model:unknown
+                - paragraph [ref=f1e386]: 运行配置指纹：e62abf1c2c8ae7a62548a66e4cab5ec40a27c473b94932777a362d4467f39af3；服务商：evaluation-demo；模型：未设置；工作目录：C:\Users\86135\AppData\Local\Temp\agentharness-web-e2e-j_lu0ie8\workspace。
+                - 'button "跨度 7203589298 #10" [ref=f1e388] [cursor=pointer]':
+                  - generic [ref=f1e392]: 跨度 7203589298
+                  - code [ref=f1e393]: "#10"
+              - article [ref=f1e394]:
+                - generic [ref=f1e395]:
+                  - strong [ref=f1e396]: 版本探针
+                  - generic [ref=f1e397]: trace_schema:2 · event_schema:1
+                - paragraph [ref=f1e398]: 轨迹结构版本：2；事件结构版本：[1]。
+                - 'button "跨度 7203589298 #10" [ref=f1e400] [cursor=pointer]':
+                  - generic [ref=f1e404]: 跨度 7203589298
+                  - code [ref=f1e405]: "#10"
+          - complementary [ref=f1e406]:
+            - generic [ref=f1e407]:
+              - heading "首次偏离" [level=3] [ref=f1e408]
+              - 'button "跨度 7203589298 #10" [ref=f1e409] [cursor=pointer]':
+                - generic [ref=f1e413]: 跨度 7203589298
+                - code [ref=f1e414]: "#10"
+            - generic [ref=f1e415]:
+              - heading "受影响配置" [level=3] [ref=f1e416]
+              - generic [ref=f1e417]:
+                - code [ref=f1e418]: tool:read_file
+                - code [ref=f1e419]: tool_schema:3c9c75e8c7e06399159f8f21759b3d7bacbdb8dc56d4923262069f0974329489
+                - code [ref=f1e420]: prompt:bd2a312679f642a1eab436e76b0130518a587d60b046befd916958f49d85b98d
+                - code [ref=f1e421]: context:9c4964b4539b4b4152f7364e9c72767727de9d68c80579b5cde38c3942302bd3
+                - code [ref=f1e422]: workspace_rule:C:\Users\86135\AppData\Local\Temp\agentharness-web-e2e-j_lu0ie8\workspace\AGENTS.md:3e89d207980061041b0cc375c658250b2a4a30252ca1d97496cfc302a547cd46
+                - code [ref=f1e423]: runtime:e62abf1c2c8ae7a62548a66e4cab5ec40a27c473b94932777a362d4467f39af3
+                - code [ref=f1e424]: provider:evaluation-demo
+                - code [ref=f1e425]: model:unknown
+                - code [ref=f1e426]: trace_schema:2
+                - code [ref=f1e427]: event_schema:1
+            - generic [ref=f1e428]:
+              - heading "修改建议" [level=3] [ref=f1e429]
+              - list [ref=f1e430]:
+                - listitem [ref=f1e431]: 使用任务专属工具规范和预期轨迹约束工具选择。
+                - listitem [ref=f1e432]: 遵循要求的工具调用轨迹和顺序。
+            - generic [ref=f1e433]:
+              - heading "全部证据" [level=3] [ref=f1e434]
+              - generic [ref=f1e435]:
+                - 'button "跨度 7203589298 #10" [ref=f1e436] [cursor=pointer]':
+                  - generic [ref=f1e440]: 跨度 7203589298
+                  - code [ref=f1e441]: "#10"
+                - 'button "跨度 7203589298 #10" [ref=f1e442] [cursor=pointer]':
+                  - generic [ref=f1e446]: 跨度 7203589298
+                  - code [ref=f1e447]: "#10"
+                - 'button "跨度 7203589298 #10" [ref=f1e448] [cursor=pointer]':
+                  - generic [ref=f1e452]: 跨度 7203589298
+                  - code [ref=f1e453]: "#10"
+                - 'button "跨度 3043f5af9c #2" [ref=f1e454] [cursor=pointer]':
+                  - generic [ref=f1e458]: 跨度 3043f5af9c
+                  - code [ref=f1e459]: "#2"
+                - 'button "跨度 7203589298 #10" [ref=f1e460] [cursor=pointer]':
+                  - generic [ref=f1e464]: 跨度 7203589298
+                  - code [ref=f1e465]: "#10"
+                - 'button "跨度 7203589298 #10" [ref=f1e466] [cursor=pointer]':
+                  - generic [ref=f1e470]: 跨度 7203589298
+                  - code [ref=f1e471]: "#10"
+                - 'button "跨度 7203589298 #10" [ref=f1e472] [cursor=pointer]':
+                  - generic [ref=f1e476]: 跨度 7203589298
+                  - code [ref=f1e477]: "#10"

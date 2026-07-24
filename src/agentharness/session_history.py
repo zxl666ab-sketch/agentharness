@@ -22,21 +22,14 @@ HISTORY_EXCLUDED_STATUSES = frozenset(
     }
 )
 
-TITLE_MAX_LEN = 48
-
-
 def collapse_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip())
 
 
-def session_title_from_message(content: str, max_len: int = TITLE_MAX_LEN) -> str:
-    """First non-empty user message → collapsed whitespace, truncated to max_len."""
+def session_title_from_message(content: str) -> str:
+    """Return the full first user message with whitespace collapsed."""
     title = collapse_whitespace(content)
-    if not title:
-        return "session"
-    if len(title) <= max_len:
-        return title
-    return title[: max_len - 1].rstrip() + "…"
+    return title or "session"
 
 
 def is_top_level_run(run: dict[str, Any]) -> bool:

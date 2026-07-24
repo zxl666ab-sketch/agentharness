@@ -9,6 +9,12 @@ from typing import Any
 _DEFAULT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(
+            r"(?i)(authorization\s*:\s*(?:bearer|basic)\s+)([^\s,]{8,})"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
+        re.compile(
             r"(?i)(api[_-]?key|secret|token|password|passwd|authorization|bearer)"
             r"\s*[=:]\s*['\"]?([^\s'\"\\,]{8,})['\"]?"
         ),

@@ -1,0 +1,11 @@
+name: trace-native-ci
+defaults:
+  provider: fake
+cases:
+  - id: regression-case
+    tags: [golden, output]
+    prompt: "[fake:text]regressed answer"
+    assert:
+      status: completed
+      contains: ["stable answer"]
+      match_mode: exact

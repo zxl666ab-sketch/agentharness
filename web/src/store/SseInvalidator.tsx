@@ -35,6 +35,7 @@ export function SseInvalidator({ selectedRunId }: Props) {
     );
     if (touchesRuns) {
       void queryClient.invalidateQueries({ queryKey: ["runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
       const terminalSessions = new Set(
         fresh
           .filter(

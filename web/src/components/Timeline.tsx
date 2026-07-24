@@ -40,6 +40,7 @@ type Filter = "all" | EventGroup;
 const FILTERS: Array<{ id: Filter; label: string }> = [
   { id: "all", label: "全部" },
   { id: "model", label: "模型" },
+  { id: "verification", label: "验证" },
   { id: "tool", label: "工具" },
   { id: "approval", label: "审批" },
   { id: "error", label: "错误" },
@@ -52,6 +53,7 @@ function EventIcon({ kind, group, type }: { kind?: string; group: EventGroup; ty
   if (kind === "result") return <CheckCircle2 size={15} aria-hidden="true" />;
   if (kind === "child_run") return <GitBranch size={15} aria-hidden="true" />;
   if (kind === "approval" || group === "approval") return <ShieldCheck size={15} aria-hidden="true" />;
+  if (kind === "verification" || group === "verification") return <ShieldCheck size={15} aria-hidden="true" />;
   if (kind === "error" || group === "error") return <AlertTriangle size={15} aria-hidden="true" />;
   if (kind === "model_output") return <MessageSquareText size={15} aria-hidden="true" />;
   if (kind === "turn" || group === "model") return <Bot size={15} aria-hidden="true" />;
@@ -62,6 +64,7 @@ function filterTraceRows(rows: TraceRow[], filter: Filter): TraceRow[] {
   if (filter === "all") return rows;
   return rows.filter((row) => {
     if (filter === "model") return row.kind === "turn" || categorizeEvent(row.event.type).group === "model";
+    if (filter === "verification") return row.kind === "verification" || categorizeEvent(row.event.type).group === "verification";
     if (filter === "tool") {
       return (
         row.kind === "tool" ||
@@ -310,6 +313,7 @@ function statusLabel(status: string): string {
     pending: "等待启动",
     running: "运行中",
     waiting_approval: "等待审批",
+    require_human: "需要人工处理",
     completed: "已完成",
     failed: "失败",
     interrupted: "已中断",

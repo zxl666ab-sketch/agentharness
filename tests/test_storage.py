@@ -157,6 +157,7 @@ def test_list_sessions_enriches_latest_run_in_one_query(data_dir):
         assert match["latest_run_id"] == "latest"
         assert match["latest_status"] == "failed"
         assert match["latest_error"] == "boom"
+        assert match["run_count"] == 2
 
         # The enrichment is part of the single list_sessions statement.
         plan = store.explain_query_plan(

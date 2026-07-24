@@ -1,0 +1,63 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e10]:
+      - heading "Agent Harness" [level=1] [ref=e11]
+      - text: 运行与质量工作台
+    - navigation "主视图" [ref=e12]:
+      - button "检查器" [ref=e13] [cursor=pointer]
+      - button "评测" [ref=e14] [cursor=pointer]
+    - generic [ref=e15]:
+      - status [ref=e16]: 已断开
+      - button "切换主题" [ref=e19] [cursor=pointer]
+  - main [ref=e22]:
+    - generic [ref=e23]:
+      - generic [ref=e24]:
+        - heading "任务" [level=2] [ref=e25]
+        - generic [ref=e26]: 0 个会话
+      - generic [ref=e27]:
+        - generic [ref=e28]:
+          - textbox "搜索任务" [ref=e33]
+          - combobox "按状态筛选" [ref=e34]:
+            - option "全部状态" [selected]
+            - option "运行中"
+            - option "等待审批"
+            - option "需要人工处理"
+            - option "已完成"
+            - option "失败"
+            - option "已中断"
+            - option "已取消"
+        - status [ref=e36]:
+          - generic [ref=e39]:
+            - strong [ref=e40]: 正在载入任务
+            - generic [ref=e41]: 读取最近的会话记录
+    - generic [ref=e42]:
+      - generic [ref=e43]:
+        - generic [ref=e44]:
+          - heading "执行追踪" [level=2] [ref=e45]
+          - generic [ref=e46]: 未选择运行
+        - button "收起" [expanded] [ref=e47] [cursor=pointer]
+      - generic [ref=e52]:
+        - generic [ref=e57]:
+          - generic [ref=e58]: 状态
+          - strong [ref=e59]: "-"
+        - generic [ref=e65]:
+          - generic [ref=e66]: 耗时
+          - strong [ref=e67]: "-"
+        - generic [ref=e72]:
+          - generic [ref=e73]: 令牌
+          - strong [ref=e74]: "- / -"
+        - generic [ref=e80]:
+          - generic [ref=e81]: 步骤
+          - strong [ref=e82]: 0 / -
+      - status [ref=e84]:
+        - generic [ref=e88]:
+          - strong [ref=e89]: 请选择运行
+          - generic [ref=e90]: 选择左侧记录以查看执行追踪
+    - complementary [ref=e91]:
+      - generic [ref=e92]:
+        - heading "对话上下文" [level=2] [ref=e93]
+        - generic [ref=e94]: 0 轮
+      - status [ref=e96]:
+        - generic [ref=e100]:
+          - strong [ref=e101]: 没有可检查的运行
+          - generic [ref=e102]: 先从运行列表中选择一项

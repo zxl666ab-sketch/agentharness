@@ -1,0 +1,11 @@
+name: trace-native-rerun
+defaults:
+  provider: fake
+cases:
+  - id: repeated-agent
+    tags: [rerun, confidence]
+    repeat: 5
+    prompt: "[fake:text]repeatable outcome"
+    assert:
+      status: completed
+      contains: ["repeatable outcome"]

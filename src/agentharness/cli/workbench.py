@@ -23,6 +23,7 @@ from prompt_toolkit.history import FileHistory, History, InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Dimension, HSplit, Layout, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 from prompt_toolkit.styles import Style
 
 from agentharness.cli.input import SLASH_COMMANDS, SlashCommandCompleter, _composer_key_bindings
@@ -106,6 +107,8 @@ class Workbench:
         self._live_active = False
         self._alt_screen = False
         self._last_size = (0, 0)
+        # 0 = pin to latest (bottom). Positive = lines scrolled up into history.
+        self._scroll_offset = 0
 
     # ------------------------------------------------------------------
     # Public API used by interactive.py
@@ -174,6 +177,7 @@ class Workbench:
     def begin_user_turn(self, message: str) -> None:
         with self._lock:
             self.vm.begin_user_turn(message)
+            self._scroll_offset = 0
             self._needs_redraw = True
         self._enter_live()
         self.paint_live(force=True)
@@ -207,7 +211,8 @@ class Workbench:
                 return
             cols, rows = shutil.get_terminal_size(fallback=(100, 28))
             self._last_size = (cols, rows)
-            lines = self.vm.render_frame(cols, rows)
+            # Streaming always follows the latest lines; idle prompt owns scroll.
+            lines = self.vm.render_frame(cols, rows, scroll_offset=0)
             self._needs_redraw = False
         self._write_frame(lines)
 
@@ -242,7 +247,9 @@ class Workbench:
         try:
             if restore_frame:
                 cols, rows = shutil.get_terminal_size(fallback=self._last_size or (100, 28))
-                lines = self.vm.render_frame(cols, rows)
+                lines = self.vm.render_frame(
+                    cols, rows, scroll_offset=self._scroll_offset
+                )
                 self._out.write(_ALT_LEAVE + _SHOW_CURSOR + _HOME_CLEAR)
                 self._out.write("\n".join(lines) + "\n")
             else:
@@ -266,6 +273,56 @@ class Workbench:
     # prompt-toolkit Application for idle composer
     # ------------------------------------------------------------------
 
+
+    # ------------------------------------------------------------------
+    # Body scroll (idle composer + static frames)
+    # ------------------------------------------------------------------
+
+    def _term_size(self) -> tuple[int, int]:
+        return shutil.get_terminal_size(fallback=self._last_size or (100, 28))
+
+    def _body_height(self, rows: int | None = None) -> int:
+        # Keep in sync with CliViewModel.render_frame chrome count (9).
+        h = rows if rows is not None else self._term_size()[1]
+        return max(1, h - 9)
+
+    def _max_scroll_offset(self, width: int | None = None, rows: int | None = None) -> int:
+        w = width if width is not None else self._term_width()
+        body_h = self._body_height(rows)
+        total = len(self.vm.iter_body_lines(w))
+        return max(0, total - body_h)
+
+    def scroll_lines(self, delta: int) -> None:
+        """Move the body viewport. Positive delta reveals older lines."""
+        with self._lock:
+            max_off = self._max_scroll_offset()
+            self._scroll_offset = min(max(0, self._scroll_offset + int(delta)), max_off)
+
+    def scroll_pages(self, pages: int) -> None:
+        step = max(1, self._body_height() - 1)
+        self.scroll_lines(pages * step)
+
+    def scroll_to_bottom(self) -> None:
+        with self._lock:
+            self._scroll_offset = 0
+
+    def _visible_body_lines(self, width: int, height: int | None = None) -> list[str]:
+        all_lines = self.vm.iter_body_lines(width)
+        body_h = height if height is not None else self._body_height()
+        if not all_lines:
+            return [
+                "",
+                "  Type a task and press Enter.  /help for commands.",
+            ]
+        max_off = max(0, len(all_lines) - body_h)
+        off = min(max(0, self._scroll_offset), max_off)
+        self._scroll_offset = off
+        if len(all_lines) <= body_h:
+            return all_lines
+        end = len(all_lines) - off
+        start = max(0, end - body_h)
+        return all_lines[start:end]
+
     def _prompt_line(self) -> str:
         result: dict[str, str] = {}
         buffer = Buffer(
@@ -287,6 +344,37 @@ class Workbench:
             if not event.current_buffer.text:
                 event.app.exit(exception=EOFError())
 
+        @kb.add("pageup")
+        def _page_up(event: Any) -> None:
+            self.scroll_pages(+1)
+            event.app.invalidate()
+
+        @kb.add("pagedown")
+        def _page_down(event: Any) -> None:
+            self.scroll_pages(-1)
+            event.app.invalidate()
+
+        @kb.add("c-up")
+        def _scroll_up_line(event: Any) -> None:
+            self.scroll_lines(+3)
+            event.app.invalidate()
+
+        @kb.add("c-down")
+        def _scroll_down_line(event: Any) -> None:
+            self.scroll_lines(-3)
+            event.app.invalidate()
+
+        @kb.add("c-home")
+        def _scroll_top(event: Any) -> None:
+            with self._lock:
+                self._scroll_offset = self._max_scroll_offset()
+            event.app.invalidate()
+
+        @kb.add("c-end")
+        def _scroll_bottom(event: Any) -> None:
+            self.scroll_to_bottom()
+            event.app.invalidate()
+
         def get_line_prefix(line_number: int, wrap_count: int) -> StyleAndTextTuples:
             if line_number == 0 and wrap_count == 0:
                 return [("class:prompt", "> ")]
@@ -306,7 +394,7 @@ class Workbench:
                         style="class:phase",
                     ),
                     Window(
-                        FormattedTextControl(self._body_fragments),
+                        _ScrollBodyControl(self),
                         wrap_lines=False,
                         style="class:body",
                     ),
@@ -345,7 +433,7 @@ class Workbench:
             key_bindings=kb,
             full_screen=True,
             style=_style_for_terminal(),
-            mouse_support=False,
+            mouse_support=True,
             erase_when_done=True,
         )
         try:
@@ -380,7 +468,8 @@ class Workbench:
 
     def _body_fragments(self) -> StyleAndTextTuples:
         width = self._term_width()
-        lines = self.vm.iter_body_lines(width)
+        rows = self._term_size()[1]
+        lines = self._visible_body_lines(width, height=self._body_height(rows))
         # Show a trailing idle hint when empty.
         if not lines:
             lines = [
@@ -433,6 +522,38 @@ class Workbench:
         w = max(self._term_width(), 10)
         inner = max(w - 2, 1)
         return "└" + "─" * inner + "┘"
+
+
+
+class _ScrollBodyControl(FormattedTextControl):
+    """Body text control that routes mouse wheel to Workbench scroll."""
+
+    def __init__(self, workbench: Workbench) -> None:
+        self._workbench = workbench
+        super().__init__(
+            workbench._body_fragments,
+            focusable=False,
+            show_cursor=False,
+        )
+
+    def mouse_handler(self, mouse_event: MouseEvent) -> object:  # type: ignore[override]
+        wb = self._workbench
+        et = mouse_event.event_type
+        if et == MouseEventType.SCROLL_UP:
+            wb.scroll_lines(+3)
+            try:
+                get_app().invalidate()
+            except Exception:  # noqa: BLE001
+                pass
+            return None
+        if et == MouseEventType.SCROLL_DOWN:
+            wb.scroll_lines(-3)
+            try:
+                get_app().invalidate()
+            except Exception:  # noqa: BLE001
+                pass
+            return None
+        return NotImplemented
 
 
 class LiveRedrawController:

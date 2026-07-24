@@ -4,6 +4,7 @@ const STATUS_LABEL: Record<string, string> = {
   pending: "等待中",
   running: "运行中",
   waiting_approval: "等待审批",
+  require_human: "需要人工处理",
   completed: "已完成",
   failed: "失败",
   cancelled: "已取消",

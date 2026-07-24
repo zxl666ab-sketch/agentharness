@@ -155,12 +155,28 @@ class Storage:
         rows = self._reader().execute(
             """
             SELECT sessions.*,
+                   COALESCE(
+                       (
+                           SELECT m.content
+                           FROM runs AS first_run
+                           JOIN messages AS m ON m.run_id = first_run.id
+                           WHERE first_run.session_id = sessions.id
+                             AND (first_run.parent_run_id IS NULL OR first_run.parent_run_id = '')
+                             AND m.role = 'user'
+                           ORDER BY first_run.rowid ASC, m.seq ASC
+                           LIMIT 1
+                       ),
+                       sessions.title
+                   ) AS display_title,
                    latest.id AS latest_run_id,
                    latest.status AS latest_status,
-                   latest.error AS latest_error
+                   latest.error AS latest_error,
+                   COALESCE(recent.run_count, 0) AS run_count
             FROM sessions
             LEFT JOIN (
-                SELECT session_id, MAX(rowid) AS activity_order
+                SELECT session_id,
+                       MAX(rowid) AS activity_order,
+                       COUNT(*) AS run_count
                 FROM runs
                 WHERE parent_run_id IS NULL
                 GROUP BY session_id
@@ -321,6 +337,40 @@ class Storage:
                 self._conn.execute("ROLLBACK")
                 raise
         return assigned
+
+    def merge_run_metadata(self, run_id: str, patch: dict[str, Any]) -> None:
+        """Merge keys into an existing run's metadata_json (overwrite on collision).
+
+        Terminal runs remain mutable for stable keys such as ``eval``. The full
+        metadata object is re-redacted on write.
+        """
+        if not patch:
+            return
+        now = _utcnow()
+        with self._lock:
+            self._conn.execute("BEGIN")
+            try:
+                row = self._conn.execute(
+                    "SELECT metadata_json FROM runs WHERE id = ?", (run_id,)
+                ).fetchone()
+                if not row:
+                    self._conn.execute("ROLLBACK")
+                    return
+                try:
+                    meta = json.loads(row[0] or "{}")
+                    if not isinstance(meta, dict):
+                        meta = {}
+                except (TypeError, json.JSONDecodeError):
+                    meta = {}
+                meta.update(patch)
+                self._conn.execute(
+                    "UPDATE runs SET metadata_json = ?, updated_at = ? WHERE id = ?",
+                    (_dumps(self.redactor.redact_obj(meta)), now, run_id),
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
 
     # Single enrichment projection reused by get_run / list_runs / get_run_tree so
     # child_count + user_summary + depth come from one statement (no per-row N+1)
@@ -524,6 +574,23 @@ class Storage:
                 (after_global_seq, limit),
             ).fetchall()
         return [self._row_to_event(r) for r in rows]
+
+    def get_context_manifests(self, run_id: str) -> list[dict[str, Any]]:
+        """Return redacted, ordered per-model-turn context manifests."""
+        manifests: list[dict[str, Any]] = []
+        for event in self.get_events(run_id=run_id, limit=10_000):
+            event_type = event.type.value if isinstance(event.type, EventType) else str(event.type)
+            if event_type != "context_manifest":
+                continue
+            raw = event.payload.get("manifest")
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            item["artifact_id"] = event.payload.get("artifact_id")
+            item["event_id"] = event.event_id
+            item["global_seq"] = event.global_seq
+            manifests.append(self.redactor.redact_obj(item))
+        return manifests
 
     def iter_events_after(self, after_global_seq: int = 0) -> Iterator[EventEnvelope]:
         yield from self.get_events(after_global_seq=after_global_seq, limit=10_000)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -161,7 +162,15 @@ async def test_injected_harness_not_closed(tmp_path: Path) -> None:
     report = await run_suite(load_suite(suite_path), harness=h)
     assert report.passed == 1
     # still usable
-    assert h.get_run(report.results[0].run_id) is not None
+    stored = h.get_run(report.results[0].run_id)
+    assert stored is not None
+    metadata = json.loads(stored["metadata_json"])
+    assert metadata["evaluation"]["report_id"] == (
+        report.results[0].evaluation_report.report_id
+    )
+    assert metadata["evaluation"]["replay"]["snapshot_id"] == (
+        report.results[0].snapshot_id
+    )
     await h.aclose()
 
 

@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agentharness.eval.contracts import (
+    RegressionFinding as GateFinding,
+)
+from agentharness.eval.contracts import (
+    RegressionReport,
+)
 from agentharness.eval.dataset import EvalConfigError
 
 SUPPORTED_SCHEMA_VERSIONS = frozenset({1, "1"})
@@ -21,55 +27,6 @@ class BaselineGates:
     max_score_regression: float | None = None  # absolute drop per case_id
     max_token_regression: float | None = None  # ratio: current/baseline total tokens - 1
     max_latency_regression: float | None = None  # ratio: current/baseline mean latency - 1
-
-
-@dataclass
-class GateFinding:
-    gate: str
-    triggered: bool
-    message: str
-    baseline: Any = None
-    current: Any = None
-    delta: Any = None
-
-
-@dataclass
-class RegressionReport:
-    baseline_path: str
-    gates: list[GateFinding] = field(default_factory=list)
-    new_failures: list[str] = field(default_factory=list)
-    score_drops: list[dict[str, Any]] = field(default_factory=list)
-    token_delta: dict[str, Any] = field(default_factory=dict)
-    latency_delta: dict[str, Any] = field(default_factory=dict)
-    summary: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def failed(self) -> bool:
-        if self.new_failures:
-            return True
-        return any(g.triggered for g in self.gates)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "baseline_path": self.baseline_path,
-            "failed": self.failed,
-            "new_failures": list(self.new_failures),
-            "score_drops": list(self.score_drops),
-            "token_delta": dict(self.token_delta),
-            "latency_delta": dict(self.latency_delta),
-            "summary": dict(self.summary),
-            "gates": [
-                {
-                    "gate": g.gate,
-                    "triggered": g.triggered,
-                    "message": g.message,
-                    "baseline": g.baseline,
-                    "current": g.current,
-                    "delta": g.delta,
-                }
-                for g in self.gates
-            ],
-        }
 
 
 def _load_report(path: str | Path) -> dict[str, Any]:

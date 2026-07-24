@@ -15,16 +15,23 @@ from pathlib import Path
 from typing import Any
 
 from agentharness.contracts import ApprovalMode, BudgetConfig, RunRequest, new_id
+from agentharness.eval.contracts import (
+    AgentTrace,
+    DiagnosisReport,
+    EvaluationReport,
+    RegressionCase,
+    RerunStatistics,
+)
 from agentharness.eval.dataset import EvalCase, EvalSuite
+from agentharness.eval.diagnosis import DiagnosisEngine
 from agentharness.eval.graders import (
-    CompositeGrader,
-    DeterministicGrader,
-    GradeResult,
     JudgeAdapter,
     LLMJudgeGrader,
     Trajectory,
-    TrajectoryGrader,
 )
+from agentharness.eval.regression import summarize_reruns
+from agentharness.eval.replay import SnapshotStore
+from agentharness.eval.trajectory import TrajectoryEvaluator, policy_from_assertions
 from agentharness.harness import Harness
 
 
@@ -35,7 +42,7 @@ class CaseResult:
     model: str | None
     passed: bool
     status: str
-    score: float
+    score: float | None
     reasons: list[str]
     latency_s: float
     input_tokens: int
@@ -46,6 +53,11 @@ class CaseResult:
     tags: list[str] = field(default_factory=list)
     logical_case_id: str = ""
     grader_evidence: dict[str, Any] = field(default_factory=dict)
+    evaluation_report: EvaluationReport | None = None
+    diagnosis: DiagnosisReport | None = None
+    snapshot_id: str | None = None
+    web_report_id: str | None = None
+    baseline_diff: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -58,6 +70,7 @@ class GroupMetrics:
     total_tokens: int = 0
     steps: int = 0
     score_sum: float = 0.0
+    scored: int = 0
 
     @property
     def pass_rate(self) -> float:
@@ -76,8 +89,8 @@ class GroupMetrics:
         return self.steps / self.total if self.total else 0.0
 
     @property
-    def mean_score(self) -> float:
-        return self.score_sum / self.total if self.total else 0.0
+    def mean_score(self) -> float | None:
+        return self.score_sum / self.scored if self.scored else None
 
 
 @dataclass
@@ -86,6 +99,8 @@ class SuiteReport:
     results: list[CaseResult]
     groups: list[GroupMetrics]
     data_dir: str | None = None
+    gate_decision: Any | None = None
+    rerun_statistics: RerunStatistics | None = None
 
     @property
     def total(self) -> int:
@@ -100,10 +115,11 @@ class SuiteReport:
         return self.passed / self.total if self.total else 0.0
 
     @property
-    def mean_score(self) -> float:
-        if not self.results:
-            return 0.0
-        return sum(r.score for r in self.results) / len(self.results)
+    def mean_score(self) -> float | None:
+        scores = [r.score for r in self.results if r.score is not None]
+        if not scores:
+            return None
+        return sum(scores) / len(scores)
 
     @property
     def total_tokens(self) -> int:
@@ -158,13 +174,6 @@ def _messages_dicts(harness: Harness, run_id: str) -> list[dict[str, Any]]:
     return out
 
 
-def _build_grader(judge: JudgeAdapter | None) -> CompositeGrader:
-    graders: list[Any] = [DeterministicGrader(), TrajectoryGrader()]
-    if judge is not None:
-        graders.append(LLMJudgeGrader(judge, redactor=None))
-    return CompositeGrader(graders)
-
-
 def _expand_cases(suite: EvalSuite) -> list[tuple[EvalCase, str, str]]:
     """Return (case, result_case_id, logical_case_id) for each expanded repeat."""
     expanded: list[tuple[EvalCase, str, str]] = []
@@ -177,23 +186,40 @@ def _expand_cases(suite: EvalSuite) -> list[tuple[EvalCase, str, str]]:
     return expanded
 
 
-def _trajectory_from_result(
+def build_trajectory(
     harness: Harness,
     result: Any,
     *,
     latency_s: float,
 ) -> Trajectory:
-    run_id = getattr(result, "run_id", "") or ""
-    status = result.status.value if hasattr(result.status, "value") else str(result.status)
-    usage = result.usage
+    """Build a Trajectory from a finished RunResult (shared by suite + run-end)."""
+    trace = build_agent_trace(harness, result)
     return Trajectory(
-        status=status,
-        output=result.output or "",
-        total_tokens=int(usage.total_tokens) if usage else 0,
-        steps=int(result.steps or 0),
+        status=trace.status,
+        output=trace.final_output,
+        total_tokens=trace.usage.total_tokens,
+        steps=trace.steps,
         latency_s=latency_s,
-        tools_ordered=_tools_ordered(harness, run_id),
-        messages=_messages_dicts(harness, run_id),
+        tools_ordered=[
+            span.tool_name or span.name
+            for span in trace.spans
+            if span.kind == "tool"
+        ],
+        messages=[message.model_dump(mode="json") for message in trace.messages],
+    )
+
+
+def build_agent_trace(harness: Harness, result: Any) -> AgentTrace:
+    """Project the persisted facts for a finished run into the canonical contract."""
+    trace = harness.get_agent_trace(getattr(result, "run_id", "") or "")
+    status = result.status.value if hasattr(result.status, "value") else str(result.status)
+    return trace.model_copy(
+        update={
+            "status": status,
+            "final_output": result.output or trace.final_output,
+            "usage": result.usage or trace.usage,
+            "steps": int(result.steps or trace.steps),
+        }
     )
 
 
@@ -227,13 +253,7 @@ async def run_suite(
     else:
         resolved_data_dir = Path(harness.data_dir)
 
-    grader = _build_grader(judge)
-    # When a judge is present, wire harness redactor so secrets match process redactor.
-    if judge is not None:
-        # Rebuild with harness redactor for judge path.
-        graders: list[Any] = [DeterministicGrader(), TrajectoryGrader()]
-        graders.append(LLMJudgeGrader(judge, redactor=harness.redactor))
-        grader = CompositeGrader(graders)
+    evaluator = TrajectoryEvaluator(storage=harness.storage)
 
     sem = asyncio.Semaphore(max(1, concurrency))
     expanded = _expand_cases(suite)
@@ -277,18 +297,89 @@ async def run_suite(
                 )
             latency = time.monotonic() - t0
 
-        traj = _trajectory_from_result(harness, result, latency_s=latency)
-        grade: GradeResult = grader.grade(case, traj)
+        trace = build_agent_trace(harness, result).model_copy(
+            update={"duration_ms": latency * 1000.0}
+        )
+        policy_v2 = policy_from_assertions(
+            case.assertions, policy_id=f"suite:{suite.name}:{logical_id}"
+        )
+        evaluation = evaluator.evaluate(trace, policy_v2)
+        diagnosis = (
+            DiagnosisEngine(storage=harness.storage).diagnose(trace, evaluation)
+            if evaluation.passed is False
+            else None
+        )
+        snapshot, snapshot_artifact = SnapshotStore(
+            harness.storage, redactor=harness.redactor
+        ).capture(
+            result.run_id,
+            evaluation_policy_version=policy_v2.version,
+        )
+        reasons = [
+            check.message
+            or f"{check.id}: expected {check.expected!r}, actual {check.actual!r}"
+            for check in evaluation.checks
+            if check.status in {"failed", "error"}
+        ]
+        passed = evaluation.passed is True
+        score = evaluation.score
+        evidence: dict[str, Any] = {"evaluation_report": evaluation.model_dump(mode="json")}
+        if judge is not None:
+            legacy_judge = LLMJudgeGrader(judge, redactor=harness.redactor).grade(
+                case, build_trajectory(harness, result, latency_s=latency)
+            )
+            evidence["llm_judge"] = legacy_judge.evidence
+            passed = passed and legacy_judge.passed
+            if evaluation.hard_failures == 0 and score is not None:
+                score = round((score + legacy_judge.score) / 2.0, 4)
+            if not legacy_judge.passed:
+                reasons.extend(legacy_judge.reasons)
+        legacy_eval = {
+            "schema_version": 1,
+            "mode": "deterministic",
+            "source": "suite",
+            "passed": passed,
+            "score": score,
+            "reasons": reasons,
+            "grader": "trajectory_evaluator_v2",
+            "evaluation_mode": evaluation.mode,
+            "failure_category": (
+                "none"
+                if evaluation.passed
+                else next(
+                    (
+                        check.failure_category
+                        for check in evaluation.checks
+                        if check.status in {"failed", "error"}
+                        and check.failure_category
+                    ),
+                    "execution_or_assertion",
+                )
+            ),
+            "evaluation_report": evaluation.model_dump(mode="json"),
+            "evaluation_report_id": evaluation.report_id,
+            "diagnosis_id": diagnosis.diagnosis_id if diagnosis else None,
+            "snapshot_id": snapshot.snapshot_id,
+        }
+        harness.retain_run_evaluation(
+            result.run_id,
+            report=evaluation,
+            diagnosis=diagnosis,
+            snapshot=snapshot,
+            snapshot_artifact=snapshot_artifact,
+            legacy_eval=legacy_eval,
+            source="suite",
+        )
         u = result.usage
         return CaseResult(
             case_id=result_id,
             logical_case_id=logical_id,
             provider=prov,
             model=mdl,
-            passed=grade.passed,
+            passed=passed,
             status=result.status.value,
-            score=float(grade.score),
-            reasons=list(grade.reasons),
+            score=score,
+            reasons=reasons,
             latency_s=latency,
             input_tokens=int(u.input_tokens) if u else 0,
             output_tokens=int(u.output_tokens) if u else 0,
@@ -296,7 +387,11 @@ async def run_suite(
             steps=int(result.steps or 0),
             run_id=result.run_id,
             tags=list(case.tags),
-            grader_evidence=dict(grade.evidence or {}),
+            grader_evidence=evidence,
+            evaluation_report=evaluation,
+            diagnosis=diagnosis,
+            snapshot_id=snapshot.snapshot_id,
+            web_report_id=evaluation.report_id,
         )
 
     try:
@@ -327,11 +422,35 @@ async def run_suite(
         g.latency_s += r.latency_s
         g.total_tokens += r.total_tokens
         g.steps += r.steps
-        g.score_sum += r.score
+        if r.score is not None:
+            g.score_sum += r.score
+            g.scored += 1
 
+    logical_counts = {
+        logical_id: sum(item.logical_case_id == logical_id for item in results)
+        for logical_id in {item.logical_case_id for item in results}
+    }
+    rerun_rows = [
+        RegressionCase(
+            case_id=item.case_id,
+            tags=item.tags,
+            provider=item.provider,
+            model=item.model,
+            evaluation=item.evaluation_report,
+            diagnosis=item.diagnosis,
+            snapshot_id=item.snapshot_id,
+            web_report_id=item.web_report_id,
+            latency_ms=item.latency_s * 1000.0,
+            total_tokens=item.total_tokens,
+        )
+        for item in results
+        if logical_counts.get(item.logical_case_id, 0) > 1
+        and item.evaluation_report is not None
+    ]
     return SuiteReport(
         suite=suite.name,
         results=results,
         groups=list(grouped.values()),
         data_dir=str(resolved_data_dir) if resolved_data_dir is not None else None,
+        rerun_statistics=summarize_reruns(rerun_rows) if rerun_rows else None,
     )

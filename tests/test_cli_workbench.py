@@ -144,12 +144,13 @@ def test_event_fold_streams_tools_and_completion_order() -> None:
         duration_s=1.5,
     )
     assert vm.phase == UiPhase.completed
-    assert any(i.kind == ItemKind.status for i in vm.items)
+    assert not any(i.kind == ItemKind.status for i in vm.items)
     body = "\n".join(vm.iter_body_lines(100))
     assert "you" in body and "list files" in body
     assert "hello world from stream" in body
     assert "shell" in body
-    assert "status=completed" in body
+    assert "status=completed" not in body
+    assert "status=completed" in vm.status_detail
 
 
 def test_tool_start_end_result_order_and_long_truncation() -> None:
@@ -306,3 +307,41 @@ def test_truncate_display_never_exceeds_width() -> None:
     # CJK counts as 2; result must fit
     width = sum(2 if ord(c) > 0xFF else 1 for c in s)
     assert width <= 20
+
+
+
+def test_render_frame_scroll_offset_reveals_older_lines() -> None:
+    vm = CliViewModel()
+    vm.configure(cwd="/tmp", provider="fake", model="m", approval="auto")
+    # Build many body lines so viewport must clip.
+    for i in range(40):
+        vm.begin_user_turn(f"message-{i:02d}")
+        vm.finish_turn(status="completed", run_id=f"r{i}", session_id="s", provider="fake")
+    bottom = vm.render_frame(100, 24, scroll_offset=0)
+    # Large offset pins the viewport to the oldest history.
+    topish = vm.render_frame(100, 24, scroll_offset=10**9)
+    bottom_body = "\n".join(bottom)
+    top_body = "\n".join(topish)
+    assert "message-39" in bottom_body
+    assert "message-00" in top_body
+    assert bottom != topish
+
+
+def test_workbench_scroll_lines_clamps_and_changes_viewport() -> None:
+    from agentharness.cli.workbench import Workbench
+
+    wb = Workbench()
+    wb.vm.configure(cwd="/tmp", provider="fake", model="m", approval="auto")
+    for i in range(30):
+        wb.vm.begin_user_turn(f"line-{i:02d}")
+        wb.vm.finish_turn(status="completed", run_id=f"r{i}", session_id="s", provider="fake")
+    assert wb._scroll_offset == 0
+    before = wb._visible_body_lines(80, height=5)
+    wb.scroll_lines(+1)
+    assert wb._scroll_offset >= 1
+    wb.scroll_lines(+10000)
+    assert wb._scroll_offset == wb._max_scroll_offset()
+    after = wb._visible_body_lines(80, height=5)
+    assert before != after
+    wb.scroll_to_bottom()
+    assert wb._scroll_offset == 0
