@@ -405,3 +405,63 @@ describe("buildTurnTrace", () => {
     });
   });
 });
+
+describe("verification trace projection", () => {
+  it("nests validation and corrective feedback under the candidate model turn", () => {
+    const events = [
+      ev({ type: "run_started", event_id: "run", run_seq: 1, global_seq: 1 }),
+      ev({
+        type: "model_turn_start",
+        event_id: "turn",
+        run_seq: 2,
+        global_seq: 2,
+        span_id: "model-span",
+        payload: { step: 0 },
+      }),
+      ev({
+        type: "verification_started",
+        event_id: "verify",
+        run_seq: 3,
+        global_seq: 3,
+        span_id: "verify-span",
+        parent_span_id: "model-span",
+        payload: { attempt: 0, validators: ["eval_assert"] },
+      }),
+      ev({
+        type: "verification_result",
+        event_id: "verify-result",
+        run_seq: 4,
+        global_seq: 4,
+        span_id: "verify-span",
+        payload: {
+          action: "retry",
+          failures: [{ message: "missing DONE" }],
+        },
+      }),
+      ev({
+        type: "verification_feedback",
+        event_id: "feedback",
+        run_seq: 5,
+        global_seq: 5,
+        span_id: "verify-span",
+        payload: { action: "retry", feedback: "correct the missing marker" },
+      }),
+    ];
+
+    const rows = buildTurnTrace(events);
+    const turn = rows.find((row) => row.kind === "turn");
+    const verification = rows.find((row) => row.id === "verify");
+    const feedback = rows.find((row) => row.id === "feedback");
+    expect(verification).toMatchObject({
+      kind: "verification",
+      parentId: turn?.id,
+      status: "retry",
+      isError: true,
+    });
+    expect(feedback).toMatchObject({
+      kind: "verification",
+      parentId: verification?.id,
+      status: "retry",
+    });
+  });
+});

@@ -28,6 +28,7 @@ class RunStatus(StrEnum):
     pending = "pending"
     running = "running"
     waiting_approval = "waiting_approval"
+    require_human = "require_human"
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
@@ -81,6 +82,10 @@ class EventType(StrEnum):
     run_interrupted = "run_interrupted"
     model_turn_start = "model_turn_start"
     model_turn_end = "model_turn_end"
+    context_manifest = "context_manifest"
+    verification_started = "verification_started"
+    verification_result = "verification_result"
+    verification_feedback = "verification_feedback"
     text_delta = "text_delta"
     tool_call_start = "tool_call_start"
     tool_call_end = "tool_call_end"
@@ -175,6 +180,10 @@ class ToolResult(BaseModel):
     is_error: bool = False
     artifact_id: str | None = None
     duration_ms: float | None = None
+    error_code: str | None = None
+    error_category: str | None = None
+    retryable: bool = False
+    recovery_hint: str | None = None
 
 
 class ToolSpec(BaseModel):
@@ -218,10 +227,123 @@ class ModelRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ContextPinnedItem(BaseModel):
+    """Opaque, redacted run-scoped context selection persisted across turns/resume."""
+
+    section: str = ""
+    source: str = ""
+    content: str = ""
+    content_hash: str = ""
+    token_estimate: int = 0
+    selected: bool = True
+    reason: str = "selected"
+
+
+class ContextState(BaseModel):
+    """Planner-owned state. Callers persist it but do not interpret it."""
+
+    schema_version: int = 1
+    items: list[ContextPinnedItem] = Field(default_factory=list)
+
+
+class ContextManifestItem(BaseModel):
+    section: str = ""
+    source: str = ""
+    content_hash: str = ""
+    token_estimate: int = 0
+    included: bool = True
+    reason: str = "selected"
+    compression: Literal["none", "summarized", "externalized", "excluded"] = "none"
+    artifact_id: str | None = None
+    preview: str = ""
+
+
+class ContextManifest(BaseModel):
+    """Redaction-safe evidence of the exact context used for one model turn."""
+
+    schema_version: int = 1
+    run_id: str = ""
+    model_turn: int = 0
+    budget_tokens: int = 100_000
+    total_tokens: int = 0
+    token_method: str = "estimate"
+    prefix_fingerprint: str = ""
+    compacted: bool = False
+    items: list[ContextManifestItem] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class ContextBundle(BaseModel):
+    """Complete provider input plus its auditable manifest and opaque stable state."""
+
+    system: str | None = None
+    messages: list[Message] = Field(default_factory=list)
+    tools: list[ToolSpec] = Field(default_factory=list)
+    manifest: ContextManifest = Field(default_factory=ContextManifest)
+    state: ContextState = Field(default_factory=ContextState)
+
+
+class VerificationFailure(BaseModel):
+    validator: str = ""
+    error_code: str = "verification_failed"
+    message: str = ""
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    retryable: bool = True
+    recovery_hint: str | None = None
+
+
+class VerificationCheck(BaseModel):
+    kind: Literal["eval_assert", "file", "command", "ai"]
+    assertions: dict[str, Any] = Field(default_factory=dict)
+    path: str | None = None
+    exists: bool = True
+    contains: list[str] = Field(default_factory=list)
+    command: str | None = None
+    min_score: float = 0.8
+
+
+class VerificationPolicy(BaseModel):
+    validators: list[VerificationCheck] = Field(default_factory=list)
+    max_retries: int = Field(default=2, ge=0)
+    on_exhausted: Literal["failed", "require_human", "checkpoint"] = "failed"
+    evaluator_provider: str | None = None
+    evaluator_model: str | None = None
+
+
+class VerificationCandidate(BaseModel):
+    model_config = {"arbitrary_types_allowed": True}
+
+    run_id: str = ""
+    goal: str = ""
+    output: str = ""
+    cwd: str = "."
+    extra_dirs: list[str] = Field(default_factory=list)
+    usage: Usage = Field(default_factory=Usage)
+    steps: int = 0
+    latency_s: float = 0.0
+    tools_ordered: list[str] = Field(default_factory=list)
+    messages: list[Message] = Field(default_factory=list)
+    eval_assert: dict[str, Any] | None = None
+    executor_provider: str | None = None
+    executor_adapter: Any = None
+    cancel_event: Any = None
+    trace: Any = None
+
+
+class VerificationDecision(BaseModel):
+    action: Literal["pass", "retry", "require_human", "stop"] = "pass"
+    feedback: str | None = None
+    feedback_message: Message | None = None
+    failures: list[VerificationFailure] = Field(default_factory=list)
+    attempt: int = 0
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
 class BudgetConfig(BaseModel):
     max_steps: int = 50
     max_wall_time_s: float = 600.0
     max_tokens: int = 200_000
+    max_context_tokens: int = 100_000
     max_output_length: int = 500_000
     max_delegate_depth: int = 3
     max_concurrent_children: int = 4
@@ -239,6 +361,7 @@ class RunRequest(BaseModel):
     extra_dirs: list[str] = Field(default_factory=list)
     skills_dirs: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    verification: VerificationPolicy | None = None
     parent_run_id: str | None = None
     root_run_id: str | None = None
     delegate_depth: int = 0
@@ -274,6 +397,7 @@ class ConversationTurn(BaseModel):
     model: str | None = None
     started_at: datetime | str | None = None
     finished_at: datetime | str | None = None
+    evaluation: dict[str, Any] | None = None
 
 
 class EventEnvelope(BaseModel):

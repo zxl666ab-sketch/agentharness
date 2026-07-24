@@ -17,6 +17,7 @@ from agentharness.contracts import (
     ApprovalRequest,
     BudgetConfig,
     Checkpoint,
+    ContextState,
     EffectKind,
     EventEnvelope,
     EventType,
@@ -33,10 +34,15 @@ from agentharness.contracts import (
     ToolResult,
     ToolSpec,
     Usage,
+    VerificationCandidate,
+    VerificationCheck,
+    VerificationDecision,
+    VerificationPolicy,
     new_id,
 )
-from agentharness.engine.context import assemble_context, billable_turn_usage, estimate_tokens
+from agentharness.engine.context import ContextPlanner, billable_turn_usage, estimate_tokens
 from agentharness.engine.scheduler import EffectScheduler
+from agentharness.engine.verification import VerificationLoop
 from agentharness.security.approval import auto_decision
 from agentharness.security.redaction import Redactor, default_redactor
 from agentharness.storage.sqlite import Storage
@@ -49,6 +55,7 @@ _RESUMABLE_STATUSES = frozenset(
         RunStatus.interrupted,
         RunStatus.cancelled,
         RunStatus.waiting_approval,
+        RunStatus.require_human,
     }
 )
 
@@ -74,6 +81,9 @@ class RunContext:
     stop_mode: str | None = None  # "cancel" | "interrupt"
     # In-memory message list (incl. session-history splice) for resume-safe checkpoints.
     run_messages: list[Message] = field(default_factory=list)
+    # Opaque ContextPlanner selection; persisted in every checkpoint.
+    context_state: ContextState | None = None
+    verification_attempt: int = 0
     provider_owner_task: asyncio.Task[Any] | None = None
 
 
@@ -102,6 +112,11 @@ class RunEngine:
         self.approval_callback = approval_callback
         self.harness = harness
         self.scheduler = EffectScheduler()
+        self.context_planner = ContextPlanner(
+            storage=storage,
+            artifacts=storage.artifacts,
+            redactor=self.redactor,
+        )
         # One RunContext per active run; see RunContext for why this replaces 13 maps.
         self._runs: dict[str, RunContext] = {}
         # Process handles per run. Kept separate from RunContext because the shell tools
@@ -250,6 +265,10 @@ class RunEngine:
             step = cp.step
             usage = cp.usage
         messages = self._checkpoint_messages_for_run(run_id)
+        metadata = dict(cp.metadata) if cp else {}
+        if ctx.context_state is not None:
+            metadata["context_state"] = ctx.context_state.model_dump(mode="json")
+        metadata["verification_attempt"] = ctx.verification_attempt
         self.storage.save_checkpoint(
             Checkpoint(
                 run_id=run_id,
@@ -260,6 +279,7 @@ class RunEngine:
                 completed_tool_call_ids=list(completed),
                 usage=usage,
                 status=status,
+                metadata=metadata,
             )
         )
         ctx.completed_tool_ids = completed
@@ -358,6 +378,18 @@ class RunEngine:
             metadata={
                 **request.metadata,
                 "_agentharness_budget": request.budget.model_dump(),
+                "_agentharness_context_request": {
+                    "original_goal": request.message,
+                    "system": request.system,
+                    "extra_dirs": request.extra_dirs,
+                    "skills_dirs": request.skills_dirs,
+                    "tools": request.tools,
+                },
+                "_agentharness_verification_policy": (
+                    request.verification.model_dump(mode="json")
+                    if request.verification is not None
+                    else None
+                ),
             },
         )
         if parent_run_id:
@@ -514,6 +546,10 @@ class RunEngine:
         self.storage.clear_stop_request(run_id)
         stored_metadata = json.loads(run.get("metadata_json") or "{}")
         stored_budget = stored_metadata.pop("_agentharness_budget", None)
+        stored_context_request = stored_metadata.pop("_agentharness_context_request", {})
+        stored_verification = stored_metadata.pop("_agentharness_verification_policy", None)
+        if not isinstance(stored_context_request, dict):
+            stored_context_request = {}
         request = RunRequest(
             message=input or "",
             session_id=run["session_id"],
@@ -525,6 +561,15 @@ class RunEngine:
             root_run_id=run.get("root_run_id"),
             delegate_depth=int(run.get("delegate_depth") or 0),
             allow_write=bool(run.get("allow_write", 1)),
+            system=stored_context_request.get("system"),
+            extra_dirs=list(stored_context_request.get("extra_dirs") or []),
+            skills_dirs=list(stored_context_request.get("skills_dirs") or []),
+            tools=stored_context_request.get("tools"),
+            verification=(
+                VerificationPolicy.model_validate(stored_verification)
+                if stored_verification
+                else None
+            ),
             metadata=stored_metadata,
             budget=BudgetConfig.model_validate(stored_budget or {}),
         )
@@ -543,6 +588,14 @@ class RunEngine:
         resume_ctx.run_messages = messages
         resume_ctx.completed_tool_ids = completed
         resume_ctx.pending_tool_calls = list(pending)
+        raw_context_state = cp.metadata.get("context_state")
+        if raw_context_state:
+            resume_ctx.context_state = ContextState.model_validate(raw_context_state)
+        resume_ctx.verification_attempt = int(cp.metadata.get("verification_attempt") or 0)
+        if stored_context_request.get("original_goal"):
+            request.metadata["_agentharness_original_goal"] = stored_context_request[
+                "original_goal"
+            ]
 
         self.storage.update_run(run_id, status=RunStatus.running)
         self._emit_and_update(
@@ -667,23 +720,47 @@ class RunEngine:
             run_row = self.storage.get_run(run_id)
             assert run_row is not None
 
-            # Assemble context
-            skills_text = self._load_skills(request)
-            memories = self._retrieve_memories(request.message if step == 0 else "")
-            system, ctx_messages, ctx_meta = assemble_context(
-                system=request.system or self._default_system(request),
-                skills=skills_text,
-                memories=memories,
-                summary=None,
+            # ContextPlanner is the sole seam for selection, stable prefix,
+            # budgeting/compaction, and the manifest used by Provider + tests.
+            bundle = self.context_planner.plan(
+                run_id=run_id,
+                request=request,
                 messages=messages,
                 tools=tool_specs,
-                max_tokens=min(100_000, budget.max_tokens),
+                model_turn=step,
+                state=self._ctx(run_id).context_state,
+                max_tokens=budget.max_context_tokens,
             )
+            self._ctx(run_id).context_state = bundle.state
+            manifest_payload = bundle.manifest.model_dump(mode="json")
+            manifest_artifact = self.storage.artifacts.put_json(
+                manifest_payload,
+                summary=f"Context manifest for model turn {step}",
+            )
+            manifest_artifact["id"] = self.storage.register_artifact(manifest_artifact)
+            ctx_meta = {
+                "token_estimate": bundle.manifest.total_tokens,
+                "token_method": bundle.manifest.token_method,
+                "compacted": bundle.manifest.compacted,
+                "budget_tokens": bundle.manifest.budget_tokens,
+                "prefix_fingerprint": bundle.manifest.prefix_fingerprint,
+                "manifest_artifact_id": manifest_artifact["id"],
+            }
 
             span_id = new_id()
             self._emit_and_update(
                 run_id,
                 events=[
+                    self._event(
+                        run_row,
+                        EventType.context_manifest,
+                        {
+                            "step": step,
+                            "artifact_id": manifest_artifact["id"],
+                            "manifest": manifest_payload,
+                        },
+                        span_id=span_id,
+                    ),
                     self._event(
                         run_row,
                         EventType.model_turn_start,
@@ -703,10 +780,10 @@ class RunEngine:
             remaining_chars = budget.max_output_length - output_length
             output_token_limit = max(1, (remaining_chars + 3) // 4)
             model_req = ModelRequest(
-                messages=ctx_messages,
-                tools=tool_specs,
+                messages=bundle.messages,
+                tools=bundle.tools,
                 model=request.model,
-                system=system,
+                system=bundle.system,
                 max_tokens=max(1, min(remaining_tokens, output_token_limit)),
             )
 
@@ -834,16 +911,14 @@ class RunEngine:
             if not turn_usage.total_tokens:
                 # Deterministic estimate
                 turn_usage = Usage(
-                    input_tokens=estimate_tokens(system or "") + sum(
-                        estimate_tokens(m.content) for m in ctx_messages
-                    ),
+                    input_tokens=bundle.manifest.total_tokens,
                     output_tokens=estimate_tokens(text),
                     total_tokens=0,
                     estimated=True,
                 )
                 turn_usage.total_tokens = turn_usage.input_tokens + turn_usage.output_tokens
 
-            local_est = int(ctx_meta.get("token_estimate") or 0)
+            local_est = bundle.manifest.total_tokens
             # Preserve raw provider numbers for inspector last_*; charge budget with
             # de-inflated billable counts so gateway token lies cannot fail real work.
             raw_in = turn_usage.input_tokens
@@ -931,6 +1006,87 @@ class RunEngine:
                 )
 
             if not tool_calls:
+                policy = self._verification_policy(request)
+                if policy is not None:
+                    candidate_output = "".join(output_parts)
+                    decision = await self._evaluate_candidate(
+                        run_id=run_id,
+                        session_id=session_id,
+                        root_run_id=root_run_id,
+                        parent_run_id=parent_run_id,
+                        request=request,
+                        messages=messages,
+                        output=candidate_output,
+                        usage=usage,
+                        step=step + 1,
+                        latency_s=time.monotonic() - started,
+                        cancel=cancel,
+                        model_span_id=span_id,
+                    )
+                    self._charge_verification_usage(usage, decision)
+                    if usage.total_tokens > budget.max_tokens:
+                        return self._finish(
+                            run_id,
+                            session_id,
+                            root_run_id,
+                            parent_run_id,
+                            RunStatus.failed,
+                            candidate_output,
+                            usage,
+                            step + 1,
+                            "max_tokens exceeded during verification",
+                            messages=messages,
+                        )
+                    if decision.action == "retry" and decision.feedback_message is not None:
+                        feedback = decision.feedback_message
+                        messages.append(feedback)
+                        self.storage.save_message(
+                            run_id, session_id, feedback, seq=len(messages)
+                        )
+                        self._ctx(run_id).verification_attempt += 1
+                        output_parts = []
+                        output_length = 0
+                        step += 1
+                        self._checkpoint(
+                            run_id,
+                            phase="model_turn",
+                            step=step,
+                            messages=messages,
+                            pending=[],
+                            completed=completed_tool_ids,
+                            usage=usage,
+                        )
+                        continue
+                    if decision.action == "require_human":
+                        return self._pause_for_verification_human(
+                            run_id=run_id,
+                            session_id=session_id,
+                            root_run_id=root_run_id,
+                            parent_run_id=parent_run_id,
+                            output=candidate_output,
+                            usage=usage,
+                            steps=step + 1,
+                            messages=messages,
+                            decision=decision,
+                        )
+                    if decision.action == "stop":
+                        error = "verification failed"
+                        if decision.failures:
+                            error += ": " + "; ".join(
+                                failure.message for failure in decision.failures
+                            )
+                        return self._finish(
+                            run_id,
+                            session_id,
+                            root_run_id,
+                            parent_run_id,
+                            RunStatus.failed,
+                            candidate_output,
+                            usage,
+                            step + 1,
+                            error,
+                            messages=messages,
+                        )
                 return self._finish(
                     run_id, session_id, root_run_id, parent_run_id,
                     RunStatus.completed, "".join(output_parts), usage, step + 1, None,
@@ -961,6 +1117,280 @@ class RunEngine:
                     messages=messages,
                 )
 
+    def _verification_policy(self, request: RunRequest) -> VerificationPolicy | None:
+        policy = request.verification
+        if policy is None:
+            raw = request.metadata.get("verification")
+            if isinstance(raw, dict):
+                policy = VerificationPolicy.model_validate(raw)
+        if policy is None:
+            return None
+        eval_assert = request.metadata.get("eval_assert")
+        if isinstance(eval_assert, dict) and not any(
+            check.kind == "eval_assert" for check in policy.validators
+        ):
+            policy = policy.model_copy(
+                update={
+                    "validators": [
+                        VerificationCheck(kind="eval_assert", assertions=eval_assert),
+                        *policy.validators,
+                    ]
+                }
+            )
+        return policy
+
+    async def _evaluate_candidate(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        root_run_id: str,
+        parent_run_id: str | None,
+        request: RunRequest,
+        messages: list[Message],
+        output: str,
+        usage: Usage,
+        step: int,
+        latency_s: float,
+        cancel: asyncio.Event,
+        model_span_id: str,
+    ) -> VerificationDecision:
+        policy = self._verification_policy(request)
+        assert policy is not None
+        run_row = self.storage.get_run(run_id)
+        assert run_row is not None
+        attempt = self._ctx(run_id).verification_attempt
+        verification_span_id = new_id()
+        self._emit_and_update(
+            run_id,
+            events=[
+                self._event(
+                    run_row,
+                    EventType.verification_started,
+                    {
+                        "attempt": attempt,
+                        "step": step,
+                        "validators": [check.kind for check in policy.validators],
+                        "max_retries": policy.max_retries,
+                    },
+                    span_id=verification_span_id,
+                    parent_span_id=model_span_id,
+                )
+            ],
+        )
+
+        async def governed_command(
+            candidate: VerificationCandidate, command: str
+        ) -> ToolResult:
+            if request.tools is not None and "shell" not in request.tools:
+                return ToolResult(
+                    tool_call_id="",
+                    name="shell",
+                    content="Shell tool is disabled for this run",
+                    is_error=True,
+                    error_code="tool_disabled",
+                    error_category="configuration",
+                    retryable=False,
+                    recovery_hint="Enable shell explicitly or use file/deterministic validation.",
+                )
+            call = ToolCall(
+                id=new_id(),
+                name="shell",
+                arguments={"command": command},
+                arguments_raw=json.dumps({"command": command}, ensure_ascii=False),
+            )
+            call_message = Message(
+                role=MessageRole.assistant,
+                content="[verification command validator]",
+                tool_calls=[call],
+            )
+            messages.append(call_message)
+            self.storage.save_message(run_id, session_id, call_message, seq=len(messages))
+            results = await self._execute_tools(
+                run_id=run_id,
+                session_id=session_id,
+                root_run_id=root_run_id,
+                parent_run_id=parent_run_id,
+                request=request,
+                messages=messages,
+                tool_calls=[call],
+                completed_tool_ids=self._ctx(run_id).completed_tool_ids,
+                usage=usage,
+                step=step,
+                cancel=cancel,
+            )
+            if results:
+                return results[0]
+            return ToolResult(
+                tool_call_id=call.id,
+                name="shell",
+                content="Verification command was cancelled",
+                is_error=True,
+                error_code="cancelled",
+                error_category="cancellation",
+                retryable=True,
+                recovery_hint="Resume the run and retry verification.",
+            )
+
+        tools_ordered = [
+            call.name
+            for message in messages
+            for call in (message.tool_calls or [])
+            if message.content != "[verification command validator]"
+        ]
+        from agentharness.trace import TraceProjector
+
+        candidate_trace = TraceProjector(
+            self.storage, redactor=self.redactor
+        ).project(run_id).model_copy(
+            update={
+                "status": "completed",
+                "final_output": output,
+                "usage": usage,
+                "steps": step,
+                "duration_ms": latency_s * 1000.0,
+            }
+        )
+        candidate = VerificationCandidate(
+            run_id=run_id,
+            goal=str(
+                request.metadata.get("_agentharness_original_goal") or request.message
+            ),
+            output=output,
+            cwd=request.cwd or ".",
+            extra_dirs=request.extra_dirs,
+            usage=usage,
+            steps=step,
+            latency_s=latency_s,
+            tools_ordered=tools_ordered,
+            messages=messages,
+            eval_assert=(
+                request.metadata.get("eval_assert")
+                if isinstance(request.metadata.get("eval_assert"), dict)
+                else None
+            ),
+            executor_provider=request.provider,
+            executor_adapter=self.providers.get(request.provider),
+            cancel_event=cancel,
+            trace=candidate_trace,
+        )
+        loop = VerificationLoop(
+            redactor=self.redactor,
+            command_runner=governed_command,
+            evaluator_resolver=lambda name: self.providers.get(name),
+        )
+        decision = await loop.evaluate(candidate, policy, attempt=attempt)
+        safe_decision = self.redactor.redact_obj(decision.model_dump(mode="json"))
+        events = [
+            self._event(
+                run_row,
+                EventType.verification_result,
+                {
+                    "attempt": attempt,
+                    "step": step,
+                    "action": decision.action,
+                    "failures": safe_decision.get("failures", []),
+                    "evidence": safe_decision.get("evidence", {}),
+                },
+                span_id=verification_span_id,
+                parent_span_id=model_span_id,
+            )
+        ]
+        if decision.feedback:
+            events.append(
+                self._event(
+                    run_row,
+                    EventType.verification_feedback,
+                    {
+                        "attempt": attempt,
+                        "action": decision.action,
+                        "feedback": self.redactor.redact_text(decision.feedback),
+                    },
+                    span_id=verification_span_id,
+                    parent_span_id=model_span_id,
+                )
+            )
+        self._emit_and_update(run_id, events=events)
+        return decision
+
+    @staticmethod
+    def _charge_verification_usage(usage: Usage, decision: VerificationDecision) -> None:
+        def visit(value: Any) -> list[dict[str, Any]]:
+            found: list[dict[str, Any]] = []
+            if isinstance(value, dict):
+                raw_usage = value.get("usage")
+                if isinstance(raw_usage, dict):
+                    found.append(raw_usage)
+                for item in value.values():
+                    found.extend(visit(item))
+            elif isinstance(value, list):
+                for item in value:
+                    found.extend(visit(item))
+            return found
+
+        for raw in visit(decision.evidence):
+            input_tokens = int(raw.get("input_tokens") or 0)
+            output_tokens = int(raw.get("output_tokens") or 0)
+            total_tokens = int(raw.get("total_tokens") or input_tokens + output_tokens)
+            usage.input_tokens += input_tokens
+            usage.output_tokens += output_tokens
+            usage.total_tokens += total_tokens
+
+    def _pause_for_verification_human(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        root_run_id: str,
+        parent_run_id: str | None,
+        output: str,
+        usage: Usage,
+        steps: int,
+        messages: list[Message],
+        decision: VerificationDecision,
+    ) -> RunResult:
+        reason = "verification requires human review"
+        if decision.failures:
+            reason += ": " + "; ".join(failure.message for failure in decision.failures)
+        self._checkpoint(
+            run_id,
+            phase="model_turn",
+            step=steps,
+            messages=messages,
+            pending=[],
+            completed=self._ctx(run_id).completed_tool_ids,
+            usage=usage,
+            status=RunStatus.require_human,
+        )
+        run = self.storage.get_run(run_id)
+        if run:
+            self._emit_and_update(
+                run_id,
+                status=RunStatus.require_human,
+                error=reason,
+                output_summary=output[:2000],
+                usage=usage,
+                steps=steps,
+                events=[
+                    self._event(
+                        run,
+                        EventType.run_status,
+                        {"status": RunStatus.require_human.value, "reason": reason},
+                    )
+                ],
+            )
+        return RunResult(
+            run_id=run_id,
+            session_id=session_id,
+            status=RunStatus.require_human,
+            output=self.redactor.redact_text(output),
+            error=self.redactor.redact_text(reason),
+            usage=usage,
+            steps=steps,
+            parent_run_id=parent_run_id,
+            root_run_id=root_run_id,
+        )
+
     async def _execute_tools(
         self,
         *,
@@ -975,14 +1405,15 @@ class RunEngine:
         usage: Usage,
         step: int,
         cancel: asyncio.Event,
-    ) -> None:
+    ) -> list[ToolResult]:
         run_row = self.storage.get_run(run_id)
         assert run_row is not None
+        collected_results: list[ToolResult] = []
 
         # Filter already completed (resume safety)
         pending = [tc for tc in tool_calls if tc.id not in completed_tool_ids]
         if not pending:
-            return
+            return collected_results
 
         batch_ctx = self._ctx(run_id)
         batch_ctx.completed_tool_ids = set(completed_tool_ids)
@@ -1008,8 +1439,13 @@ class RunEngine:
                     name=tc.name,
                     content=f"Unknown tool: {tc.name}",
                     is_error=True,
+                    error_code="unknown_tool",
+                    error_category="configuration",
+                    retryable=False,
+                    recovery_hint="Choose one of the enabled tool schemas.",
                 )
                 self._append_tool_result(run_id, session_id, messages, result, run_row)
+                collected_results.append(result)
                 completed_tool_ids.add(tc.id)
                 continue
 
@@ -1024,8 +1460,13 @@ class RunEngine:
                     name=tc.name,
                     content="Write permission not granted for this run",
                     is_error=True,
+                    error_code="write_not_allowed",
+                    error_category="permission",
+                    retryable=False,
+                    recovery_hint="Request a writable run or use read-only verification.",
                 )
                 self._append_tool_result(run_id, session_id, messages, result, run_row)
+                collected_results.append(result)
                 completed_tool_ids.add(tc.id)
                 continue
 
@@ -1129,7 +1570,7 @@ class RunEngine:
                 if decision == ApprovalDecision.allow_run:
                     self._ctx(run_id).allow_effects.add(effect)
                 if cancelled_while_waiting:
-                    return
+                    return collected_results
 
             if decision == ApprovalDecision.deny:
                 result = ToolResult(
@@ -1137,8 +1578,13 @@ class RunEngine:
                     name=tc.name,
                     content="Approval denied",
                     is_error=True,
+                    error_code="approval_denied",
+                    error_category="approval",
+                    retryable=False,
+                    recovery_hint="Ask a human to approve this governed action.",
                 )
                 self._append_tool_result(run_id, session_id, messages, result, run_row)
+                collected_results.append(result)
                 completed_tool_ids.add(tc.id)
                 continue
 
@@ -1150,7 +1596,14 @@ class RunEngine:
             do not nest scheduler.run here (asyncio.Lock is not reentrant)."""
             if cancel.is_set():
                 return ToolResult(
-                    tool_call_id=tc.id, name=tc.name, content="cancelled", is_error=True
+                    tool_call_id=tc.id,
+                    name=tc.name,
+                    content="cancelled",
+                    is_error=True,
+                    error_code="cancelled",
+                    error_category="cancellation",
+                    retryable=True,
+                    recovery_hint="Resume the run when cancellation is cleared.",
                 )
             tool = self.tools[tc.name]
             span_id = new_id()
@@ -1196,9 +1649,23 @@ class RunEngine:
                     name=tc.name,
                     content=f"Tool error: {exc}",
                     is_error=True,
+                    error_code="tool_exception",
+                    error_category="tool",
+                    retryable=True,
+                    recovery_hint="Inspect the tool error and retry with corrected arguments.",
                 )
             if result.tool_call_id != tc.id:
                 result = result.model_copy(update={"tool_call_id": tc.id, "name": tc.name})
+            if result.is_error and not result.error_code:
+                result = result.model_copy(
+                    update={
+                        "error_code": "tool_failed",
+                        "error_category": result.error_category or "tool",
+                        "retryable": result.retryable,
+                        "recovery_hint": result.recovery_hint
+                        or "Inspect the tool result and retry with corrected arguments.",
+                    }
+                )
             duration = (time.monotonic() - t0) * 1000
             result = result.model_copy(update={"duration_ms": duration})
             # Large results → artifact
@@ -1227,6 +1694,12 @@ class RunEngine:
                             "content_preview": self.redactor.redact_text(result.content[:300]),
                             "duration_ms": duration,
                             "artifact_id": result.artifact_id,
+                            "error_code": result.error_code,
+                            "error_category": result.error_category,
+                            "retryable": result.retryable,
+                            "recovery_hint": self.redactor.redact_text(
+                                result.recovery_hint or ""
+                            ),
                         },
                         span_id=span_id,
                     ),
@@ -1263,6 +1736,7 @@ class RunEngine:
 
         if items:
             results = await self.scheduler.run_batch(items)
+            collected_results.extend(results)
             for result in results:
                 self._append_tool_result(run_id, session_id, messages, result, run_row)
                 # Cancel/interrupt mid-flight: error results are incomplete — keep pending
@@ -1289,6 +1763,7 @@ class RunEngine:
             completed=completed_tool_ids,
             usage=usage,
         )
+        return collected_results
 
     def _effect_for(self, tool: Any, tc: ToolCall) -> EffectKind:
         """Resolve the *dynamic* effect of a call, falling back to the static spec.
@@ -1355,30 +1830,6 @@ class RunEngine:
             specs.append(tool.spec)
         return specs
 
-    def _default_system(self, request: RunRequest) -> str:
-        return (
-            "You are a capable agent running inside Agent Harness. "
-            "Use tools when needed. Be concise and accurate. "
-            f"Workspace cwd: {request.cwd or '.'}."
-        )
-
-    def _load_skills(self, request: RunRequest) -> list[str]:
-        try:
-            from agentharness.tools.skills import load_matching_skills
-
-            return load_matching_skills(request.skills_dirs, request.message)
-        except Exception:  # noqa: BLE001
-            return []
-
-    def _retrieve_memories(self, query: str) -> list[str]:
-        if not query:
-            return []
-        try:
-            rows = self.storage.search_memories(query, limit=5)
-            return [r["content"] for r in rows]
-        except Exception:  # noqa: BLE001
-            return []
-
     def _checkpoint(
         self,
         run_id: str,
@@ -1392,6 +1843,12 @@ class RunEngine:
         status: RunStatus = RunStatus.running,
         approval_token: str | None = None,
     ) -> None:
+        current = self.storage.load_checkpoint(run_id)
+        metadata = dict(current.metadata) if current else {}
+        context_state = self._ctx(run_id).context_state
+        if context_state is not None:
+            metadata["context_state"] = context_state.model_dump(mode="json")
+        metadata["verification_attempt"] = self._ctx(run_id).verification_attempt
         cp = Checkpoint(
             run_id=run_id,
             phase=phase,  # type: ignore[arg-type]
@@ -1402,6 +1859,7 @@ class RunEngine:
             usage=usage,
             status=status,
             approval_token=approval_token,
+            metadata=metadata,
         )
         self.storage.save_checkpoint(cp)
         run = self.storage.get_run(run_id)

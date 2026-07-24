@@ -239,9 +239,6 @@ class CliViewModel:
             parts.append(f"{duration_s:.1f}s")
         detail = "  ".join(parts)
         self.status_detail = detail
-        self.items.append(
-            RunItem(kind=ItemKind.status, text=detail, key=self._next_key("status"))
-        )
         if error:
             self.items.append(
                 RunItem(kind=ItemKind.error, text=error, key=self._next_key("error"))
@@ -496,8 +493,8 @@ class CliViewModel:
 
     def format_shortcut_line(self) -> str:
         return (
-            "Enter:send  |  Alt+Enter:newline  |  Tab:complete  |  "
-            "Esc:close  |  Ctrl+C:interrupt"
+            "Enter:send  |  Alt+Enter:newline  |  PgUp/PgDn:scroll  |  "
+            "Tab:complete  |  Esc:close  |  Ctrl+C:interrupt"
         )
 
     def format_composer_meta(self) -> str:
@@ -575,10 +572,19 @@ class CliViewModel:
             lines.append(truncate_display(f"  {tool.preview}", width))
         return lines
 
-    def render_frame(self, width: int, height: int) -> list[str]:
+    def render_frame(
+        self,
+        width: int,
+        height: int,
+        *,
+        scroll_offset: int = 0,
+    ) -> list[str]:
         """Render a full static frame: header, body, composer chrome, shortcuts.
 
         Pure function of state + dimensions. Used for tests and screenshots.
+
+        ``scroll_offset`` is how many lines above the bottom (latest) to show.
+        ``0`` pins to the latest output; larger values reveal older history.
         """
         w = max(width, 40)
         h = max(height, 10)
@@ -587,14 +593,19 @@ class CliViewModel:
         shortcuts = truncate_display(self.format_shortcut_line(), w)
         meta = self.format_composer_meta()
         # Fixed chrome rows (excluding body):
-        # header, phase, border, box×4, meta, shortcuts = 9
+        # header, phase, border, box?4, meta, shortcuts = 9
         chrome = 9
         body_h = max(1, h - chrome)
         body = self.iter_body_lines(w)
         if len(body) > body_h:
-            body = body[-body_h:]
+            max_off = len(body) - body_h
+            off = min(max(0, int(scroll_offset)), max_off)
+            end_idx = len(body) - off
+            start_idx = end_idx - body_h
+            body = body[start_idx:end_idx]
         else:
             body = body + [""] * (body_h - len(body))
+
 
         border = "─" * w
         composer_inner = max(w - 2, 1)

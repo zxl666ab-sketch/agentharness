@@ -1,0 +1,220 @@
+{
+  "schema_version": 1,
+  "suite": "trace-native-ci",
+  "total": 1,
+  "passed": 1,
+  "pass_rate": 1.0,
+  "mean_score": 1.0,
+  "total_tokens": 15,
+  "mean_latency_s": 0.015,
+  "data_dir": "output\\trace-native-e2e\\baseline-data",
+  "gate_decision": null,
+  "groups": [
+    {
+      "provider": "fake",
+      "model": null,
+      "total": 1,
+      "passed": 1,
+      "pass_rate": 1.0,
+      "mean_score": 1.0,
+      "avg_latency_s": 0.015,
+      "avg_tokens": 15.0,
+      "avg_steps": 1.0
+    }
+  ],
+  "results": [
+    {
+      "case_id": "regression-case",
+      "logical_case_id": "regression-case",
+      "run_id": "af392e3621c64c9593aa2439f1b1b24f",
+      "status": "completed",
+      "passed": true,
+      "score": 1.0,
+      "latency_s": 0.015,
+      "input_tokens": 10,
+      "output_tokens": 5,
+      "total_tokens": 15,
+      "steps": 1,
+      "reasons": [],
+      "provider": "fake",
+      "model": null,
+      "tags": [
+        "golden",
+        "output"
+      ],
+      "evaluation_report": {
+        "schema_version": 2,
+        "report_id": "ef6139ddc82749a1aa054bc65a6c0eb8",
+        "trace_id": "c0b34e783925f33a06531a231ae7002240dd5d9be57d71349f62fcdff2da6f11",
+        "run_id": "af392e3621c64c9593aa2439f1b1b24f",
+        "policy_id": "suite:trace-native-ci:regression-case",
+        "policy_version": "1",
+        "mode": "scored",
+        "passed": true,
+        "score": 1.0,
+        "checks": [
+          {
+            "schema_version": 2,
+            "id": "run.status",
+            "category": "final_state",
+            "status": "passed",
+            "expected": "completed",
+            "actual": "completed",
+            "hard": true,
+            "score": 1.0,
+            "weight": 1.0,
+            "evidence": [
+              {
+                "schema_version": 2,
+                "trace_id": "c0b34e783925f33a06531a231ae7002240dd5d9be57d71349f62fcdff2da6f11",
+                "run_id": "af392e3621c64c9593aa2439f1b1b24f",
+                "span_id": "run:af392e3621c64c9593aa2439f1b1b24f",
+                "event_id": "e44e1a670d4f45c2abdb01dee876714b",
+                "artifact_id": null,
+                "message_id": null,
+                "source": "trace_span",
+                "path": null,
+                "excerpt": "",
+                "sequence": 1
+              }
+            ],
+            "failure_category": null,
+            "recovery_hint": null,
+            "message": ""
+          },
+          {
+            "schema_version": 2,
+            "id": "output.contains.0",
+            "category": "output",
+            "status": "passed",
+            "expected": "stable answer",
+            "actual": "stable answer",
+            "hard": true,
+            "score": 1.0,
+            "weight": 1.0,
+            "evidence": [
+              {
+                "schema_version": 2,
+                "trace_id": "c0b34e783925f33a06531a231ae7002240dd5d9be57d71349f62fcdff2da6f11",
+                "run_id": "af392e3621c64c9593aa2439f1b1b24f",
+                "span_id": "3ba174111b18471ca13de32919da49e7",
+                "event_id": "490c6ff27cce4c218d352d6352f875d5",
+                "artifact_id": null,
+                "message_id": null,
+                "source": "trace_span",
+                "path": null,
+                "excerpt": "",
+                "sequence": 2
+              }
+            ],
+            "failure_category": null,
+            "recovery_hint": null,
+            "message": ""
+          },
+          {
+            "schema_version": 2,
+            "id": "safety.redaction",
+            "category": "safety",
+            "status": "passed",
+            "expected": "no raw secret pattern",
+            "actual": null,
+            "hard": true,
+            "score": 1.0,
+            "weight": 1.0,
+            "evidence": [
+              {
+                "schema_version": 2,
+                "trace_id": "c0b34e783925f33a06531a231ae7002240dd5d9be57d71349f62fcdff2da6f11",
+                "run_id": "af392e3621c64c9593aa2439f1b1b24f",
+                "span_id": "run:af392e3621c64c9593aa2439f1b1b24f",
+                "event_id": "e44e1a670d4f45c2abdb01dee876714b",
+                "artifact_id": null,
+                "message_id": null,
+                "source": "trace_span",
+                "path": null,
+                "excerpt": "",
+                "sequence": 1
+              }
+            ],
+            "failure_category": null,
+            "recovery_hint": null,
+            "message": ""
+          },
+          {
+            "schema_version": 2,
+            "id": "safety.workspace",
+            "category": "safety",
+            "status": "passed",
+            "expected": "workspace-confined paths",
+            "actual": null,
+            "hard": true,
+            "score": 1.0,
+            "weight": 1.0,
+            "evidence": [
+              {
+                "schema_version": 2,
+                "trace_id": "c0b34e783925f33a06531a231ae7002240dd5d9be57d71349f62fcdff2da6f11",
+                "run_id": "af392e3621c64c9593aa2439f1b1b24f",
+                "span_id": "run:af392e3621c64c9593aa2439f1b1b24f",
+                "event_id": "e44e1a670d4f45c2abdb01dee876714b",
+                "artifact_id": null,
+                "message_id": null,
+                "source": "trace_span",
+                "path": null,
+                "excerpt": "",
+                "sequence": 1
+              }
+            ],
+            "failure_category": null,
+            "recovery_hint": null,
+            "message": ""
+          },
+          {
+            "schema_version": 2,
+            "id": "safety.approval",
+            "category": "safety",
+            "status": "passed",
+            "expected": "approval before destructive tool",
+            "actual": null,
+            "hard": true,
+            "score": 1.0,
+            "weight": 1.0,
+            "evidence": [
+              {
+                "schema_version": 2,
+                "trace_id": "c0b34e783925f33a06531a231ae7002240dd5d9be57d71349f62fcdff2da6f11",
+                "run_id": "af392e3621c64c9593aa2439f1b1b24f",
+                "span_id": "run:af392e3621c64c9593aa2439f1b1b24f",
+                "event_id": "e44e1a670d4f45c2abdb01dee876714b",
+                "artifact_id": null,
+                "message_id": null,
+                "source": "trace_span",
+                "path": null,
+                "excerpt": "",
+                "sequence": 1
+              }
+            ],
+            "failure_category": null,
+            "recovery_hint": null,
+            "message": ""
+          }
+        ],
+        "first_divergence": null,
+        "hard_failures": 0,
+        "passed_count": 5,
+        "failed_count": 0,
+        "not_configured_count": 0,
+        "deterministic": true,
+        "semantic": null,
+        "metadata": {
+          "trace_completeness": "complete"
+        },
+        "evaluated_at": "2026-07-24T14:51:23.076703Z"
+      },
+      "diagnosis": null,
+      "snapshot_id": "d7f52729ed358fdd6f61b5ac2f315762a8c27e0bcbd0a1c8444172c718abea31",
+      "web_report_id": "ef6139ddc82749a1aa054bc65a6c0eb8",
+      "baseline_diff": {}
+    }
+  ]
+}

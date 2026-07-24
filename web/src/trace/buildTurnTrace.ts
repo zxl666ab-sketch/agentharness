@@ -11,6 +11,7 @@ export type TraceRowKind =
   | "run"
   | "turn"
   | "model_output"
+  | "verification"
   | "tool"
   | "approval"
   | "result"
@@ -49,6 +50,7 @@ const TERMINAL_STATUSES = new Set([
   "failed",
   "cancelled",
   "interrupted",
+  "require_human",
 ]);
 
 export function isTerminalStatus(status?: string | null): boolean {
@@ -98,6 +100,8 @@ export function buildTurnTrace(
   const rootByRun = new Map<string, TraceRow>();
   const turnBySpan = new Map<string, TraceRow>();
   const activeTurnByRun = new Map<string, TraceRow>();
+  const verificationByRun = new Map<string, TraceRow>();
+  const verificationBySpan = new Map<string, TraceRow>();
   const outputByTurn = new Map<
     string,
     { start: EventRow; last: EventRow; texts: string[] }
@@ -241,6 +245,71 @@ export function buildTurnTrace(
         }
         flushOutput(turn, event);
       }
+      continue;
+    }
+
+    if (type === "verification_started") {
+      const turn = activeTurnByRun.get(event.run_id);
+      const attempt = payloadNumber(payload, "attempt") ?? 0;
+      const verification = add({
+        id: event.event_id,
+        kind: "verification",
+        label: `验证 · 第 ${attempt + 1} 次`,
+        preview: Array.isArray(payload.validators)
+          ? payload.validators.map(String).join(" · ")
+          : "验证候选结果",
+        timestamp: event.timestamp,
+        event,
+        parentId: turn?.id || root.id,
+        depth: (turn?.depth ?? root.depth ?? 0) + 1,
+        status: "running",
+      });
+      verificationByRun.set(event.run_id, verification);
+      if (event.span_id) verificationBySpan.set(event.span_id, verification);
+      continue;
+    }
+
+    if (type === "verification_result") {
+      const verification =
+        (event.span_id ? verificationBySpan.get(event.span_id) : undefined) ||
+        verificationByRun.get(event.run_id);
+      const action = payloadString(payload, "action") || "unknown";
+      const failures = Array.isArray(payload.failures) ? payload.failures : [];
+      const failurePreview = failures
+        .map((failure) =>
+          failure && typeof failure === "object" && "message" in failure
+            ? String((failure as { message?: unknown }).message || "")
+            : ""
+        )
+        .filter(Boolean)
+        .join("; ");
+      if (verification) {
+        update(verification, {
+          event,
+          status: action,
+          preview: failurePreview || `决策 · ${action}`,
+          isError: action !== "pass",
+        });
+      }
+      continue;
+    }
+
+    if (type === "verification_feedback") {
+      const verification =
+        (event.span_id ? verificationBySpan.get(event.span_id) : undefined) ||
+        verificationByRun.get(event.run_id);
+      add({
+        id: event.event_id,
+        kind: "verification",
+        label: "纠正反馈",
+        preview: payloadString(payload, "feedback") || "结构化反馈已重新注入 Agent",
+        timestamp: event.timestamp,
+        event,
+        parentId: verification?.id || root.id,
+        depth: (verification?.depth ?? root.depth ?? 0) + 1,
+        status: payloadString(payload, "action") || "retry",
+        isError: true,
+      });
       continue;
     }
 

@@ -18,6 +18,8 @@ def test_core_models_roundtrip():
     assert req.approval.value == "ask"
     assert req.budget.max_delegate_depth == 3
     assert req.budget.max_concurrent_children == 4
+    assert req.budget.max_context_tokens == 100_000
+    assert req.verification is None
 
     result = RunResult(run_id="r", session_id="s", status="completed")
     assert result.status.value == "completed"
@@ -25,6 +27,10 @@ def test_core_models_roundtrip():
     tc = ToolCall(name="read_file", arguments={"path": "x"})
     tr = ToolResult(tool_call_id=tc.id, name="read_file", content="ok")
     assert tr.is_error is False
+    assert tr.error_code is None
+    assert tr.error_category is None
+    assert tr.retryable is False
+    assert tr.recovery_hint is None
 
     usage = Usage(input_tokens=1, output_tokens=2, total_tokens=3)
     assert usage.total_tokens == 3

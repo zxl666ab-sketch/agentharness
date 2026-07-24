@@ -380,10 +380,10 @@ def test_interactive_streams_turns_and_switches_sessions(
     assert len(sessions) == 2
 
 
-def test_interactive_auto_allows_process_shell_without_prompt(
+def test_interactive_auto_requires_confirmation_for_destructive_shell(
     data_dir: Path, workspace: Path
 ) -> None:
-    """Daily-assistant default: --approval auto runs shell (process) without a prompt."""
+    """Shell remains explicitly confirmed because every command is destructive."""
     completed = subprocess.run(
         [
             sys.executable,
@@ -398,7 +398,7 @@ def test_interactive_auto_allows_process_shell_without_prompt(
             "--cwd",
             str(workspace),
         ],
-        input="shell echo approved-by-auto\n/quit\n",
+        input="shell echo approved-by-auto\n1\n/quit\n",
         text=True,
         capture_output=True,
         env=_cli_env(),
@@ -408,7 +408,8 @@ def test_interactive_auto_allows_process_shell_without_prompt(
 
     output = completed.stdout + completed.stderr
     assert completed.returncode == 0, output
-    assert "审批请求" not in output
+    assert "审批请求" in output
+    assert "effect=destructive" in output
     assert "approved-by-auto" in output
     assert "status=completed" in output
 
@@ -511,6 +512,7 @@ def test_ctrl_c_interrupts_run_kills_shell_tree_and_returns_to_prompt(
     try:
         assert process.stdin is not None
         process.stdin.write(f"{command}\n")
+        process.stdin.write("1\n")
         process.stdin.flush()
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline and not pid_file.exists():
@@ -595,7 +597,8 @@ def test_cancel_command_stops_run_owned_by_another_process(
     child_alive_after_cancel: bool | None = None
     try:
         assert run_process.stdin is not None
-        # auto+process shell: no interactive approval needed
+        # Destructive shell commands still require allow-once under auto.
+        run_process.stdin.write("1\n")
         run_process.stdin.flush()
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline and not pid_file.exists():

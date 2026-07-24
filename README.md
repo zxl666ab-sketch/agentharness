@@ -1,6 +1,6 @@
 # Agent Harness
 
-Agent Harness is a local, long-lived agent runtime with a streaming interactive CLI, a scriptable one-shot command, sandboxed tools, durable SQLite checkpoints, and a readonly Web run inspector.
+Agent Harness is a local, long-lived agent runtime with a streaming interactive CLI, a scriptable one-shot command, sandboxed tools, durable SQLite checkpoints, and a Web run inspector.
 
 The runtime is native `asyncio`; it does not depend on LangChain, LangGraph, or Deep Agents.
 
@@ -32,7 +32,7 @@ cd ..
 
 ## Start an interactive session
 
-The bare command opens the interactive multi-turn CLI. It loads the nearest project `.env` (cwd and parents), then picks provider/model from flags, environment (`.env`), saved `/config` profile, or `fake`:
+The bare command opens the interactive multi-turn CLI, starts the Web Inspector on the same data directory, and opens it in the default browser. It loads the nearest project `.env` (cwd and parents), then picks provider/model from flags, environment (`.env`), saved `/config` profile, or `fake`:
 
 ```bash
 uv run agentharness
@@ -62,6 +62,8 @@ Common launch options:
 uv run agentharness --provider openai --model MODEL
 uv run agentharness --session SESSION_ID --data-dir PATH
 uv run agentharness --approval auto --cwd PATH
+uv run agentharness --no-web
+uv run agentharness --no-open --web-port 8741
 ```
 
 Provider selection order: explicit `--provider` ? `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` from the process env (including auto-loaded `.env`) ? saved profile ? `fake`.
@@ -115,6 +117,10 @@ The command fails clearly if the port is occupied and shuts down on `Ctrl+C`. Th
 - approval decisions and effects;
 - elapsed time, steps, token usage, stored budgets, provider/model, and cwd;
 - checkpoint phase, usage, completed/pending tools;
+- per-model-turn Context Manifest with System, Workspace Rules, Skills, Memories,
+  Messages, Tool Schemas, token/source/inclusion reasons, compaction, artifact links,
+  context budget, and stable prefix fingerprint;
+- verification phases showing execution → validation → corrective feedback → re-validation;
 - selected event/span payloads;
 - conversation transcript as secondary context;
 - desktop three-pane and mobile three-tab layouts.
@@ -149,7 +155,7 @@ Use a dedicated temporary `--data-dir` for tests. `doctor` reports SQLite integr
 
 Built-in tools:
 
-- `read_file`, `write_file`, `search_files` — workspace sandbox with traversal and symlink/junction checks; reads and literal searches stream bounded chunks instead of loading whole files;
+- `read_file`, `write_file`, `search_files` — workspace sandbox with traversal and symlink/junction checks; reads and literal searches stream bounded chunks instead of loading whole files. `read_file` returns a model-visible SHA-256 file version; `write_file(expected_version=...)` rejects stale overwrites with structured re-read guidance. Omitting `expected_version` remains compatible with legacy callers;
 - `shell` — destructive approval, detached stdin, minimal environment allow-list, bounded streaming output, timeout, and cross-platform process-tree kill;
 - `http_request` — bounded local or remote HTTP requests;
 - `browser` — isolated persistent Playwright contexts with per-action timeouts and cleanup;
@@ -183,6 +189,7 @@ The server binds to `127.0.0.1` by default. All `POST`, `PUT`, `PATCH`, and `DEL
 - `GET /api/runs/{id}/events`
 - `GET /api/runs/{id}/tree`
 - `GET /api/runs/{id}/messages`
+- `GET /api/runs/{id}/contexts`
 - `GET /api/runs/{id}/approvals`
 - `GET /api/runs/{id}/checkpoint`
 - `GET /api/artifacts/{id}`
@@ -206,18 +213,57 @@ Stable boundaries:
 
 - `Harness` owns lifecycle, registration, and readonly queries.
 - `RunEngine` owns run state, budgets, checkpoints, stop propagation, scheduling, and events.
+- `ContextPlanner.plan(...) -> ContextBundle` owns Workspace rule discovery, pinned
+  Skill/Memory selection, deterministic stable prefix organization, budget compaction,
+  artifact externalization, and the redacted `ContextManifest` persisted for each model turn.
+- `VerificationLoop.evaluate(...) -> VerificationDecision` owns deterministic/file/command/
+  independent-AI validator dispatch and returns `pass`, `retry(feedback)`,
+  `require_human`, or `stop`; `RunEngine` invokes it only at candidate completion points.
 - Providers implement only normalized async `stream(ModelRequest)` plus optional lifecycle close.
 - Tools expose `ToolSpec` and async `run(ToolContext, arguments)` plus optional cleanup hooks.
 - `Storage` owns SQLite transactions, migrations, artifacts, and recursive redaction at persistence boundaries.
-- FastAPI and React are readonly projections over Harness/Storage; they do not execute runs.
+- FastAPI and React are observer projections over Harness/Storage; they do not execute runs. The only write action is deterministic manual grading of an existing terminal run.
 
-Core public contracts live in `agentharness.contracts`: `RunRequest`, `RunResult`, `BudgetConfig`, `Message`, `ModelRequest`, `ModelStreamItem`, `ToolSpec`, `ToolCall`, `ToolResult`, `Checkpoint`, `Usage`, and `EventEnvelope`.
+Core public contracts live in `agentharness.contracts`: `RunRequest`, `RunResult`,
+`BudgetConfig`, `Message`, `ModelRequest`, `ModelStreamItem`, `ContextBundle`,
+`ContextManifest`, `VerificationPolicy`, `VerificationDecision`, `ToolSpec`, `ToolCall`,
+`ToolResult`, `Checkpoint`, `Usage`, and `EventEnvelope`.
+
+### Candidate verification feedback loop
+
+Verification is opt-in, so existing runs complete exactly as before. A policy can compose
+existing deterministic `eval_assert` rules, sandboxed file conditions, governed commands,
+and an independent read-only AI evaluator:
+
+```python
+from agentharness import Harness, RunRequest
+from agentharness.contracts import VerificationCheck, VerificationPolicy
+
+result = await harness.run(RunRequest(
+    message="Implement the change and prove it",
+    verification=VerificationPolicy(
+        validators=[
+            VerificationCheck(kind="file", path="src/result.py", contains=["def main"]),
+            VerificationCheck(kind="command", command="uv run pytest -q"),
+        ],
+        max_retries=2,
+        on_exhausted="require_human",
+    ),
+))
+```
+
+Command checks are synthetic Shell tool calls: they retain destructive Effect classification,
+Approval, Sandbox, cancellation, output Artifact, and event semantics. They are never private
+`subprocess` calls. A failed candidate receives a redacted structured user feedback message and
+continues within the same token/step/wall-time/delegate budgets. Exhaustion becomes `failed` or
+the resumable `require_human` status; it is never silently completed. AI checks require a
+separate provider name and adapter from the executor.
 
 ## Offline verification
 
 ```bash
 uv run pytest -q
-uv run ruff check .
+uv run ruff check src tests
 uv run pyright
 uv run agentharness doctor
 
@@ -289,11 +335,33 @@ uv run agentharness web --data-dir output/eval-data
 
 Optional second JSON file loads as baseline for new-failure / score-drop / token / latency summaries.
 
+
+### Single-run eval (`eval_assert`)
+
+For ad-hoc grading of one `Harness.run` (no suite file), pass assertions in request metadata:
+
+```python
+result = await harness.run(RunRequest(
+    message="[fake:text]hello",
+    provider="fake",
+    metadata={"eval_assert": {"status": "completed", "contains": ["hello"]}},
+))
+run = harness.get_run(result.run_id)
+print(run["metadata_json"])  # includes eval.passed / score / reasons
+```
+
+- Key name is fixed: `metadata["eval_assert"]` (aligned with suite `AssertionSpec`).
+- On run completion, deterministic graders write `metadata["eval"]` (schema_version=1).
+- Web **Run Inspector** (not the Eval page) shows passed / score / reasons from that field only; opening a trace never re-grades.
+- Every turn in **上下文** has **评测 / 重新评分**. With **AI 评测** off (the default), it runs deterministic assertions or a free terminal-health check. With AI on, it additionally scores result, process, safety, efficiency, and user experience through the current active profile.
+- Manual grading calls the narrow `POST /api/runs/{run_id}/grade` action with `mode=deterministic|ai`. All other Web write methods remain rejected.
+- Offline `agentharness eval` suites remain separate: suite DSL + JSON/JUnit reports; single-run scores live on the run row for Inspector.
+
 ## Compatibility changes from the original prototype
 
-- The Textual fullscreen TUI, snapshot files, dependency, `chat`, `ui`, `run --ui`, and automatic Web/browser lifecycle were removed.
+- The Textual fullscreen TUI, snapshot files, dependency, `chat`, `ui`, and `run --ui` were removed.
 - The bare command is now the supported interactive CLI.
-- The standalone observer command is `agentharness web`.
+- The standalone observer command remains `agentharness web`; interactive bare launch manages a companion Web process automatically.
 - Web assets are built into and shipped inside the Python wheel.
 - `search_files` now treats queries as literal substrings; implicit Python regular-expression execution was removed so searches remain cancellable and resistant to regex denial of service.
 - Callers with live async Provider/Browser/MCP resources should use `await harness.aclose()`; synchronous `close()` remains safe when no async resource is open.

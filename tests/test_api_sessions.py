@@ -49,6 +49,8 @@ async def test_session_and_transcript_endpoints(data_dir, workspace):
         assert match.get("latest_status") in ("failed", "completed")
         assert match.get("title")
         assert match.get("updated_at")
+        assert match.get("run_count") == 2
+        assert str(match.get("display_title")).startswith("[fake:text]Hello secret [REDACTED")
 
         s = await client.get(f"/api/sessions/{r1.session_id}")
         assert s.status_code == 200

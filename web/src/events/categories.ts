@@ -1,6 +1,6 @@
 /** Map technical event types → readable Chinese categories (grouped). */
 
-export type EventGroup = "model" | "tool" | "approval" | "error" | "run" | "other";
+export type EventGroup = "model" | "verification" | "tool" | "approval" | "error" | "run" | "other";
 
 export type EventCategory = {
   group: EventGroup;
@@ -10,6 +10,7 @@ export type EventCategory = {
 
 const GROUP_LABEL: Record<EventGroup, string> = {
   model: "模型",
+  verification: "验证",
   tool: "工具",
   approval: "审批",
   error: "错误",
@@ -26,6 +27,10 @@ const MAP: Record<string, { group: EventGroup; label: string }> = {
   run_interrupted: { group: "run", label: "已中断" },
   model_turn_start: { group: "model", label: "模型回合开始" },
   model_turn_end: { group: "model", label: "模型回合结束" },
+  context_manifest: { group: "model", label: "上下文清单" },
+  verification_started: { group: "verification", label: "验证开始" },
+  verification_result: { group: "verification", label: "验证结果" },
+  verification_feedback: { group: "verification", label: "纠正反馈" },
   text_delta: { group: "model", label: "文本流" },
   tool_call_start: { group: "tool", label: "工具调用开始" },
   tool_call_end: { group: "tool", label: "工具调用结束" },
@@ -33,8 +38,8 @@ const MAP: Record<string, { group: EventGroup; label: string }> = {
   approval_requested: { group: "approval", label: "请求审批" },
   approval_resolved: { group: "approval", label: "审批结果" },
   checkpoint: { group: "run", label: "检查点" },
-  span_start: { group: "other", label: "Span 开始" },
-  span_end: { group: "other", label: "Span 结束" },
+  span_start: { group: "other", label: "执行跨度开始" },
+  span_end: { group: "other", label: "执行跨度结束" },
   child_run_started: { group: "run", label: "子运行开始" },
   child_run_ended: { group: "run", label: "子运行结束" },
   budget_warning: { group: "error", label: "预算警告" },
@@ -57,6 +62,7 @@ export function groupEventsByCategory<T extends { type: string }>(
 ): Record<EventGroup, T[]> {
   const out: Record<EventGroup, T[]> = {
     model: [],
+    verification: [],
     tool: [],
     approval: [],
     error: [],

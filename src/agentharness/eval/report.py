@@ -13,6 +13,11 @@ from agentharness.eval.runner import SuiteReport
 SCHEMA_VERSION = 1
 
 
+def _model_dump_or_value(value: Any) -> Any:
+    dump = getattr(value, "model_dump", None)
+    return dump(mode="json") if callable(dump) else value
+
+
 def suite_report_to_dict(report: SuiteReport) -> dict[str, Any]:
     """Serialize a SuiteReport to a stable, ordered dict suitable as baseline."""
     groups = []
@@ -25,7 +30,10 @@ def suite_report_to_dict(report: SuiteReport) -> dict[str, Any]:
                     ("total", g.total),
                     ("passed", g.passed),
                     ("pass_rate", round(g.pass_rate, 4)),
-                    ("mean_score", round(g.mean_score, 4)),
+                    (
+                        "mean_score",
+                        round(g.mean_score, 4) if g.mean_score is not None else None,
+                    ),
                     ("avg_latency_s", round(g.avg_latency_s, 3)),
                     ("avg_tokens", round(g.avg_tokens, 1)),
                     ("avg_steps", round(g.avg_steps, 2)),
@@ -43,7 +51,7 @@ def suite_report_to_dict(report: SuiteReport) -> dict[str, Any]:
                     ("run_id", r.run_id),
                     ("status", r.status),
                     ("passed", r.passed),
-                    ("score", round(float(r.score), 4)),
+                    ("score", round(float(r.score), 4) if r.score is not None else None),
                     ("latency_s", round(float(r.latency_s), 3)),
                     ("input_tokens", int(r.input_tokens)),
                     ("output_tokens", int(r.output_tokens)),
@@ -53,6 +61,21 @@ def suite_report_to_dict(report: SuiteReport) -> dict[str, Any]:
                     ("provider", r.provider),
                     ("model", r.model),
                     ("tags", list(r.tags)),
+                    (
+                        "evaluation_report",
+                        r.evaluation_report.model_dump(mode="json")
+                        if r.evaluation_report is not None
+                        else None,
+                    ),
+                    (
+                        "diagnosis",
+                        r.diagnosis.model_dump(mode="json")
+                        if r.diagnosis is not None
+                        else None,
+                    ),
+                    ("snapshot_id", r.snapshot_id),
+                    ("web_report_id", r.web_report_id),
+                    ("baseline_diff", dict(r.baseline_diff)),
                 ]
             )
         )
@@ -64,10 +87,23 @@ def suite_report_to_dict(report: SuiteReport) -> dict[str, Any]:
             ("total", report.total),
             ("passed", report.passed),
             ("pass_rate", round(report.pass_rate, 4)),
-            ("mean_score", round(report.mean_score, 4)),
+            (
+                "mean_score",
+                round(report.mean_score, 4) if report.mean_score is not None else None,
+            ),
             ("total_tokens", report.total_tokens),
             ("mean_latency_s", round(report.mean_latency_s, 3)),
             ("data_dir", report.data_dir),
+            (
+                "gate_decision",
+                _model_dump_or_value(report.gate_decision),
+            ),
+            (
+                "rerun_statistics",
+                report.rerun_statistics.model_dump(mode="json")
+                if report.rerun_statistics is not None
+                else None,
+            ),
             ("groups", groups),
             ("results", results),
         ]
@@ -106,7 +142,24 @@ def write_junit_xml(report: SuiteReport, path: str | Path) -> Path:
         )
         if not r.passed:
             msg = html.escape("; ".join(r.reasons) or r.status or "failed")
-            body = html.escape("\n".join(r.reasons) or r.status or "failed")
+            details = {
+                "reasons": list(r.reasons),
+                "run_id": r.run_id,
+                "first_divergence": (
+                    r.evaluation_report.first_divergence.model_dump(mode="json")
+                    if r.evaluation_report and r.evaluation_report.first_divergence
+                    else None
+                ),
+                "diagnosis": (
+                    r.diagnosis.model_dump(mode="json") if r.diagnosis else None
+                ),
+                "snapshot_id": r.snapshot_id,
+                "web_report_id": r.web_report_id,
+                "baseline_diff": dict(r.baseline_diff),
+            }
+            body = html.escape(
+                json.dumps(details, ensure_ascii=False, default=str), quote=False
+            )
             lines.append(f'    <failure message="{msg}">{body}</failure>')
         lines.append("  </testcase>")
     lines.append("</testsuite>")

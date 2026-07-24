@@ -523,8 +523,12 @@ async def test_read_file_limit_does_not_load_large_tail(
         await harness.aclose()
 
     assert result.status == RunStatus.completed
-    # read_file now preserves the trailing newline verbatim (no splitlines strip).
-    assert any(message.content == "head\n" for message in messages)
+    # The requested prefix remains verbatim; the model-visible suffix carries the
+    # whole-file version needed for optimistic writes.
+    assert any(
+        message.content.startswith("head\n[agentharness:file_version sha256=")
+        for message in messages
+    )
     assert peak < 8 * 1024 * 1024
 
 

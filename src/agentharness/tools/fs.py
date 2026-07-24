@@ -3,12 +3,31 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
 
 from agentharness.contracts import EffectKind, ToolContext, ToolResult, ToolSpec
 from agentharness.security.sandbox import SandboxError, assert_in_workspace
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _normalize_version(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    for prefix in ("sha256:", "sha256="):
+        if text.startswith(prefix):
+            text = text[len(prefix) :]
+    return text
 
 
 class ReadFileTool:
@@ -37,8 +56,16 @@ class ReadFileTool:
             )
             if not target.is_file():
                 return ToolResult(
-                    tool_call_id="", name="read_file", content=f"Not a file: {path}", is_error=True
+                    tool_call_id="",
+                    name="read_file",
+                    content=f"Not a file: {path}",
+                    is_error=True,
+                    error_code="not_a_file",
+                    error_category="filesystem",
+                    retryable=False,
+                    recovery_hint="Choose an existing text file inside the workspace.",
                 )
+            version = _sha256_file(target)
             offset = max(0, int(arguments.get("offset") or 0))
             limit = arguments.get("limit")
             line_limit = max(0, int(limit)) if limit is not None else None
@@ -101,10 +128,22 @@ class ReadFileTool:
             body = "".join(parts)[:100_000]
             if truncated:
                 body += "\n...[truncated]"
-            return ToolResult(tool_call_id="", name="read_file", content=body)
+            separator = "" if not body or body.endswith("\n") else "\n"
+            return ToolResult(
+                tool_call_id="",
+                name="read_file",
+                content=body + separator + f"[agentharness:file_version sha256={version}]",
+            )
         except (SandboxError, OSError, FileNotFoundError) as exc:
             return ToolResult(
-                tool_call_id="", name="read_file", content=str(exc), is_error=True
+                tool_call_id="",
+                name="read_file",
+                content=str(exc),
+                is_error=True,
+                error_code=("workspace_violation" if isinstance(exc, SandboxError) else "read_failed"),
+                error_category="sandbox" if isinstance(exc, SandboxError) else "filesystem",
+                retryable=isinstance(exc, FileNotFoundError),
+                recovery_hint="Re-read the path after checking that it exists inside the workspace.",
             )
 
 
@@ -119,6 +158,13 @@ class WriteFileTool:
                 "properties": {
                     "path": {"type": "string"},
                     "content": {"type": "string"},
+                    "expected_version": {
+                        "type": "string",
+                        "description": (
+                            "SHA-256 returned by read_file. Existing files are written only "
+                            "when this matches; omitted remains legacy-compatible."
+                        ),
+                    },
                 },
                 "required": ["path", "content"],
             },
@@ -132,21 +178,65 @@ class WriteFileTool:
                 name="write_file",
                 content="Write not allowed",
                 is_error=True,
+                error_code="write_not_allowed",
+                error_category="permission",
+                retryable=False,
+                recovery_hint="Use a writable run or ask a human for write permission.",
             )
         path = arguments.get("path") or ""
         content = arguments.get("content") or ""
+        expected_version = _normalize_version(arguments.get("expected_version"))
         try:
             target = assert_in_workspace(path, cwd=ctx.cwd, extra_dirs=ctx.extra_dirs)
+            if target.exists() and not target.is_file():
+                return ToolResult(
+                    tool_call_id="",
+                    name="write_file",
+                    content=f"Not a file: {path}",
+                    is_error=True,
+                    error_code="not_a_file",
+                    error_category="filesystem",
+                    retryable=False,
+                    recovery_hint="Choose a regular file path.",
+                )
+            if target.exists() and expected_version is not None:
+                current_version = _sha256_file(target)
+                if current_version != expected_version:
+                    return ToolResult(
+                        tool_call_id="",
+                        name="write_file",
+                        content=(
+                            "File version conflict: the file changed after it was read. "
+                            f"expected sha256={expected_version}, current sha256={current_version}. "
+                            "Re-read the file before writing."
+                        ),
+                        is_error=True,
+                        error_code="file_version_conflict",
+                        error_category="concurrency",
+                        retryable=True,
+                        recovery_hint="Call read_file again and retry with its latest SHA-256.",
+                    )
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
+            written_version = _sha256_file(target)
             return ToolResult(
                 tool_call_id="",
                 name="write_file",
-                content=f"Wrote {len(content)} bytes to {target}",
+                content=(
+                    f"Wrote {len(content)} bytes to {target}\n"
+                    f"[agentharness:file_version sha256={written_version}]"
+                ),
             )
         except (SandboxError, OSError) as exc:
             return ToolResult(
-                tool_call_id="", name="write_file", content=str(exc), is_error=True
+                tool_call_id="",
+                name="write_file",
+                content=str(exc),
+                is_error=True,
+                error_code=("workspace_violation" if isinstance(exc, SandboxError) else "write_failed"),
+                error_category="sandbox" if isinstance(exc, SandboxError) else "filesystem",
+                retryable=not isinstance(exc, SandboxError),
+                recovery_hint="Re-read the target and retry only inside the writable workspace.",
             )
 
 

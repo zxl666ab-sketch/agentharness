@@ -104,8 +104,8 @@ class ShellTool:
         return ToolSpec(
             name="shell",
             description=(
-                "Run a shell command in the workspace cwd. Classified as a process effect: "
-                "allowed under --approval auto, still gated under ask/never. "
+                "Run a shell command in the workspace cwd. Classified as destructive: "
+                "always requires confirmation unless approval mode is never (denied). "
                 "Has timeout and output limits. Prefer read_file/search_files when possible."
             ),
             parameters={
@@ -116,7 +116,7 @@ class ShellTool:
                 },
                 "required": ["command"],
             },
-            effect=EffectKind.process,
+            effect=EffectKind.destructive,
         )
 
     async def run(self, ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
@@ -126,7 +126,14 @@ class ShellTool:
 
         if ctx.cancel_event and ctx.cancel_event.is_set():
             return ToolResult(
-                tool_call_id="", name="shell", content="cancelled", is_error=True
+                tool_call_id="",
+                name="shell",
+                content="cancelled",
+                is_error=True,
+                error_code="cancelled",
+                error_category="cancellation",
+                retryable=True,
+                recovery_hint="Resume the run and retry the command.",
             )
 
         cwd = ctx.cwd
@@ -155,7 +162,14 @@ class ShellTool:
             proc = await asyncio.create_subprocess_shell(command, **kwargs)
         except Exception as exc:  # noqa: BLE001
             return ToolResult(
-                tool_call_id="", name="shell", content=f"spawn failed: {exc}", is_error=True
+                tool_call_id="",
+                name="shell",
+                content=f"spawn failed: {exc}",
+                is_error=True,
+                error_code="process_spawn_failed",
+                error_category="process",
+                retryable=True,
+                recovery_hint="Check the command and executable path, then retry.",
             )
 
         if self.process_registry is not None:
@@ -219,6 +233,10 @@ class ShellTool:
                 name="shell",
                 content=f"Command timed out after {timeout_s}s",
                 is_error=True,
+                error_code="command_timeout",
+                error_category="timeout",
+                retryable=True,
+                recovery_hint="Inspect the command, increase its governed timeout, or fix the hang.",
             )
         finally:
             watcher.cancel()
@@ -238,6 +256,10 @@ class ShellTool:
                 name="shell",
                 content="cancelled",
                 is_error=True,
+                error_code="cancelled",
+                error_category="cancellation",
+                retryable=True,
+                recovery_hint="Resume the run and retry the command.",
             )
 
         out = stdout_b.decode("utf-8", errors="replace")
@@ -255,4 +277,12 @@ class ShellTool:
             name="shell",
             content=combined or f"exit={code}",
             is_error=code != 0,
+            error_code="command_failed" if code != 0 else None,
+            error_category="process" if code != 0 else None,
+            retryable=code != 0,
+            recovery_hint=(
+                "Inspect stdout/stderr, correct the failing code or command, and retry."
+                if code != 0
+                else None
+            ),
         )

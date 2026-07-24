@@ -8,6 +8,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from agentharness.cli.main import app
+from agentharness.storage.sqlite import Storage
 
 runner = CliRunner()
 
@@ -178,3 +179,17 @@ cases:
     )
     # case failure already exit 1; regression also exit 1
     assert result.exit_code == 1, result.output
+    storage = Storage(tmp_path / "d")
+    try:
+        failed = next(
+            row
+            for row in storage.list_runs(limit=20)
+            if "[fake:text]x" in str(row.get("user_summary"))
+        )
+        metadata = json.loads(failed["metadata_json"])
+        retained = metadata["evaluation"]["regression"]
+        assert retained["gate_decision"]["passed"] is False
+        assert retained["gate_decision"]["exit_code"] == 1
+        assert retained["baseline_diff"]["score_delta"] < 0
+    finally:
+        storage.close()

@@ -1,10 +1,35 @@
-"""Context assembly and compaction."""
+"""Deep context-planning module: stable selection, budgeting, and manifests."""
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
-from agentharness.contracts import Message, MessageRole, ToolSpec, Usage
+from agentharness.contracts import (
+    ContextBundle,
+    ContextManifest,
+    ContextManifestItem,
+    ContextPinnedItem,
+    ContextState,
+    Message,
+    MessageRole,
+    RunRequest,
+    ToolSpec,
+    Usage,
+)
+from agentharness.security.redaction import Redactor, default_redactor
+
+_RULE_FILES = ("AGENTS.md", "WORKBUDDY.md")
+_MAX_RULE_BYTES = 64 * 1024
+_MAX_SKILL_BYTES = 64 * 1024
+
+
+class ContextBudgetError(ValueError):
+    """Essential context cannot fit without violating planner invariants."""
 
 
 def estimate_tokens(text: str) -> int:
@@ -21,18 +46,7 @@ def billable_turn_usage(
     output_text: str = "",
     inflation_ratio: int = 8,
 ) -> Usage:
-    """Token counts charged against run budget for one model turn.
-
-    Some OpenAI-compatible gateways report wildly inflated prompt/completion
-    token counts. Budget enforcement must not treat those as truth, or everyday
-    browser tasks die with ``max_tokens exceeded`` after a correct answer.
-
-    Rules:
-    - Prefer provider numbers when they stay within ``inflation_ratio`` of the
-      harness local estimate (or when no local estimate exists).
-    - Otherwise charge the local input/output estimates.
-    - Mark ``estimated=True`` when any substitution happens.
-    """
+    """Return defensible per-turn token charges despite broken gateway counters."""
     local_out = estimate_tokens(output_text) if output_text else 0
     prov_in = max(0, int(provider_usage.input_tokens or 0))
     prov_out = max(0, int(provider_usage.output_tokens or 0))
@@ -69,14 +83,550 @@ def billable_turn_usage(
 
 def estimate_messages_tokens(messages: list[Message]) -> int:
     total = 0
-    for m in messages:
-        total += estimate_tokens(m.content)
-        if m.tool_calls:
-            for tc in m.tool_calls:
-                total += estimate_tokens(tc.name) + estimate_tokens(str(tc.arguments))
+    for message in messages:
+        total += estimate_tokens(message.content)
+        if message.tool_calls:
+            for call in message.tool_calls:
+                total += estimate_tokens(call.name)
+                total += estimate_tokens(_stable_json(call.arguments))
     return total
 
 
+def estimate_tool_tokens(tool: ToolSpec) -> int:
+    return estimate_tokens(tool.name + tool.description + _stable_json(tool.parameters))
+
+
+class ContextPlanner:
+    """Plan complete provider context behind one stable, testable interface.
+
+    The caller supplies run lifecycle facts and persists the returned opaque state.
+    Rule discovery, skill/memory selection, deterministic ordering, compaction,
+    externalization, hashing, and manifest construction stay inside this module.
+    """
+
+    def __init__(
+        self,
+        *,
+        storage: Any | None = None,
+        artifacts: Any | None = None,
+        redactor: Redactor | None = None,
+    ) -> None:
+        self.storage = storage
+        self.artifacts = artifacts
+        self.redactor = redactor or default_redactor
+
+    def plan(
+        self,
+        *,
+        run_id: str,
+        request: RunRequest,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        model_turn: int,
+        state: ContextState | dict[str, Any] | None = None,
+        max_tokens: int | None = None,
+        system: str | None = None,
+    ) -> ContextBundle:
+        """Return the exact budgeted provider input and redaction-safe evidence."""
+        budget = int(max_tokens or request.budget.max_context_tokens)
+        if budget <= 0:
+            raise ContextBudgetError("context token budget must be positive")
+        pinned = self._coerce_or_select_state(state, request, system=system)
+        tools_out = sorted((tool.model_copy(deep=True) for tool in tools), key=lambda t: t.name)
+        system_text = self._render_stable_prefix(pinned)
+        prefix_fingerprint = _sha256(
+            _stable_json(
+                {
+                    "system": system_text,
+                    "tools": [tool.model_dump(mode="json") for tool in tools_out],
+                }
+            )
+        )
+
+        manifest_items = self._state_manifest_items(pinned)
+        tool_tokens = 0
+        for tool in tools_out:
+            tokens = estimate_tool_tokens(tool)
+            tool_tokens += tokens
+            manifest_items.append(
+                ContextManifestItem(
+                    section="tool_schemas",
+                    source=tool.name,
+                    content_hash=_sha256(_stable_json(tool.model_dump(mode="json"))),
+                    token_estimate=tokens,
+                    included=True,
+                    reason="enabled for this run",
+                    preview=self.redactor.redact_text(tool.description[:160]),
+                )
+            )
+
+        planned_messages, message_items, compacted = self._budget_messages(
+            messages=messages,
+            base_tokens=estimate_tokens(system_text or "") + tool_tokens,
+            budget=budget,
+        )
+        manifest_items.extend(message_items)
+        total = estimate_tokens(system_text or "") + tool_tokens + estimate_messages_tokens(
+            planned_messages
+        )
+        if total > budget:
+            raise ContextBudgetError(
+                f"essential context requires {total} tokens but budget is {budget}"
+            )
+
+        manifest = ContextManifest(
+            run_id=run_id,
+            model_turn=model_turn,
+            budget_tokens=budget,
+            total_tokens=total,
+            prefix_fingerprint=prefix_fingerprint,
+            compacted=compacted,
+            items=manifest_items,
+        )
+        # Defense in depth: sources/previews/state are persistence candidates.
+        safe_manifest = ContextManifest.model_validate(
+            self.redactor.redact_obj(manifest.model_dump(mode="json"))
+        )
+        safe_state = ContextState.model_validate(
+            self.redactor.redact_obj(pinned.model_dump(mode="json"))
+        )
+        return ContextBundle(
+            system=system_text,
+            messages=planned_messages,
+            tools=tools_out,
+            manifest=safe_manifest,
+            state=safe_state,
+        )
+
+    def _coerce_or_select_state(
+        self,
+        state: ContextState | dict[str, Any] | None,
+        request: RunRequest,
+        *,
+        system: str | None,
+    ) -> ContextState:
+        if state is not None:
+            return ContextState.model_validate(state).model_copy(deep=True)
+        items = [
+            self._pinned(
+                "system",
+                "request.system" if request.system else "harness.default_system",
+                system or request.system or self._default_system(request),
+                "required safety and run instructions",
+            )
+        ]
+        items.extend(self._discover_workspace_rules(request))
+        items.extend(self._select_skills(request))
+        items.extend(self._select_memories(request.message))
+        return ContextState(items=items)
+
+    def _pinned(
+        self,
+        section: str,
+        source: str,
+        content: str,
+        reason: str,
+        *,
+        selected: bool = True,
+    ) -> ContextPinnedItem:
+        safe_content = self.redactor.redact_text(content) if selected else ""
+        return ContextPinnedItem(
+            section=section,
+            source=self.redactor.redact_text(source),
+            content=safe_content,
+            content_hash=_sha256(safe_content) if safe_content else "",
+            token_estimate=estimate_tokens(safe_content),
+            selected=selected,
+            reason=reason,
+        )
+
+    def _discover_workspace_rules(self, request: RunRequest) -> list[ContextPinnedItem]:
+        cwd = Path(request.cwd or ".").expanduser().resolve()
+        legal_roots = _existing_resolved_dirs([request.cwd or ".", *request.extra_dirs])
+        if cwd not in legal_roots:
+            legal_roots.append(cwd)
+
+        scan_dirs: list[Path] = []
+        ancestors = [root for root in legal_roots if _is_relative_to(cwd, root)]
+        if ancestors:
+            root = min(ancestors, key=lambda value: (len(value.parts), str(value)))
+            relative = cwd.relative_to(root)
+            current = root
+            scan_dirs.append(current)
+            for part in relative.parts:
+                current = current / part
+                scan_dirs.append(current)
+        else:
+            scan_dirs.append(cwd)
+        for root in legal_roots:
+            if root not in scan_dirs and not _is_relative_to(cwd, root):
+                scan_dirs.append(root)
+
+        items: list[ContextPinnedItem] = []
+        seen: set[Path] = set()
+        for directory in scan_dirs:
+            for filename in _RULE_FILES:
+                candidate = directory / filename
+                if candidate in seen or not candidate.exists():
+                    continue
+                seen.add(candidate)
+                source = str(candidate)
+                try:
+                    if candidate.is_symlink():
+                        items.append(
+                            self._pinned(
+                                "workspace_rules",
+                                source,
+                                "",
+                                "excluded: symbolic links are not allowed",
+                                selected=False,
+                            )
+                        )
+                        continue
+                    resolved = candidate.resolve(strict=True)
+                    if not any(_is_relative_to(resolved, root) for root in legal_roots):
+                        items.append(
+                            self._pinned(
+                                "workspace_rules",
+                                source,
+                                "",
+                                "excluded: outside legal workspace roots",
+                                selected=False,
+                            )
+                        )
+                        continue
+                    size = resolved.stat().st_size
+                    if size > _MAX_RULE_BYTES:
+                        items.append(
+                            self._pinned(
+                                "workspace_rules",
+                                source,
+                                "",
+                                f"excluded: file size {size} exceeds {_MAX_RULE_BYTES} bytes",
+                                selected=False,
+                            )
+                        )
+                        continue
+                    content = resolved.read_text(encoding="utf-8", errors="replace")
+                except OSError as exc:
+                    items.append(
+                        self._pinned(
+                            "workspace_rules",
+                            source,
+                            "",
+                            f"excluded: unreadable ({type(exc).__name__})",
+                            selected=False,
+                        )
+                    )
+                    continue
+                items.append(
+                    self._pinned(
+                        "workspace_rules",
+                        source,
+                        content,
+                        "workspace rule from root-to-cwd hierarchy",
+                    )
+                )
+        return items
+
+    def _select_skills(self, request: RunRequest, limit: int = 3) -> list[ContextPinnedItem]:
+        try:
+            from agentharness.tools.skills import _load_skill_body, discover_skills
+
+            discovered = discover_skills(request.skills_dirs)
+        except Exception:  # noqa: BLE001
+            return []
+        task = request.message.lower()
+        scored: list[tuple[int, dict[str, str]]] = []
+        for skill in discovered:
+            score = 0
+            haystack = skill.get("name", "") + " " + skill.get("description", "")
+            for token in re.findall(r"[a-zA-Z0-9_\u4e00-\u9fff]+", haystack):
+                if token.lower() in task:
+                    score += 2
+                    if len(token) > 3:
+                        score += 1
+            scored.append((score, skill))
+        scored.sort(key=lambda pair: (-pair[0], pair[1].get("path", ""), pair[1].get("name", "")))
+
+        items: list[ContextPinnedItem] = []
+        selected_count = 0
+        for score, skill in scored:
+            path = Path(skill.get("path", ""))
+            source = str(path)
+            if score <= 0:
+                items.append(
+                    self._pinned("skills", source, "", "excluded: task did not match", selected=False)
+                )
+                continue
+            if selected_count >= limit:
+                items.append(
+                    self._pinned("skills", source, "", "excluded: lower-ranked match", selected=False)
+                )
+                continue
+            try:
+                if path.is_symlink() or path.stat().st_size > _MAX_SKILL_BYTES:
+                    raise OSError("unsafe or oversized skill")
+                body = _load_skill_body(path)
+            except OSError as exc:
+                items.append(
+                    self._pinned(
+                        "skills",
+                        source,
+                        "",
+                        f"excluded: {exc}",
+                        selected=False,
+                    )
+                )
+                continue
+            selected_count += 1
+            content = f"### Skill: {skill.get('name') or path.parent.name}\n{body}"
+            items.append(self._pinned("skills", source, content, f"task match score={score}"))
+        return items
+
+    def _select_memories(self, query: str) -> list[ContextPinnedItem]:
+        if self.storage is None or not query.strip():
+            return []
+        try:
+            rows = self.storage.search_memories(query, limit=5)
+            if not rows:
+                terms = sorted(
+                    {
+                        token.lower()
+                        for token in re.findall(r"[a-zA-Z0-9_\u4e00-\u9fff]+", query)
+                        if len(token) >= 3
+                    }
+                )
+                if terms:
+                    rows = self.storage.search_memories(" OR ".join(terms), limit=5)
+        except Exception:  # noqa: BLE001
+            return []
+        rows = sorted(rows, key=lambda row: str(row.get("id", "")))
+        return [
+            self._pinned(
+                "memories",
+                f"memory:{row.get('id', '')}",
+                str(row.get("content") or ""),
+                f"retrieved for initial goal; scope={row.get('scope') or 'global'}",
+            )
+            for row in rows
+        ]
+
+    def _render_stable_prefix(self, state: ContextState) -> str | None:
+        selected = [item for item in state.items if item.selected]
+        system = next((item.content for item in selected if item.section == "system"), "")
+        parts = [system] if system else []
+        for section, title in (
+            ("workspace_rules", "Workspace rules"),
+            ("skills", "Active skills"),
+            ("memories", "Retrieved memories"),
+        ):
+            section_items = [item for item in selected if item.section == section]
+            if not section_items:
+                continue
+            rendered = []
+            for item in section_items:
+                source = item.source if section != "memories" else "memory"
+                rendered.append(f"### {source}\n{item.content}")
+            parts.append(f"## {title}\n" + "\n\n".join(rendered))
+        return "\n\n".join(parts) if parts else None
+
+    def _state_manifest_items(self, state: ContextState) -> list[ContextManifestItem]:
+        return [
+            ContextManifestItem(
+                section=item.section,
+                source=item.source,
+                content_hash=item.content_hash,
+                token_estimate=item.token_estimate,
+                included=item.selected,
+                reason=item.reason,
+                compression="none" if item.selected else "excluded",
+                preview=self.redactor.redact_text(item.content[:160]) if item.selected else "",
+            )
+            for item in state.items
+        ]
+
+    def _budget_messages(
+        self,
+        *,
+        messages: list[Message],
+        base_tokens: int,
+        budget: int,
+    ) -> tuple[list[Message], list[ContextManifestItem], bool]:
+        copied = [message.model_copy(deep=True) for message in messages]
+        groups = _message_groups(copied)
+        last_user = max(
+            (index for index, message in enumerate(copied) if message.role == MessageRole.user),
+            default=-1,
+        )
+        items: list[ContextManifestItem] = []
+        for group in groups:
+            tokens = estimate_messages_tokens(group["messages"])
+            group["tokens"] = tokens
+            group["item"] = ContextManifestItem(
+                section="messages",
+                source=f"message:{group['messages'][0].id}",
+                content_hash=_sha256(
+                    _stable_json([message.model_dump(mode="json") for message in group["messages"]])
+                ),
+                token_estimate=tokens,
+                included=bool(group["valid"]),
+                reason="conversation history" if group["valid"] else "excluded: orphaned tool pair",
+                compression="none" if group["valid"] else "excluded",
+                preview=self.redactor.redact_text(group["messages"][0].content[:160]),
+            )
+            items.append(group["item"])
+
+        included = [group for group in groups if group["valid"]]
+        total = base_tokens + sum(int(group["tokens"]) for group in included)
+        compacted = len(included) != len(groups)
+
+        # Oldest complete groups are externalized first. The newest user goal and
+        # everything after it remain structurally intact.
+        for group in included:
+            if total <= budget:
+                break
+            if int(group["end"]) >= last_user:
+                continue
+            total -= int(group["tokens"])
+            group["included"] = False
+            item: ContextManifestItem = group["item"]
+            item.included = False
+            item.reason = "excluded by priority: older conversation history"
+            item.compression = "externalized" if self.artifacts is not None else "excluded"
+            item.artifact_id = self._externalize_messages(group["messages"])
+            compacted = True
+
+        final_groups = [group for group in included if group.get("included", True)]
+        final_messages = [message for group in final_groups for message in group["messages"]]
+
+        # If the active tool pair itself is large, externalize result bodies but
+        # retain both the assistant call and its matching tool-result message.
+        if total > budget:
+            for group in final_groups:
+                if total <= budget:
+                    break
+                if not group.get("is_tool_pair"):
+                    continue
+                changed = False
+                for message in group["messages"]:
+                    if message.role != MessageRole.tool or len(message.content) < 160:
+                        continue
+                    artifact_id = self._externalize_messages([message])
+                    pointer = f"[tool result externalized as artifact:{artifact_id or 'unavailable'}]"
+                    old_tokens = estimate_tokens(message.content)
+                    message.content = pointer
+                    total -= max(0, old_tokens - estimate_tokens(pointer))
+                    changed = True
+                if changed:
+                    item = group["item"]
+                    item.token_estimate = estimate_messages_tokens(group["messages"])
+                    item.reason = "included with large tool result externalized"
+                    item.compression = "externalized"
+                    compacted = True
+
+        if total > budget:
+            raise ContextBudgetError(
+                f"essential context requires {total} tokens but budget is {budget}"
+            )
+        return final_messages, items, compacted
+
+    def _externalize_messages(self, messages: list[Message]) -> str | None:
+        if self.artifacts is None:
+            return None
+        try:
+            meta = self.artifacts.put_json(
+                [message.model_dump(mode="json") for message in messages],
+                summary="Context content externalized by budget planner",
+            )
+            if self.storage is not None:
+                meta["id"] = self.storage.register_artifact(meta)
+            return str(meta.get("id") or "") or None
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _default_system(request: RunRequest) -> str:
+        return (
+            "You are a capable agent running inside Agent Harness. "
+            "Follow safety and workspace rules, use tools when needed, and be concise and accurate. "
+            f"Workspace cwd: {request.cwd or '.'}."
+        )
+
+
+def _message_groups(messages: list[Message]) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.role == MessageRole.assistant and message.tool_calls:
+            call_ids = {call.id for call in message.tool_calls}
+            grouped = [message]
+            found: set[str] = set()
+            cursor = index + 1
+            while cursor < len(messages) and messages[cursor].role == MessageRole.tool:
+                tool_message = messages[cursor]
+                if tool_message.tool_call_id not in call_ids:
+                    break
+                grouped.append(tool_message)
+                if tool_message.tool_call_id:
+                    found.add(tool_message.tool_call_id)
+                cursor += 1
+            groups.append(
+                {
+                    "messages": grouped,
+                    "start": index,
+                    "end": cursor - 1,
+                    "valid": found == call_ids,
+                    "is_tool_pair": True,
+                    "included": True,
+                }
+            )
+            index = cursor
+            continue
+        groups.append(
+            {
+                "messages": [message],
+                "start": index,
+                "end": index,
+                "valid": message.role != MessageRole.tool,
+                "is_tool_pair": False,
+                "included": True,
+            }
+        )
+        index += 1
+    return groups
+
+
+def _existing_resolved_dirs(values: list[str]) -> list[Path]:
+    roots: list[Path] = []
+    for value in values:
+        try:
+            path = Path(value).expanduser().resolve(strict=True)
+        except OSError:
+            continue
+        if path.is_dir() and path not in roots:
+            roots.append(path)
+    return sorted(roots, key=lambda path: (len(path.parts), str(path)))
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+# Compatibility helpers kept for public callers while RunEngine migrates to ContextPlanner.
 def assemble_context(
     *,
     system: str | None,
@@ -87,71 +637,78 @@ def assemble_context(
     tools: list[ToolSpec],
     max_tokens: int = 100_000,
 ) -> tuple[str | None, list[Message], dict[str, Any]]:
-    """Build system + messages for a model turn. Compacts if over budget.
-
-    Always preserves the latest user request and tool_call/tool_result pairs.
-    """
-    parts: list[str] = []
-    if system:
-        parts.append(system)
-    if skills:
-        parts.append("## Active skills\n" + "\n\n".join(skills))
-    if memories:
-        parts.append("## Retrieved memories\n" + "\n".join(f"- {m}" for m in memories))
-    if summary:
-        parts.append("## Session summary\n" + summary)
-    system_text = "\n\n".join(parts) if parts else None
-
-    meta: dict[str, Any] = {
-        "token_estimate": estimate_tokens(system_text or "") + estimate_messages_tokens(messages),
-        "token_method": "estimate",
-        "compacted": False,
-    }
-
-    # tool defs counted roughly
-    tool_tokens = sum(estimate_tokens(t.name + t.description + str(t.parameters)) for t in tools)
-    meta["token_estimate"] += tool_tokens
-
-    if meta["token_estimate"] <= max_tokens:
-        return system_text, list(messages), meta
-
-    # Compact: keep last user message + trailing tool pairs, summarize middle
-    compacted = compact_messages(messages)
-    meta["token_estimate"] = (
-        estimate_tokens(system_text or "") + estimate_messages_tokens(compacted) + tool_tokens
+    request = RunRequest(message="", system=system)
+    state_items = [
+        ContextPinnedItem(
+            section="system",
+            source="legacy.system",
+            content=system or "",
+            content_hash=_sha256(system or ""),
+            token_estimate=estimate_tokens(system or ""),
+        )
+    ]
+    state_items.extend(
+        ContextPinnedItem(
+            section="skills",
+            source=f"legacy.skill:{index}",
+            content=value,
+            content_hash=_sha256(value),
+            token_estimate=estimate_tokens(value),
+        )
+        for index, value in enumerate(skills)
     )
-    meta["compacted"] = True
-    return system_text, compacted, meta
+    state_items.extend(
+        ContextPinnedItem(
+            section="memories",
+            source=f"legacy.memory:{index}",
+            content=value,
+            content_hash=_sha256(value),
+            token_estimate=estimate_tokens(value),
+        )
+        for index, value in enumerate(memories)
+    )
+    if summary:
+        state_items.append(
+            ContextPinnedItem(
+                section="memories",
+                source="legacy.summary",
+                content=summary,
+                content_hash=_sha256(summary),
+                token_estimate=estimate_tokens(summary),
+            )
+        )
+    bundle = ContextPlanner().plan(
+        run_id="legacy",
+        request=request,
+        messages=messages,
+        tools=tools,
+        model_turn=0,
+        state=ContextState(items=state_items),
+        max_tokens=max_tokens,
+    )
+    return (
+        bundle.system,
+        bundle.messages,
+        {
+            "token_estimate": bundle.manifest.total_tokens,
+            "token_method": bundle.manifest.token_method,
+            "compacted": bundle.manifest.compacted,
+            "prefix_fingerprint": bundle.manifest.prefix_fingerprint,
+        },
+    )
 
 
 def compact_messages(messages: list[Message]) -> list[Message]:
-    """Preserve current request and tool call/result pairs; summarize older turns."""
-    if len(messages) <= 6:
-        return list(messages)
-
-    # Find last user message index
-    last_user = -1
-    for i in range(len(messages) - 1, -1, -1):
-        role = messages[i].role
-        if role == MessageRole.user or role == "user":
-            last_user = i
-            break
-
-    head = messages[: max(0, last_user - 4)]
-    tail = messages[max(0, last_user - 4) :]
-
-    # Build traceable summary of head
-    lines: list[str] = []
-    for m in head:
-        role = m.role.value if hasattr(m.role, "value") else str(m.role)
-        preview = (m.content or "")[:120].replace("\n", " ")
-        lines.append(f"[{role}] {preview}")
-        if m.tool_calls:
-            for tc in m.tool_calls:
-                lines.append(f"  tool_call {tc.name}({list(tc.arguments.keys())})")
-
-    summary_msg = Message(
-        role=MessageRole.system,
-        content="[context_summary]\n" + "\n".join(lines[-40:]),
+    """Compatibility wrapper that retains only valid groups around the latest user."""
+    copied = deepcopy(messages)
+    groups = _message_groups(copied)
+    last_user = max(
+        (index for index, message in enumerate(copied) if message.role == MessageRole.user),
+        default=-1,
     )
-    return [summary_msg, *tail]
+    kept = [
+        group
+        for group in groups
+        if group["valid"] and (int(group["end"]) >= max(0, last_user - 4))
+    ]
+    return [message for group in kept for message in group["messages"]]

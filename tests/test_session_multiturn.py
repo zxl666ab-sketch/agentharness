@@ -411,7 +411,8 @@ async def test_session_title_from_first_user_message(harness, workspace):
     assert sess is not None
     title = sess["title"]
     assert title != "session"
-    assert len(title) <= 48
+    assert title.endswith("x" * 100)
+    assert "…" not in title
     assert "  " not in title  # collapsed whitespace
 
 
@@ -419,8 +420,7 @@ def test_session_title_helper():
     assert session_title_from_message("  a   b  ") == "a b"
     assert session_title_from_message("") == "session"
     t = session_title_from_message("x" * 100)
-    assert len(t) <= 48
-    assert t.endswith("…")
+    assert t == "x" * 100
 
 
 @pytest.mark.asyncio

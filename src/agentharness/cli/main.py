@@ -28,7 +28,7 @@ from agentharness.harness import Harness
 
 app = typer.Typer(
     name="agentharness",
-    help="Agent Harness — interactive local agent with a readonly run inspector",
+    help="Agent Harness — interactive local agent with a run inspector",
     add_completion=False,
     invoke_without_command=True,
     no_args_is_help=False,
@@ -38,7 +38,7 @@ console = Console()
 _current_harness: Harness | None = None
 
 _UNSUCCESSFUL_RESULT_STATUSES = frozenset(
-    {RunStatus.failed, RunStatus.cancelled, RunStatus.interrupted}
+    {RunStatus.failed, RunStatus.cancelled, RunStatus.interrupted, RunStatus.require_human}
 )
 
 
@@ -115,6 +115,7 @@ def _status_style(status: str) -> str:
         "interrupted": "yellow",
         "running": "cyan",
         "waiting_approval": "magenta",
+        "require_human": "magenta",
         "pending": "dim",
     }
     color = mapping.get(status, "white")
@@ -135,6 +136,9 @@ def _root(
     data_dir: str | None = typer.Option(None, "--data-dir"),
     cwd: str | None = typer.Option(None, "--cwd"),
     session: str | None = typer.Option(None, "--session"),
+    with_web: bool = typer.Option(True, "--web/--no-web", help="Start Web Inspector with interactive CLI"),
+    open_web: bool = typer.Option(True, "--open/--no-open", help="Open the Inspector in a browser"),
+    web_port: int = typer.Option(8741, "--web-port", min=1, max=65525),
 ) -> None:
     """With no subcommand, open the line-oriented multi-turn CLI."""
     load_project_env()
@@ -146,6 +150,19 @@ def _root(
     h = _make_harness(str(dd), approval=approval)
     apply_settings_to_harness(h, settings)
     from agentharness.cli.interactive import run_interactive
+
+    companion = None
+    if sys.stdin.isatty() and with_web:
+        from agentharness.cli.web_companion import start_web_companion
+
+        try:
+            companion = start_web_companion(
+                dd, preferred_port=web_port, open_browser=open_web
+            )
+            reused = " (reused)" if companion.reused else ""
+            console.print(f"[green]Web Inspector[/green] {companion.url}{reused}")
+        except Exception as exc:  # noqa: BLE001 - CLI remains usable without Web
+            console.print(f"[yellow]Web Inspector unavailable:[/yellow] {exc}")
 
     try:
         run_interactive(
@@ -160,6 +177,8 @@ def _root(
         )
     finally:
         h.close()
+        if companion is not None:
+            companion.stop()
 
 
 @app.command()
@@ -308,7 +327,7 @@ def web(
     host: str = typer.Option("127.0.0.1", "--host"),
     port: int = typer.Option(8741, "--port"),
 ) -> None:
-    """Start the readonly run inspector as a foreground process."""
+    """Start the run inspector as a foreground process."""
     from agentharness.cli.interactive import _enable_windows_ctrl_c
 
     _enable_windows_ctrl_c()
@@ -320,12 +339,15 @@ def web(
             raise typer.Exit(1) from None
     dd = _data_dir(data_dir)
     h = Harness(data_dir=dd)
+    from agentharness.api.compatibility import API_SCHEMA_VERSION
     from agentharness.api.server import create_app
 
     application = create_app(harness=h)
     url = f"http://{host}:{port}"
     console.print(f"[green]Run inspector[/green] {url}")
     console.print(f"data_dir={dd}")
+    console.print(f"python={sys.executable}")
+    console.print(f"api_schema={API_SCHEMA_VERSION}")
     import uvicorn
 
     try:
@@ -389,9 +411,11 @@ def eval_cmd(
       1 - case/grader failure or regression gate triggered
       2 - suite/CLI/baseline configuration error
     """
-    from agentharness.eval.baseline import BaselineGates, compare_to_baseline
+    from agentharness.eval.baseline import load_baseline
+    from agentharness.eval.contracts import RegressionPolicy
     from agentharness.eval.dataset import EvalConfigError, load_suite
-    from agentharness.eval.report import suite_report_to_dict, write_json_report, write_junit_xml
+    from agentharness.eval.regression import RegressionGate, normalize_regression_set
+    from agentharness.eval.report import write_json_report, write_junit_xml
     from agentharness.eval.runner import run_suite
 
     try:
@@ -420,7 +444,62 @@ def eval_cmd(
         console.print(f"[red]eval failed:[/red] {exc}")
         raise typer.Exit(1) from None
 
-    payload = suite_report_to_dict(report)
+    regression_failed = False
+    reg = None
+    if baseline is not None:
+        try:
+            baseline_payload = load_baseline(baseline)
+            decision = RegressionGate.compare(
+                baseline_payload,
+                report,
+                RegressionPolicy(
+                    min_pass_rate=min_pass_rate,
+                    min_mean_score=min_mean_score,
+                    max_score_drop=max_score_regression,
+                    max_token_ratio_increase=max_token_regression,
+                    max_latency_ratio_increase=max_latency_regression,
+                ),
+            )
+            report.gate_decision = decision
+            reg = decision.regression
+            base_set = normalize_regression_set(
+                baseline_payload, fallback_id=str(baseline)
+            )
+            base_index = {item.case_id: item for item in base_set.cases}
+            for item in report.results:
+                previous = base_index.get(item.case_id)
+                item.baseline_diff = {
+                    "baseline_passed": (
+                        previous.evaluation.passed if previous is not None else None
+                    ),
+                    "candidate_passed": item.passed,
+                    "score_delta": (
+                        round(item.score - previous.evaluation.score, 6)
+                        if previous is not None
+                        and item.score is not None
+                        and previous.evaluation.score is not None
+                        else None
+                    ),
+                }
+            if report.data_dir and Path(report.data_dir).is_dir():
+                retained = Harness(data_dir=report.data_dir)
+                try:
+                    for item in report.results:
+                        if item.run_id:
+                            retained.retain_run_regression(
+                                item.run_id,
+                                regression=decision.regression,
+                                gate_decision=decision,
+                                baseline_diff=item.baseline_diff,
+                                rerun_statistics=report.rerun_statistics,
+                            )
+                finally:
+                    retained.close()
+            if fail_on_regression and not decision.passed:
+                regression_failed = True
+        except EvalConfigError as exc:
+            console.print(f"[red]baseline error:[/red] {exc}")
+            raise typer.Exit(2) from None
 
     json_path: Path | None = None
     junit_path: Path | None = None
@@ -442,7 +521,7 @@ def eval_cmd(
         table.add_row(
             r.case_id,
             "Y" if r.passed else "N",
-            f"{r.score:.2f}",
+            f"{r.score:.2f}" if r.score is not None else "unscored",
             str(r.total_tokens),
             str(r.steps),
             f"{r.latency_s:.3f}s",
@@ -450,9 +529,22 @@ def eval_cmd(
         )
     console.print(table)
     console.print(
-        f"pass_rate={report.pass_rate:.2%}  mean_score={report.mean_score:.3f}  "
+        f"pass_rate={report.pass_rate:.2%}  "
+        f"mean_score={report.mean_score:.3f}  " if report.mean_score is not None else
+        f"pass_rate={report.pass_rate:.2%}  mean_score=unscored  "
+    )
+    console.print(
         f"total={report.total}  passed={report.passed}"
     )
+    if report.rerun_statistics is not None:
+        stats = report.rerun_statistics
+        console.print(
+            "rerun "
+            f"n={stats.sample_count} success_rate={stats.success_rate:.2%} "
+            f"wilson=[{stats.wilson_low:.3f}, {stats.wilson_high:.3f}] "
+            f"variance={stats.score_variance:.6f} "
+            f"p50={stats.p50_latency_ms:.1f}ms p95={stats.p95_latency_ms:.1f}ms"
+        )
 
     if json_path is not None:
         console.print(f"[green]JSON report[/green] {json_path}")
@@ -471,29 +563,13 @@ def eval_cmd(
             "Re-run with --data-dir to inspect runs in the Web UI.[/dim]"
         )
 
-    regression_failed = False
-    if baseline is not None:
-        try:
-            gates = BaselineGates(
-                min_pass_rate=min_pass_rate,
-                min_mean_score=min_mean_score,
-                max_score_regression=max_score_regression,
-                max_token_regression=max_token_regression,
-                max_latency_regression=max_latency_regression,
-            )
-            reg = compare_to_baseline(payload, baseline, gates)
-        except EvalConfigError as exc:
-            console.print(f"[red]baseline error:[/red] {exc}")
-            raise typer.Exit(2) from None
+    if reg is not None:
         console.print(
             f"regression failed={reg.failed}  new_failures={len(reg.new_failures)}"
         )
         for g in reg.gates:
             mark = "FAIL" if g.triggered else "ok"
             console.print(f"  [{mark}] {g.gate}: {g.message}")
-        if fail_on_regression and reg.failed:
-            regression_failed = True
-
     if report.passed < report.total or regression_failed:
         raise typer.Exit(1)
     raise typer.Exit(0)

@@ -19,6 +19,12 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from agentharness.eval.contracts import (
+    ArtifactExpectation,
+    FileExpectation,
+    ToolExpectation,
+)
+
 
 class EvalConfigError(Exception):
     """Raised for any malformed suite: syntax, schema, or missing file."""
@@ -27,16 +33,41 @@ class EvalConfigError(Exception):
 class AssertionSpec(BaseModel):
     """Deterministic success criteria — every provided one must hold."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     status: str | None = None
     contains: list[str] = Field(default_factory=list)
     contains_any: list[str] = Field(default_factory=list)
+    forbidden: list[str] = Field(default_factory=list)
     regex: str | None = None
+    exact: str | None = None
+    normalized: str | None = None
+    json_output: bool = Field(default=False, alias="json")
+    json_schema: dict[str, Any] | None = None
+    jsonpath: dict[str, Any] = Field(default_factory=dict)
+    numeric_min: float | None = None
+    numeric_max: float | None = None
     tools_used: list[str] = Field(default_factory=list)
+    forbidden_tools: list[str] = Field(default_factory=list)
     tools_order: list[str] = Field(default_factory=list)
+    match_mode: str = Field(default="subset", pattern="^(exact|strict|subset|unordered)$")
+    tools: list[ToolExpectation] = Field(default_factory=list)
+    files: list[FileExpectation] = Field(default_factory=list)
+    artifacts: list[ArtifactExpectation] = Field(default_factory=list)
+    require_tool_pairing: bool = True
+    require_verification_before_completed: bool = False
+    min_retries: int | None = Field(default=None, ge=0)
+    max_retries: int | None = Field(default=None, ge=0)
+    min_approvals: int | None = Field(default=None, ge=0)
+    min_delegates: int | None = Field(default=None, ge=0)
+    min_checkpoints: int | None = Field(default=None, ge=0)
     max_tokens: int | None = Field(default=None, ge=0)
+    max_input_tokens: int | None = Field(default=None, ge=0)
+    max_output_tokens: int | None = Field(default=None, ge=0)
+    max_model_turns: int | None = Field(default=None, ge=0)
     max_steps: int | None = Field(default=None, ge=0)
+    max_tool_calls: int | None = Field(default=None, ge=0)
+    max_verifications: int | None = Field(default=None, ge=0)
     max_latency_s: float | None = Field(default=None, ge=0)
     # Optional natural-language rubric for the (default-off) LLM judge.
     rubric: str | None = None
