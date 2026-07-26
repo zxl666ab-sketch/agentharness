@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-import agentharness.storage.sqlite as storage_sqlite
 from agentharness.contracts import ApprovalMode, RunRequest, RunStatus
 from agentharness.session_history import session_title_from_message
 from agentharness.storage.migrations import SCHEMA_VERSION
@@ -437,11 +436,34 @@ async def test_delegate_does_not_update_session_ordering(
     )
     # Wall clocks can step backwards (for example after time synchronization).
     # Session recency must follow top-level activity order, not timestamp ordering.
-    monkeypatch.setattr(
-        storage_sqlite,
-        "_utcnow",
-        lambda: "2000-01-01T00:00:00+00:00",
+    # _utcnow is imported by name into every storage repo module, so freeze it
+    # in each module that stamps timestamps.
+    from agentharness.storage import (
+        approvals,
+        artifact_index,
+        checkpoints,
+        core,
+        leases,
+        maintenance,
+        memories,
+        runs,
+        sessions,
+        tool_invocations,
     )
+
+    for module in (
+        core,
+        approvals,
+        artifact_index,
+        checkpoints,
+        leases,
+        maintenance,
+        memories,
+        runs,
+        sessions,
+        tool_invocations,
+    ):
+        monkeypatch.setattr(module, "_utcnow", lambda: "2000-01-01T00:00:00+00:00")
     r2 = await harness.run(
         RunRequest(
             message="[fake:text]Beta session",
