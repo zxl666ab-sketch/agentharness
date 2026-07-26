@@ -23,12 +23,18 @@ flowchart LR
 | Boundary | Responsibility |
 |---|---|
 | `Harness` | Dependency composition, run/resume/cancel and stable read queries |
-| `RunEngine` | Agent state machine, budgets, OpenAI retry, tools, approvals, checkpoints and terminal state |
+| `RunEngine` | Agent state machine: model turns, budgets, OpenAI retry, verification orchestration and process control |
+| `RunContext` registry (`engine/run_state.py`) | All per-run in-memory state, created and torn down atomically |
+| `EventEmitter` (`engine/events.py`) | Event envelopes, persisted fan-out to observers, text-delta buffering |
+| `LeaseManager` (`engine/lease.py`) | Single-writer run lease acquire/heartbeat/release |
+| `RunLifecycle` (`engine/lifecycle.py`) | Checkpoints, resume invariants and terminal state |
+| `ToolInvocationExecutor` (`engine/tool_execution.py`) | Governed tool batches: validation, approvals, effect-aware scheduling, retry/reconcile recovery, result bounding |
+| `RunSpawner` | Narrow surface tools get via `ToolContext.harness`: storage + run + child_run_ids |
 | `ContextPlanner` | Authorized context sources, token budgeting, compaction and manifests |
 | `VerificationLoop` | Deterministic output, file, governed command and independent-model checks |
 | OpenAI adapter | Normalized async `stream(ModelRequest)` contract for OpenAI and compatible gateways |
 | Tool | Backward-compatible `ToolSpec`/`run` plus schema, timeout, replay and concurrency policy |
-| `Storage` | Transactional SQLite facts, leases, durable tool invocations/attempts, messages, approvals, memory and artifacts |
+| `Storage` | Stable facade over per-domain repos (`storage/*.py`) sharing one `StorageCore` (writer lock + per-thread readers) |
 | `WebRunSupervisor` | Background task ownership, configured workspace roots and Web approval futures |
 | FastAPI | Narrow local control plane and SSE; no Agent logic |
 
