@@ -211,7 +211,7 @@ class ToolInvocationExecutor:
         redactor: Redactor,
         events: EventEmitter,
         lifecycle: RunLifecycle,
-        harness: Any = None,
+        spawner: Any = None,
         approval_callback: ApprovalCallback | None = None,
     ) -> None:
         self.storage = storage
@@ -220,7 +220,7 @@ class ToolInvocationExecutor:
         self.redactor = redactor
         self.events = events
         self.lifecycle = lifecycle
-        self.harness = harness
+        self.spawner = spawner
         self.approval_callback = approval_callback
         self.scheduler = EffectScheduler()
 
@@ -839,7 +839,7 @@ class ToolInvocationExecutor:
                 ),
                 "skills_dirs": request.skills_dirs,
             },
-            harness=self.harness,
+            harness=self.spawner,
         )
         result = ToolResult(
             tool_call_id=tc.id,

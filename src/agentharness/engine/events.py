@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 from agentharness.contracts import EventEnvelope, EventType, RunStatus, Usage
@@ -13,9 +14,9 @@ from agentharness.storage.sqlite import Storage
 
 class EventEmitter:
     """Builds event envelopes, persists them together with run updates, and fans
-    them out to live observers via the harness notify hook. Also owns the per-run
-    text-delta buffer so streamed model output becomes bounded ``text_delta``
-    events instead of one event per token.
+    them out to live observers via the ``on_events`` callback. Also owns the
+    per-run text-delta buffer so streamed model output becomes bounded
+    ``text_delta`` events instead of one event per token.
     """
 
     def __init__(
@@ -24,12 +25,12 @@ class EventEmitter:
         storage: Storage,
         runs: dict[str, RunContext],
         redactor: Redactor,
-        harness: Any = None,
+        on_events: Callable[[list[EventEnvelope]], None] | None = None,
     ) -> None:
         self.storage = storage
         self._runs = runs
         self.redactor = redactor
-        self.harness = harness
+        self.on_events = on_events
 
     def event(
         self,
@@ -72,11 +73,9 @@ class EventEmitter:
             steps=steps,
             events=events,
         )
-        # Fan out redacted events to live CLI and Web observers.
-        if assigned and self.harness is not None:
-            notify = getattr(self.harness, "_notify_events", None)
-            if callable(notify):
-                notify(assigned)
+        # Fan out redacted events to live Web observers.
+        if assigned and self.on_events is not None:
+            self.on_events(assigned)
         return assigned
 
     async def buffer_delta(
