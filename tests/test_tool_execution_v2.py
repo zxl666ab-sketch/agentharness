@@ -1015,10 +1015,10 @@ def test_http_parallel_policy_preserves_write_barrier(data_dir):
             name="http_request",
             arguments={"url": "https://example.com", "method": "POST"},
         )
-        assert harness.engine._parallel_safe_for(  # noqa: SLF001 - scheduling contract
+        assert harness.engine.tool_executor._parallel_safe_for(  # noqa: SLF001 - scheduling contract
             tool, get_call, tool.effect_for(get_call.arguments)
         )
-        assert not harness.engine._parallel_safe_for(  # noqa: SLF001
+        assert not harness.engine.tool_executor._parallel_safe_for(  # noqa: SLF001
             tool, post_call, tool.effect_for(post_call.arguments)
         )
     finally:

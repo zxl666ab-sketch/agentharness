@@ -26,9 +26,9 @@ def test_resolve_browser_context_defaults_to_default(data_dir):
     )
     tc_other = ToolCall(name="read_file", arguments={"path": "x"})
 
-    assert engine._resolve_browser_context_id(tc_omit) == "default"
-    assert engine._resolve_browser_context_id(tc_explicit) == "custom"
-    assert engine._resolve_browser_context_id(tc_other) is None
+    assert engine.tool_executor._resolve_browser_context_id(tc_omit) == "default"
+    assert engine.tool_executor._resolve_browser_context_id(tc_explicit) == "custom"
+    assert engine.tool_executor._resolve_browser_context_id(tc_other) is None
     storage.close()
 
 
