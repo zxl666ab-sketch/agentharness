@@ -17,7 +17,6 @@ from agentharness.contracts import (
     ApprovalMode,
     ApprovalRequest,
     BudgetConfig,
-    Checkpoint,
     ContextState,
     EffectKind,
     EventType,
@@ -52,6 +51,7 @@ from agentharness.contracts import (
 from agentharness.engine.context import ContextPlanner, billable_turn_usage, estimate_tokens
 from agentharness.engine.events import EventEmitter
 from agentharness.engine.lease import LeaseManager
+from agentharness.engine.lifecycle import RESUMABLE_STATUSES, RunLifecycle
 from agentharness.engine.run_state import RunContext, ensure_ctx
 from agentharness.engine.scheduler import EffectScheduler
 from agentharness.engine.tool_execution import (
@@ -61,6 +61,7 @@ from agentharness.engine.tool_execution import (
     invalid_arguments_result,
     resolved_parallel_safe,
     resolved_replay_policy,
+    tool_call_completed,
     tool_result_model_content,
     validate_tool_arguments,
     validate_tool_spec,
@@ -73,14 +74,6 @@ from agentharness.tools.summary import summarize_tool_arguments
 
 ApprovalCallback = Callable[[ApprovalRequest], Awaitable[ApprovalDecision]]
 
-_RESUMABLE_STATUSES = frozenset(
-    {
-        RunStatus.interrupted,
-        RunStatus.cancelled,
-        RunStatus.waiting_approval,
-        RunStatus.require_human,
-    }
-)
 _RETRYABLE_PROVIDER_ERRORS = frozenset(
     {"rate_limit", "timeout", "connection", "server_error"}
 )
@@ -128,11 +121,6 @@ def _update_usage_cost(usage: Usage, pricing: PricingConfig) -> None:
 # Tool-argument summarizer lives in one place (shared with the CLI / event payloads);
 # keep the private alias so existing call sites read unchanged.
 _summarize_tool_arguments = summarize_tool_arguments
-
-
-def _tool_call_completed(tool_call: ToolCall, completed: set[str]) -> bool:
-    """Use invocation ids for v8 checkpoints and provider ids for legacy checkpoints."""
-    return tool_call.invocation_id in completed or tool_call.id in completed
 
 
 def _tool_result_messages_for_call(
@@ -217,6 +205,12 @@ class RunEngine:
             runs=self._runs,
             redactor=self.redactor,
             harness=harness,
+        )
+        self.lifecycle = RunLifecycle(
+            storage=storage,
+            runs=self._runs,
+            events=self.events,
+            redactor=self.redactor,
         )
         # Process handles per run. Kept separate from RunContext because the shell tools
         # share this dict by reference (harness wires its own registry in), registering
@@ -337,72 +331,6 @@ class RunEngine:
         mode = (ctx.stop_mode if ctx else None) or "cancel"
         return RunStatus.interrupted if mode == "interrupt" else RunStatus.cancelled
 
-    def _checkpoint_messages_for_run(self, run_id: str) -> list[Message]:
-        """Prefer in-memory (session-history-aware) messages over storage-only rows.
-
-        Storage only holds this run's messages; multi-turn history lives in the
-        in-memory list / prior checkpoint and must survive interrupt/resume.
-        """
-        ctx = self._runs.get(run_id)
-        mem = ctx.run_messages if ctx else None
-        cp = self.storage.load_checkpoint(run_id)
-        stored = self.storage.get_messages(run_id)
-        candidates: list[list[Message]] = []
-        if mem:
-            candidates.append(list(mem))
-        if cp and cp.messages:
-            candidates.append(list(cp.messages))
-        if stored:
-            candidates.append(list(stored))
-        if not candidates:
-            return []
-        # Longest list wins (history splice makes the in-memory list longer).
-        return max(candidates, key=len)
-
-    def _preserve_checkpoint(
-        self,
-        run_id: str,
-        *,
-        status: RunStatus,
-        phase: str = "tool_batch",
-    ) -> None:
-        """Checkpoint without wiping completed tool ids (resume safety)."""
-        cp = self.storage.load_checkpoint(run_id)
-        ctx = self._ctx(run_id)
-        completed = set(ctx.completed_tool_ids)
-        pending = list(ctx.pending_tool_calls)
-        step = 0
-        usage = Usage()
-        if cp:
-            completed |= set(cp.completed_tool_call_ids)
-            if not pending:
-                pending = [
-                    tc
-                    for tc in cp.pending_tool_calls
-                    if not _tool_call_completed(tc, completed)
-                ]
-            step = cp.step
-            usage = cp.usage
-        messages = self._checkpoint_messages_for_run(run_id)
-        metadata = dict(cp.metadata) if cp else {}
-        if ctx.context_state is not None:
-            metadata["context_state"] = ctx.context_state.model_dump(mode="json")
-        metadata["verification_attempt"] = ctx.verification_attempt
-        self.storage.save_checkpoint(
-            Checkpoint(
-                run_id=run_id,
-                phase=phase,  # type: ignore[arg-type]
-                step=step,
-                messages=messages,
-                pending_tool_calls=pending,
-                completed_tool_call_ids=list(completed),
-                usage=usage,
-                status=status,
-                metadata=metadata,
-            )
-        )
-        ctx.completed_tool_ids = completed
-
     async def cancel(self, run_id: str) -> None:
         """Signal cancel, kill process trees + children. Active loop finishes as cancelled."""
         run = self.storage.get_run(run_id)
@@ -418,7 +346,7 @@ class RunEngine:
         self._ctx(run_id).stop_mode = "cancel"
         self.storage.request_stop(run_id, "cancel")
         await self._kill_descendants(run_id)
-        self._preserve_checkpoint(run_id, status=RunStatus.cancelled)
+        self.lifecycle.preserve_checkpoint(run_id, status=RunStatus.cancelled)
         # If no active loop owns this run, finalize status here
         if run_id not in self._active_run_ids:
             run = self.storage.get_run(run_id)
@@ -445,9 +373,9 @@ class RunEngine:
         self._ctx(run_id).stop_mode = "interrupt"
         self.storage.request_stop(run_id, "interrupt")
         await self._kill_descendants(run_id)
-        self._preserve_checkpoint(run_id, status=RunStatus.interrupted)
+        self.lifecycle.preserve_checkpoint(run_id, status=RunStatus.interrupted)
         if run_id not in self._active_run_ids:
-            self._mark_interrupted(run_id, reason)
+            self.lifecycle.mark_interrupted(run_id, reason)
 
     async def run(self, request: RunRequest, *, run_id: str | None = None) -> RunResult:
         from agentharness.session_history import session_title_from_message
@@ -584,7 +512,7 @@ class RunEngine:
             ],
         )
 
-        self._checkpoint(
+        self.lifecycle.checkpoint(
             run_id,
             phase="model_turn",
             step=0,
@@ -622,10 +550,10 @@ class RunEngine:
         except asyncio.CancelledError:
             # Kill shell trees + children; preserve completed tools for resume
             await self.interrupt(run_id, "cancelled")
-            self._mark_interrupted(run_id, "cancelled")
+            self.lifecycle.mark_interrupted(run_id, "cancelled")
             raise
         except Exception as exc:  # noqa: BLE001
-            self._mark_failed(run_id, str(exc))
+            self.lifecycle.mark_failed(run_id, str(exc))
             return RunResult(
                 run_id=run_id,
                 session_id=session_id,
@@ -671,8 +599,8 @@ class RunEngine:
         status = RunStatus(run["status"])
         if run_id in self._active_run_ids:
             raise RuntimeError(f"run {run_id} is active and cannot be resumed")
-        if status not in _RESUMABLE_STATUSES:
-            allowed = ", ".join(sorted(item.value for item in _RESUMABLE_STATUSES))
+        if status not in RESUMABLE_STATUSES:
+            allowed = ", ".join(sorted(item.value for item in RESUMABLE_STATUSES))
             raise RuntimeError(
                 f"run {run_id} is not resumable from status {status.value}; "
                 f"allowed statuses: {allowed}"
@@ -738,7 +666,7 @@ class RunEngine:
         completed = set(cp.completed_tool_call_ids)
         # If interrupted mid tool batch, only re-run incomplete tool calls
         pending = [
-            tc for tc in cp.pending_tool_calls if not _tool_call_completed(tc, completed)
+            tc for tc in cp.pending_tool_calls if not tool_call_completed(tc, completed)
         ]
 
         self._activate_run(run_id)
@@ -797,7 +725,7 @@ class RunEngine:
                         cancel=cancel,
                     )
                     if resume_ctx.indeterminate_reason:
-                        return self._finish(
+                        return self.lifecycle.finish(
                             run_id,
                             run["session_id"],
                             run["root_run_id"],
@@ -831,7 +759,7 @@ class RunEngine:
             )
         except asyncio.CancelledError:
             await self.interrupt(run_id, "cancelled")
-            self._mark_interrupted(run_id, "cancelled")
+            self.lifecycle.mark_interrupted(run_id, "cancelled")
             raise
         finally:
             stop_watcher.cancel()
@@ -971,32 +899,32 @@ class RunEngine:
             tool_specs = self._tool_specs(request)
             if cancel.is_set():
                 stop = self._stop_status(run_id)
-                return self._finish(
+                return self.lifecycle.finish(
                     run_id, session_id, root_run_id, parent_run_id,
                     stop, "".join(output_parts), usage, step, stop.value,
                     messages=messages,
                 )
             if step >= budget.max_steps:
-                return self._finish(
+                return self.lifecycle.finish(
                     run_id, session_id, root_run_id, parent_run_id,
                     RunStatus.failed, "".join(output_parts), usage, step, "max_steps exceeded",
                     messages=messages,
                 )
             if time.monotonic() - started > budget.max_wall_time_s:
-                return self._finish(
+                return self.lifecycle.finish(
                     run_id, session_id, root_run_id, parent_run_id,
                     RunStatus.failed, "".join(output_parts), usage, step, "max_wall_time exceeded",
                     messages=messages,
                 )
             if usage.total_tokens >= budget.max_tokens:
-                return self._finish(
+                return self.lifecycle.finish(
                     run_id, session_id, root_run_id, parent_run_id,
                     RunStatus.failed, "".join(output_parts), usage, step, "max_tokens exceeded",
                     messages=messages,
                 )
             if budget.max_cost_usd is not None:
                 if usage.estimated_cost_usd is None:
-                    return self._finish(
+                    return self.lifecycle.finish(
                         run_id,
                         session_id,
                         root_run_id,
@@ -1009,7 +937,7 @@ class RunEngine:
                         messages=messages,
                     )
                 if usage.estimated_cost_usd >= budget.max_cost_usd:
-                    return self._finish(
+                    return self.lifecycle.finish(
                         run_id,
                         session_id,
                         root_run_id,
@@ -1022,7 +950,7 @@ class RunEngine:
                         messages=messages,
                     )
             if output_length >= budget.max_output_length:
-                return self._finish(
+                return self.lifecycle.finish(
                     run_id, session_id, root_run_id, parent_run_id,
                     RunStatus.failed, "".join(output_parts), usage, step,
                     "max_output_length exceeded",
@@ -1483,7 +1411,7 @@ class RunEngine:
             )
 
             # Checkpoint after model turn
-            self._checkpoint(
+            self.lifecycle.checkpoint(
                 run_id,
                 phase="model_turn",
                 step=step,
@@ -1500,7 +1428,7 @@ class RunEngine:
                     status = RunStatus.interrupted
                 else:
                     status = RunStatus.failed
-                return self._finish(
+                return self.lifecycle.finish(
                     run_id, session_id, root_run_id, parent_run_id,
                     status, "".join(output_parts), usage, step, error_msg,
                     messages=messages,
@@ -1527,7 +1455,7 @@ class RunEngine:
                     self._charge_verification_usage(usage, decision)
                     _update_usage_cost(usage, request.pricing)
                     if usage.total_tokens > budget.max_tokens:
-                        return self._finish(
+                        return self.lifecycle.finish(
                             run_id,
                             session_id,
                             root_run_id,
@@ -1546,7 +1474,7 @@ class RunEngine:
                             or usage.estimated_cost_usd > budget.max_cost_usd
                         )
                     ):
-                        return self._finish(
+                        return self.lifecycle.finish(
                             run_id,
                             session_id,
                             root_run_id,
@@ -1568,7 +1496,7 @@ class RunEngine:
                         output_parts = []
                         output_length = 0
                         step += 1
-                        self._checkpoint(
+                        self.lifecycle.checkpoint(
                             run_id,
                             phase="model_turn",
                             step=step,
@@ -1596,7 +1524,7 @@ class RunEngine:
                             error += ": " + "; ".join(
                                 failure.message for failure in decision.failures
                             )
-                        return self._finish(
+                        return self.lifecycle.finish(
                             run_id,
                             session_id,
                             root_run_id,
@@ -1608,7 +1536,7 @@ class RunEngine:
                             error,
                             messages=messages,
                         )
-                return self._finish(
+                return self.lifecycle.finish(
                     run_id, session_id, root_run_id, parent_run_id,
                     RunStatus.completed, "".join(output_parts), usage, step + 1, None,
                     messages=messages,
@@ -1629,7 +1557,7 @@ class RunEngine:
                 cancel=cancel,
             )
             if self._ctx(run_id).indeterminate_reason:
-                return self._finish(
+                return self.lifecycle.finish(
                     run_id,
                     session_id,
                     root_run_id,
@@ -1644,7 +1572,7 @@ class RunEngine:
             step += 1
 
             if output_length > budget.max_output_length:
-                return self._finish(
+                return self.lifecycle.finish(
                     run_id, session_id, root_run_id, parent_run_id,
                     RunStatus.failed, "".join(output_parts), usage, step,
                     "max_output_length exceeded",
@@ -1911,7 +1839,7 @@ class RunEngine:
         reason = "verification requires human review"
         if decision.failures:
             reason += ": " + "; ".join(failure.message for failure in decision.failures)
-        self._checkpoint(
+        self.lifecycle.checkpoint(
             run_id,
             phase="model_turn",
             step=steps,
@@ -1971,7 +1899,7 @@ class RunEngine:
 
         # Filter already completed (resume safety)
         pending = [
-            tc for tc in tool_calls if not _tool_call_completed(tc, completed_tool_ids)
+            tc for tc in tool_calls if not tool_call_completed(tc, completed_tool_ids)
         ]
         if not pending:
             return collected_results
@@ -1980,7 +1908,7 @@ class RunEngine:
         batch_ctx.completed_tool_ids = set(completed_tool_ids)
         batch_ctx.pending_tool_calls = list(pending)
 
-        self._checkpoint(
+        self.lifecycle.checkpoint(
             run_id,
             phase="tool_batch",
             step=step,
@@ -2268,7 +2196,7 @@ class RunEngine:
                         )
                     ],
                 )
-                self._checkpoint(
+                self.lifecycle.checkpoint(
                     run_id,
                     phase="waiting_approval",
                     step=step,
@@ -2451,11 +2379,11 @@ class RunEngine:
         # Drop finished tools from pending; incomplete stay for resume
         batch_ctx = self._ctx(run_id)
         batch_ctx.pending_tool_calls = [
-            tc for tc in pending if not _tool_call_completed(tc, completed_tool_ids)
+            tc for tc in pending if not tool_call_completed(tc, completed_tool_ids)
         ]
         batch_ctx.completed_tool_ids = set(completed_tool_ids)
 
-        self._checkpoint(
+        self.lifecycle.checkpoint(
             run_id,
             phase="tool_batch",
             step=step,
@@ -3235,51 +3163,6 @@ class RunEngine:
             specs.append(tool.spec)
         return specs
 
-    def _checkpoint(
-        self,
-        run_id: str,
-        *,
-        phase: str,
-        step: int,
-        messages: list[Message],
-        pending: list[ToolCall],
-        completed: set[str],
-        usage: Usage,
-        status: RunStatus = RunStatus.running,
-        approval_token: str | None = None,
-    ) -> None:
-        current = self.storage.load_checkpoint(run_id)
-        metadata = dict(current.metadata) if current else {}
-        context_state = self._ctx(run_id).context_state
-        if context_state is not None:
-            metadata["context_state"] = context_state.model_dump(mode="json")
-        metadata["verification_attempt"] = self._ctx(run_id).verification_attempt
-        cp = Checkpoint(
-            run_id=run_id,
-            phase=phase,  # type: ignore[arg-type]
-            step=step,
-            messages=messages,
-            pending_tool_calls=pending,
-            completed_tool_call_ids=list(completed),
-            usage=usage,
-            status=status,
-            approval_token=approval_token,
-            metadata=metadata,
-        )
-        self.storage.save_checkpoint(cp)
-        run = self.storage.get_run(run_id)
-        if run:
-            self.events.emit_and_update(
-                run_id,
-                events=[
-                    self.events.event(
-                        run,
-                        EventType.checkpoint,
-                        {"phase": phase, "step": step},
-                    )
-                ],
-            )
-
     async def _finish_wall_timeout(
         self,
         run_id: str,
@@ -3289,14 +3172,14 @@ class RunEngine:
     ) -> RunResult:
         await self._kill_descendants(run_id)
         checkpoint = self.storage.load_checkpoint(run_id)
-        messages = self._checkpoint_messages_for_run(run_id)
+        messages = self.lifecycle.checkpoint_messages(run_id)
         current_run_messages = self.storage.get_messages(run_id)
         output = "".join(
             message.content
             for message in current_run_messages
             if message.role == MessageRole.assistant
         )
-        return self._finish(
+        return self.lifecycle.finish(
             run_id,
             session_id,
             root_run_id,
@@ -3308,120 +3191,3 @@ class RunEngine:
             "max_wall_time exceeded",
             messages=messages,
         )
-
-    def _finish(
-        self,
-        run_id: str,
-        session_id: str,
-        root_run_id: str,
-        parent_run_id: str | None,
-        status: RunStatus,
-        output: str,
-        usage: Usage,
-        steps: int,
-        error: str | None,
-        messages: list[Message] | None = None,
-    ) -> RunResult:
-        run = self.storage.get_run(run_id)
-        etype = {
-            RunStatus.completed: EventType.run_completed,
-            RunStatus.failed: EventType.run_failed,
-            RunStatus.cancelled: EventType.run_cancelled,
-            RunStatus.interrupted: EventType.run_interrupted,
-        }.get(status, EventType.run_status)
-        if run:
-            finish_ctx = self._runs.get(run_id)
-            # Never wipe completed tool ids — resume must skip finished tools.
-            completed = set(finish_ctx.completed_tool_ids if finish_ctx else set())
-            cp = self.storage.load_checkpoint(run_id)
-            if cp:
-                completed |= set(cp.completed_tool_call_ids)
-            pending: list[ToolCall] = []
-            if status in _RESUMABLE_STATUSES:
-                pending = [
-                    tc
-                    for tc in (
-                        (finish_ctx.pending_tool_calls if finish_ctx else None)
-                        or (cp.pending_tool_calls if cp else [])
-                    )
-                    if not _tool_call_completed(tc, completed)
-                ]
-            # Keep multi-turn session history in the terminal checkpoint for resume.
-            # Do NOT replace with storage-only rows (they lack prior-run context).
-            if messages is not None:
-                self._ctx(run_id).run_messages = messages
-            finish_messages = self._checkpoint_messages_for_run(run_id)
-            if messages is not None and len(messages) >= len(finish_messages):
-                finish_messages = list(messages)
-            self._checkpoint(
-                run_id,
-                phase="terminal" if status == RunStatus.completed else "tool_batch",
-                step=steps,
-                messages=finish_messages,
-                pending=pending,
-                completed=completed,
-                usage=usage,
-                status=status,
-            )
-            self.events.emit_and_update(
-                run_id,
-                status=status,
-                finished=True,
-                error=error,
-                output_summary=output[:2000],
-                usage=usage,
-                steps=steps,
-                events=[
-                    self.events.event(
-                        run,
-                        etype,
-                        {
-                            "status": status.value,
-                            "error": error,
-                            "output_len": len(output),
-                            "usage": usage.model_dump(),
-                        },
-                    )
-                ],
-            )
-            self.storage.clear_stop_request(run_id)
-        return RunResult(
-            run_id=run_id,
-            session_id=session_id,
-            status=status,
-            output=self.redactor.redact_text(output),
-            error=error,
-            usage=usage,
-            steps=steps,
-            parent_run_id=parent_run_id,
-            root_run_id=root_run_id,
-            finished_at=datetime.now(UTC),
-        )
-
-    def _mark_interrupted(self, run_id: str, reason: str) -> None:
-        run = self.storage.get_run(run_id)
-        if not run:
-            return
-        self.events.emit_and_update(
-            run_id,
-            status=RunStatus.interrupted,
-            finished=True,
-            error=reason,
-            events=[
-                self.events.event(run, EventType.run_interrupted, {"reason": reason})
-            ],
-        )
-        self.storage.clear_stop_request(run_id)
-
-    def _mark_failed(self, run_id: str, error: str) -> None:
-        run = self.storage.get_run(run_id)
-        if not run:
-            return
-        self.events.emit_and_update(
-            run_id,
-            status=RunStatus.failed,
-            finished=True,
-            error=error,
-            events=[self.events.event(run, EventType.run_failed, {"error": error})],
-        )
-        self.storage.clear_stop_request(run_id)
