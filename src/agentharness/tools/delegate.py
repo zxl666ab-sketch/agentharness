@@ -62,8 +62,8 @@ class DelegateTool:
             return ToolResult(
                 tool_call_id="", name="delegate", content="empty task", is_error=True
             )
-        harness = ctx.harness
-        if harness is None:
+        spawner = ctx.harness
+        if spawner is None:
             return ToolResult(
                 tool_call_id="", name="delegate", content="harness unavailable", is_error=True
             )
@@ -81,22 +81,18 @@ class DelegateTool:
             )
 
         # Concurrent children limit checked via active children
-        engine = getattr(harness, "engine", None)
-        if engine is not None:
-            children = engine.child_run_ids(ctx.run_id)
-            # count still running
-            running = 0
-            for cid in children:
-                row = harness.storage.get_run(cid)
-                if row and row["status"] in ("running", "pending", "waiting_approval"):
-                    running += 1
-            if running >= budget.max_concurrent_children:
-                return ToolResult(
-                    tool_call_id="",
-                    name="delegate",
-                    content=f"Max concurrent children {budget.max_concurrent_children} reached",
-                    is_error=True,
-                )
+        running = 0
+        for cid in spawner.child_run_ids(ctx.run_id):
+            row = spawner.storage.get_run(cid)
+            if row and row["status"] in ("running", "pending", "waiting_approval"):
+                running += 1
+        if running >= budget.max_concurrent_children:
+            return ToolResult(
+                tool_call_id="",
+                name="delegate",
+                content=f"Max concurrent children {budget.max_concurrent_children} reached",
+                is_error=True,
+            )
 
         child_req = RunRequest(
             message=task,
@@ -129,7 +125,7 @@ class DelegateTool:
         )
 
         try:
-            result = await harness.run(child_req)
+            result = await spawner.run(child_req)
             # Emit child linkage is handled by engine.create_run
             summary = (
                 f"child_run_id={result.run_id} status={result.status.value}\n"

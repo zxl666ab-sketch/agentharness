@@ -67,20 +67,21 @@ class Harness:
         self.providers: dict[str, Any] = providers or {
             "openai": OpenAIResponsesAdapter(),
         }
+        self._event_subs: list[EventCallback] = []
+        self._event_subs_lock = threading.RLock()
         self.engine = RunEngine(
             self.storage,
             self.providers,
             self.tools,
             redactor=self.redactor,
             approval_callback=approval_callback,
-            harness=self,
+            on_events=self._notify_events,
+            mcp_bridge=self.mcp_bridge,
+            process_registry=self._process_registry,
             lease_owner_id=lease_owner_id,
             lease_ttl_s=lease_ttl_s,
             lease_heartbeat_s=lease_heartbeat_s,
         )
-        self.engine._active_processes = self._process_registry
-        self._event_subs: list[EventCallback] = []
-        self._event_subs_lock = threading.RLock()
         self._closed = False
 
     def set_approval_callback(self, callback: ApprovalCallback | None) -> None:
@@ -102,6 +103,10 @@ class Harness:
 
     async def resume(self, run_id: str, input: str | None = None) -> RunResult:
         return await self.engine.resume(run_id, input=input)
+
+    def child_run_ids(self, run_id: str) -> list[str]:
+        """Child run ids spawned by a run (delegate concurrency accounting)."""
+        return self.engine.child_run_ids(run_id)
 
     def resolve_indeterminate_tool(
         self,

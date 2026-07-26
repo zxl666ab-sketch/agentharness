@@ -15,6 +15,7 @@ from agentharness.contracts import (
     ApprovalMode,
     BudgetConfig,
     ContextState,
+    EventEnvelope,
     EventType,
     Message,
     MessageRole,
@@ -110,7 +111,9 @@ class RunEngine:
         *,
         redactor: Redactor | None = None,
         approval_callback: ApprovalCallback | None = None,
-        harness: Any = None,
+        on_events: Callable[[list[EventEnvelope]], None] | None = None,
+        mcp_bridge: Any = None,
+        process_registry: dict[str, list[Any]] | None = None,
         lease_owner_id: str | None = None,
         lease_ttl_s: float = 60.0,
         lease_heartbeat_s: float = 10.0,
@@ -119,7 +122,7 @@ class RunEngine:
         self.providers = providers
         self.tools = tools
         self.redactor = redactor or default_redactor
-        self.harness = harness
+        self.mcp_bridge = mcp_bridge
         self.lease = LeaseManager(
             storage,
             owner_id=lease_owner_id,
@@ -137,7 +140,7 @@ class RunEngine:
             storage=storage,
             runs=self._runs,
             redactor=self.redactor,
-            harness=harness,
+            on_events=on_events,
         )
         self.lifecycle = RunLifecycle(
             storage=storage,
@@ -145,6 +148,8 @@ class RunEngine:
             events=self.events,
             redactor=self.redactor,
         )
+        # Narrow surface handed to tools; they never see the Harness or the engine.
+        self.spawner = RunSpawner(self)
         self.tool_executor = ToolInvocationExecutor(
             storage=storage,
             tools=tools,
@@ -152,13 +157,15 @@ class RunEngine:
             redactor=self.redactor,
             events=self.events,
             lifecycle=self.lifecycle,
-            harness=harness,
+            spawner=self.spawner,
             approval_callback=approval_callback,
         )
         # Process handles per run. Kept separate from RunContext because the shell tools
-        # share this dict by reference (harness wires its own registry in), registering
+        # share this dict by reference (the harness passes its own registry), registering
         # handles the engine later kills — a per-run field could not be shared that way.
-        self._active_processes: dict[str, list[Any]] = {}
+        self._active_processes: dict[str, list[Any]] = (
+            process_registry if process_registry is not None else {}
+        )
         self._active_run_ids: set[str] = set()
         self.active_run_id: str | None = None
 
@@ -1832,8 +1839,7 @@ class RunEngine:
         )
 
     def _tool_specs(self, request: RunRequest) -> list[ToolSpec]:
-        bridge = getattr(self.harness, "mcp_bridge", None)
-        proxy_factory = getattr(bridge, "proxy_tools", None)
+        proxy_factory = getattr(self.mcp_bridge, "proxy_tools", None)
         if callable(proxy_factory):
             proxies = proxy_factory()
             if not isinstance(proxies, dict):
@@ -1890,3 +1896,24 @@ class RunEngine:
             "max_wall_time exceeded",
             messages=messages,
         )
+
+
+class RunSpawner:
+    """Narrow runtime surface handed to tools via ``ToolContext.harness``.
+
+    Tools that spawn or inspect runs (delegate) and tools that persist
+    artifacts or memories (MCP, memory) get exactly this: ``storage`` plus
+    ``run``/``child_run_ids``. They never see the Harness or the engine.
+    """
+
+    def __init__(self, engine: RunEngine) -> None:
+        self._engine = engine
+        self.storage = engine.storage
+
+    async def run(
+        self, request: RunRequest, *, run_id: str | None = None
+    ) -> RunResult:
+        return await self._engine.run(request, run_id=run_id)
+
+    def child_run_ids(self, run_id: str) -> list[str]:
+        return self._engine.child_run_ids(run_id)
