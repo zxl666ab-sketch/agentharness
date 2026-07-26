@@ -1,6 +1,0 @@
-- main [ref=f1e3]:
-  - status [ref=f1e4]:
-    - text: AGENT HARNESS · 运行环境检查
-    - heading "正在核对网页端与后端版本" [level=1] [ref=f1e5]
-    - paragraph [ref=f1e6]: 验证通过后才会加载运行数据。
-    - generic [ref=f1e7]: 接口结构版本 4 · 网页构建 2026-07-24T16:36:15.082Z

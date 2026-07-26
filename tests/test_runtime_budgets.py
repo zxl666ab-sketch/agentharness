@@ -15,6 +15,7 @@ from agentharness.contracts import (
     EffectKind,
     ModelRequest,
     ModelStreamItem,
+    PricingConfig,
     RunRequest,
     RunStatus,
     StreamItemType,
@@ -23,8 +24,8 @@ from agentharness.contracts import (
     ToolSpec,
     Usage,
 )
-from agentharness.harness import Harness
 from agentharness.tools.shell import kill_process_tree
+from tests.fake_provider import create_test_harness
 
 
 class _SlowProvider:
@@ -101,11 +102,27 @@ class _SlowTool:
         return ToolResult(tool_call_id="", name="slow_tool", content="done")
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_tool_calls_per_turn", 17),
+        ("max_tool_calls", 129),
+        ("max_concurrent_tools", 5),
+        ("max_tool_argument_bytes", 262_145),
+        ("max_tool_result_bytes", 1_048_577),
+        ("max_inline_tool_result_bytes", 4_097),
+    ],
+)
+def test_tool_governance_caps_cannot_be_raised(field: str, value: int) -> None:
+    with pytest.raises(ValueError):
+        BudgetConfig(**{field: value})
+
+
 @pytest.mark.asyncio
 async def test_wall_time_interrupts_single_slow_provider_stream(
     data_dir: Path, workspace: Path
 ):
-    harness = Harness(data_dir=data_dir, providers={"slow": _SlowProvider()})
+    harness = create_test_harness(data_dir=data_dir, providers={"slow": _SlowProvider()})
     started = time.monotonic()
     try:
         result = await harness.run(
@@ -128,7 +145,7 @@ async def test_wall_time_interrupts_single_slow_provider_stream(
 @pytest.mark.asyncio
 async def test_wall_time_cancels_slow_tool_batch(data_dir: Path, workspace: Path):
     tool = _SlowTool()
-    harness = Harness(
+    harness = create_test_harness(
         data_dir=data_dir,
         providers={"tool-provider": _ToolProvider()},
         tools={"slow_tool": tool},
@@ -158,7 +175,7 @@ async def test_wall_time_cancels_slow_tool_batch(data_dir: Path, workspace: Path
 
 @pytest.mark.asyncio
 async def test_wall_time_kills_real_shell_process(data_dir: Path, workspace: Path):
-    harness = Harness(data_dir=data_dir)
+    harness = create_test_harness(data_dir=data_dir)
 
     async def approve(_request):
         from agentharness.contracts import ApprovalDecision
@@ -201,7 +218,7 @@ async def test_wall_time_kills_real_shell_process(data_dir: Path, workspace: Pat
 
 @pytest.mark.asyncio
 async def test_output_length_cannot_complete_over_limit(data_dir: Path, workspace: Path):
-    harness = Harness(data_dir=data_dir)
+    harness = create_test_harness(data_dir=data_dir)
     try:
         result = await harness.run(
             RunRequest(
@@ -225,7 +242,7 @@ async def test_token_limit_is_passed_to_provider_and_enforced(
     data_dir: Path, workspace: Path
 ):
     provider = _TokenProvider()
-    harness = Harness(data_dir=data_dir, providers={"tokens": provider})
+    harness = create_test_harness(data_dir=data_dir, providers={"tokens": provider})
     try:
         result = await harness.run(
             RunRequest(
@@ -240,18 +257,75 @@ async def test_token_limit_is_passed_to_provider_and_enforced(
         harness.close()
 
     assert provider.requests[0].max_tokens == 5
-    # Final answer already produced: do not false-fail solely for budget overage.
-    assert result.status == RunStatus.completed
+    # Providers may ignore max_tokens, but an over-budget result is never accepted.
+    assert result.status == RunStatus.failed
+    assert result.error == "max_tokens exceeded"
     assert result.output == "ok"
     assert result.usage is not None
     assert result.usage.total_tokens == 6
 
 
 @pytest.mark.asyncio
+async def test_strict_cost_budget_rejects_unknown_pricing_before_provider_call(
+    data_dir: Path, workspace: Path
+) -> None:
+    provider = _TokenProvider()
+    harness = create_test_harness(data_dir=data_dir, providers={"tokens": provider})
+    try:
+        result = await harness.run(
+            RunRequest(
+                message="unknown price",
+                provider="tokens",
+                cwd=str(workspace),
+                budget=BudgetConfig(max_cost_usd=1.0),
+            )
+        )
+    finally:
+        await harness.aclose()
+
+    assert result.status == RunStatus.failed
+    assert "requires known" in (result.error or "")
+    assert provider.requests == []
+    assert result.usage.cost_status == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_known_pricing_records_estimated_cost(
+    data_dir: Path, workspace: Path
+) -> None:
+    provider = _TokenProvider()
+    harness = create_test_harness(data_dir=data_dir, providers={"tokens": provider})
+    pricing = PricingConfig(
+        input_per_million_usd=1.0,
+        output_per_million_usd=2.0,
+    )
+    try:
+        result = await harness.run(
+            RunRequest(
+                message="known price",
+                provider="tokens",
+                cwd=str(workspace),
+                pricing=pricing,
+                budget=BudgetConfig(max_cost_usd=1.0),
+            )
+        )
+    finally:
+        await harness.aclose()
+
+    assert result.status == RunStatus.completed
+    assert result.usage.cost_status == "estimated"
+    expected = (
+        result.usage.input_tokens * 1.0 + result.usage.output_tokens * 2.0
+    ) / 1_000_000
+    assert result.usage.estimated_cost_usd == pytest.approx(expected)
+    assert result.usage.provider_attempts[-1].estimated_cost_usd is not None
+
+
+@pytest.mark.asyncio
 async def test_many_small_stream_deltas_remain_linear_time(
     data_dir: Path, workspace: Path
 ):
-    harness = Harness(
+    harness = create_test_harness(
         data_dir=data_dir,
         providers={"many-deltas": _ManyDeltaProvider()},
     )

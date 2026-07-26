@@ -33,6 +33,11 @@ _DEFAULT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
 ]
 
+_PUBLIC_PATH_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"(?i)(?<![A-Za-z0-9_])[A-Z]:[\\/][^\r\n\s\"'<>|]+"),
+    re.compile(r"(?<![A-Za-z0-9_])/(?:home|Users)/[^\r\n\s\"'<>]+"),
+]
+
 _SENSITIVE_KEYS = {
     "authorization",
     "proxyauthorization",
@@ -76,16 +81,30 @@ class Redactor:
         return out
 
     def redact_obj(self, obj: Any) -> Any:
+        return self._redact_obj(obj, public=False)
+
+    def redact_public_text(self, text: str) -> str:
+        """Redact secrets plus identifying absolute paths at public API boundaries."""
+        out = self.redact_text(text)
+        for pattern in _PUBLIC_PATH_PATTERNS:
+            out = pattern.sub("[REDACTED_PATH]", out)
+        return out
+
+    def redact_public_obj(self, obj: Any) -> Any:
+        return self._redact_obj(obj, public=True)
+
+    def _redact_obj(self, obj: Any, *, public: bool) -> Any:
         if obj is None:
             return None
         if isinstance(obj, str):
-            return self.redact_text(obj)
+            return self.redact_public_text(obj) if public else self.redact_text(obj)
         if isinstance(obj, (bytes, bytearray, memoryview)):
-            return self.redact_text(bytes(obj).decode("utf-8", errors="replace"))
+            text = bytes(obj).decode("utf-8", errors="replace")
+            return self.redact_public_text(text) if public else self.redact_text(text)
         if isinstance(obj, dict):
             redacted: dict[Any, Any] = {}
             for key, value in obj.items():
-                safe_key = self.redact_obj(key)
+                safe_key = self._redact_obj(key, public=public)
                 if isinstance(safe_key, (dict, list, set, tuple)):
                     safe_key = str(safe_key)
                 normalized_key = (
@@ -96,15 +115,15 @@ class Redactor:
                 redacted[safe_key] = (
                     "[REDACTED]"
                     if normalized_key in _SENSITIVE_KEYS
-                    else self.redact_obj(value)
+                    else self._redact_obj(value, public=public)
                 )
             return redacted
         if isinstance(obj, list):
-            return [self.redact_obj(v) for v in obj]
+            return [self._redact_obj(v, public=public) for v in obj]
         if isinstance(obj, tuple):
-            return tuple(self.redact_obj(v) for v in obj)
+            return tuple(self._redact_obj(v, public=public) for v in obj)
         if isinstance(obj, (set, frozenset)):
-            return [self.redact_obj(v) for v in obj]
+            return [self._redact_obj(v, public=public) for v in obj]
         return obj
 
 

@@ -4,8 +4,14 @@ A single ``EgressPolicy`` is created by the Harness and injected into every tool
 opens an outbound connection. The policy is *default-secure*: only HTTP/HTTPS, and
 every resolved A/AAAA address must be a public unicast address. Loopback, private,
 link-local, reserved, multicast and unspecified ranges are rejected. Validation runs
-again on every redirect hop, and the connection is pinned to a validated IP so a DNS
-answer that changes between validation and connect (DNS rebinding) cannot slip past.
+again on every redirect hop.
+
+Rebinding is handled *after* connect, not by pinning the socket: ``validate`` records
+the address it approved in ``ValidatedTarget.pinned_ip``, and the caller checks the
+actual connected peer with ``peer_ip_allowed`` before any response body is read,
+failing closed when the peer cannot be determined. A DNS answer that changes between
+validation and connect therefore cannot return data, though the TCP connection to the
+changed address is briefly established — full socket pinning is not implemented.
 
 Trusted hosts / CIDRs may be injected by Harness configuration (never by model
 arguments) to allow, e.g., a local service in tests or an on-prem allowlist.
@@ -15,12 +21,15 @@ from __future__ import annotations
 
 import ipaddress
 import socket
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 # Resolver signature: (host, port) -> list of (family, sockaddr) like socket.getaddrinfo.
 Resolver = Callable[[str, int | None], list[tuple[int, str]]]
+Origin = tuple[str, str, int]
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 
@@ -94,6 +103,13 @@ class EgressPolicy:
     max_response_bytes: int = 50_000
     timeout_s: float = 30.0
     resolver: Resolver = _default_resolver
+    _scoped_origins: ContextVar[frozenset[Origin]] = field(
+        default_factory=lambda: ContextVar(
+            "agentharness_egress_scoped_origins", default=frozenset()
+        ),
+        repr=False,
+        compare=False,
+    )
 
     @classmethod
     def from_config(
@@ -128,6 +144,40 @@ class EgressPolicy:
     def _ip_trusted(self, ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         return any(ip in net for net in self.allow_cidrs)
 
+    def _origin_trusted(self, scheme: str, host: str, port: int) -> bool:
+        return (scheme.lower(), host.lower(), port) in self._scoped_origins.get()
+
+    @contextmanager
+    def allow_exact_origins(self, origins: Sequence[str]) -> Iterator[None]:
+        """Temporarily allow exact origins in the current async context.
+
+        This is intentionally narrower than the persistent host/CIDR allowlist: the
+        scheme, host, and port must all match, and the permission does not leak to
+        concurrent Agent runs.
+        """
+        normalized: set[Origin] = set()
+        for raw in origins:
+            parts = urlsplit(raw)
+            if (
+                parts.scheme.lower() not in self.allow_schemes
+                or not parts.hostname
+                or parts.username is not None
+                or parts.password is not None
+                or parts.path not in {"", "/"}
+                or parts.query
+                or parts.fragment
+            ):
+                raise EgressError(f"invalid trusted origin: {raw}")
+            port = parts.port or (443 if parts.scheme.lower() == "https" else 80)
+            normalized.add((parts.scheme.lower(), parts.hostname.lower(), port))
+        token = self._scoped_origins.set(
+            self._scoped_origins.get() | frozenset(normalized)
+        )
+        try:
+            yield
+        finally:
+            self._scoped_origins.reset(token)
+
     def check_scheme(self, url: str) -> tuple[str, str, int]:
         """Validate the scheme and return (scheme, host, port). Raise EgressError."""
         parts = urlsplit(url)
@@ -141,20 +191,25 @@ class EgressPolicy:
         return scheme, host, port
 
     def validate(self, url: str) -> ValidatedTarget:
-        """Resolve and validate a URL. Returns a pinned target or raises EgressError.
+        """Resolve and validate a URL. Returns a validated target or raises EgressError.
 
         A literal IP host is validated directly. A hostname is resolved; *every*
         returned address must be allowed (or trusted) — one bad answer fails closed.
-        The first allowed address is pinned for the connection so a later, different
-        DNS answer cannot redirect the socket at a private range (rebinding).
+        The first allowed address is recorded as ``pinned_ip`` for the caller to
+        compare against the real connected peer via ``peer_ip_allowed``; it does not
+        itself constrain which address the socket connects to.
         """
         scheme, host, port = self.check_scheme(url)
         host_trusted = self._host_trusted(host)
+        origin_trusted = self._origin_trusted(scheme, host, port)
 
         literal = _as_ip(host)
         if literal is not None:
-            if not host_trusted and not self._ip_trusted(literal) and not _is_public_unicast(
-                literal
+            if (
+                not host_trusted
+                and not origin_trusted
+                and not self._ip_trusted(literal)
+                and not _is_public_unicast(literal)
             ):
                 raise EgressError(f"blocked non-public address: {host}")
             return ValidatedTarget(url=url, scheme=scheme, host=host, port=port, pinned_ip=host)
@@ -171,7 +226,12 @@ class EgressPolicy:
             ip = _as_ip(ip_str)
             if ip is None:
                 raise EgressError(f"unparseable resolved address: {ip_str}")
-            allowed = host_trusted or self._ip_trusted(ip) or _is_public_unicast(ip)
+            allowed = (
+                host_trusted
+                or origin_trusted
+                or self._ip_trusted(ip)
+                or _is_public_unicast(ip)
+            )
             if not allowed:
                 raise EgressError(f"blocked non-public address for {host}: {ip_str}")
             if pinned is None:
@@ -179,7 +239,14 @@ class EgressPolicy:
         assert pinned is not None
         return ValidatedTarget(url=url, scheme=scheme, host=host, port=port, pinned_ip=pinned)
 
-    def peer_ip_allowed(self, ip_str: str, host: str) -> bool:
+    def peer_ip_allowed(
+        self,
+        ip_str: str,
+        host: str,
+        *,
+        scheme: str | None = None,
+        port: int | None = None,
+    ) -> bool:
         """Re-validate the *actually connected* peer IP (defense vs DNS rebinding).
 
         The HTTP client resolves DNS itself, independently of our resolver, so an
@@ -190,7 +257,17 @@ class EgressPolicy:
         ip = _as_ip(ip_str)
         if ip is None:
             return False
-        return self._host_trusted(host) or self._ip_trusted(ip) or _is_public_unicast(ip)
+        origin_trusted = (
+            scheme is not None
+            and port is not None
+            and self._origin_trusted(scheme, host, port)
+        )
+        return (
+            self._host_trusted(host)
+            or origin_trusted
+            or self._ip_trusted(ip)
+            or _is_public_unicast(ip)
+        )
 
 
 @dataclass(frozen=True)

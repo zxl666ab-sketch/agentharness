@@ -14,7 +14,7 @@ from agentharness.contracts import (
     ToolSpec,
 )
 from agentharness.engine.context import ContextBudgetError, ContextPlanner
-from agentharness.providers.fake import FakeModelAdapter
+from tests.fake_provider import FakeModelAdapter
 
 
 def _planner(harness) -> ContextPlanner:

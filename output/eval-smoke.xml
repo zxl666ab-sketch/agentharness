@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="smoke" tests="2" failures="0" errors="0" time="0.047">
-  <testcase classname="fake" name="text-echo" time="0.015">
-  </testcase>
-  <testcase classname="fake" name="tools-order" time="0.032">
-  </testcase>
-</testsuite>

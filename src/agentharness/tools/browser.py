@@ -6,7 +6,7 @@ import math
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from agentharness.contracts import EffectKind, ToolContext, ToolResult, ToolSpec
+from agentharness.contracts import EffectKind, ReplayPolicy, ToolContext, ToolResult, ToolSpec
 from agentharness.security.egress import EgressError, EgressPolicy, default_policy
 
 _browser_lock_note = "browser ops serialize per context_id via scheduler"
@@ -77,20 +77,58 @@ class BrowserTool:
                     },
                     "context_id": {
                         "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
                         "description": "Browser context id (default: 'default')",
                     },
-                    "url": {"type": "string"},
-                    "selector": {"type": "string"},
-                    "text": {"type": "string"},
+                    "url": {"type": "string", "minLength": 1, "maxLength": 8_192},
+                    "selector": {"type": "string", "minLength": 1, "maxLength": 16_384},
+                    "text": {"type": "string", "maxLength": 262_144},
                     "headless": {"type": "boolean", "default": True},
                     "timeout_s": {
                         "type": "number",
+                        "minimum": 0.01,
+                        "maximum": 60,
                         "description": "Action timeout in seconds (default: goto 30, click/type 10)",
                     },
                 },
                 "required": ["action"],
+                "allOf": [
+                    {
+                        "if": {"properties": {"action": {"const": "goto"}}},
+                        "then": {"required": ["url"]},
+                    },
+                    {
+                        "if": {"properties": {"action": {"enum": ["click", "type"]}}},
+                        "then": {"required": ["selector"]},
+                    },
+                    {
+                        "if": {"properties": {"action": {"const": "type"}}},
+                        "then": {"required": ["text"]},
+                    },
+                ],
+                "additionalProperties": False,
             },
             effect=EffectKind.network,
+            timeout_s=60,
+        )
+
+    def effect_for(self, arguments: dict[str, Any]) -> EffectKind:
+        action = str(arguments.get("action") or "")
+        if action in {"content", "screenshot", "close"}:
+            return EffectKind.pure
+        if action in {"click", "type"}:
+            return EffectKind.destructive
+        if action == "launch":
+            return EffectKind.process
+        return EffectKind.network
+
+    def replay_policy_for(self, arguments: dict[str, Any]) -> ReplayPolicy:
+        action = str(arguments.get("action") or "")
+        return (
+            ReplayPolicy.safe
+            if action in {"launch", "goto", "content", "screenshot", "close"}
+            else ReplayPolicy.never
         )
 
     async def run(self, ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
@@ -140,11 +178,20 @@ class BrowserTool:
                 is_error=True,
             )
         except Exception as exc:  # noqa: BLE001
+            uncertain = action in {"click", "type"}
             return ToolResult(
                 tool_call_id="",
                 name="browser",
                 content=f"Browser error: {exc}",
                 is_error=True,
+                error_code=("outcome_indeterminate" if uncertain else "browser_error"),
+                error_category=("recovery" if uncertain else "browser"),
+                retryable=False,
+                recovery_hint=(
+                    "Inspect the page and remote system before repeating this interaction."
+                    if uncertain
+                    else "Inspect the browser state before retrying."
+                ),
             )
 
     async def _ensure_pw(self) -> Any:
@@ -176,6 +223,7 @@ class BrowserTool:
             viewport={"width": 1280, "height": 720},
         )
         page = browser.pages[0] if browser.pages else await browser.new_page()
+        await self._install_egress_guard(browser)
         self._browsers[key] = {
             "context": browser,
             "page": page,
@@ -186,6 +234,40 @@ class BrowserTool:
             name="browser",
             content=f"Launched isolated browser context={context_id} profile={profile}",
         )
+
+    async def _install_egress_guard(self, context: Any) -> None:
+        """Apply the egress policy to every request the context makes.
+
+        Validating only the ``goto`` URL leaves redirects, in-page navigations,
+        link clicks and subresource loads unchecked — any of which can reach a
+        private address. Routing all traffic through ``policy.validate`` closes
+        that gap so the browser really does enforce the same policy as
+        ``http_request``.
+        """
+
+        async def _guard(route: Any, request: Any) -> None:
+            try:
+                self.policy.validate(request.url)
+            except EgressError:
+                await route.abort("blockedbyclient")
+                return
+            except Exception:  # pragma: no cover - fail closed on validator error
+                await route.abort("failed")
+                return
+            await route.continue_()
+
+        await context.route("**/*", _guard)
+
+    def _assert_current_url_allowed(self, page: Any) -> str | None:
+        """Return an error string when the page's current URL violates policy."""
+        url = getattr(page, "url", "") or ""
+        if not url or url == "about:blank":
+            return None
+        try:
+            self.policy.validate(url)
+        except EgressError as exc:
+            return f"blocked by egress policy: {exc}"
+        return None
 
     async def _get_page(self, key: tuple[str, str]) -> Any:
         entry = self._browsers.get(key)
@@ -208,12 +290,24 @@ class BrowserTool:
             )
         page = await self._get_page(key)
         await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        # A redirect chain can land somewhere the initial URL did not imply.
+        blocked = self._assert_current_url_allowed(page)
+        if blocked:
+            await page.goto("about:blank")
+            return ToolResult(
+                tool_call_id="", name="browser", content=blocked, is_error=True
+            )
         return ToolResult(
             tool_call_id="", name="browser", content=f"Navigated to {page.url}"
         )
 
     async def _content(self, key: tuple[str, str]) -> ToolResult:
         page = await self._get_page(key)
+        blocked = self._assert_current_url_allowed(page)
+        if blocked:
+            return ToolResult(
+                tool_call_id="", name="browser", content=blocked, is_error=True
+            )
         title = await page.title()
         text = await page.inner_text("body")
         if len(text) > 30_000:
@@ -227,6 +321,14 @@ class BrowserTool:
     async def _click(self, key: tuple[str, str], selector: str, timeout_ms: int) -> ToolResult:
         page = await self._get_page(key)
         await page.click(selector, timeout=timeout_ms)
+        # A click can navigate; the route guard blocks the fetch, but re-check so
+        # the caller is told rather than silently left on a blocked page.
+        blocked = self._assert_current_url_allowed(page)
+        if blocked:
+            await page.goto("about:blank")
+            return ToolResult(
+                tool_call_id="", name="browser", content=blocked, is_error=True
+            )
         return ToolResult(tool_call_id="", name="browser", content=f"Clicked {selector}")
 
     async def _type(

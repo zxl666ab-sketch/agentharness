@@ -5,21 +5,27 @@ from httpx import ASGITransport, AsyncClient
 
 from agentharness.api.compatibility import API_CAPABILITIES, API_SCHEMA_VERSION
 from agentharness.api.server import create_app
-from agentharness.contracts import ApprovalMode, RunRequest, RunStatus
+from agentharness.contracts import RunStatus
 from agentharness.harness import Harness
 
 
 @pytest.mark.asyncio
-async def test_write_methods_405(data_dir):
+async def test_only_explicit_control_plane_writes_are_allowed(data_dir):
     h = Harness(data_dir=data_dir)
     app = create_app(harness=h)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # POST /api/runs is a real control-plane route; reaching validation proves
+        # the write middleware allowed it through without creating a run.
+        assert (await client.post("/api/runs", json={})).status_code == 422
+        for path in ("/api/sessions", "/api/health"):
+            assert (await client.post(path)).status_code == 405
         for path in ("/api/runs", "/api/sessions", "/api/health"):
-            for method in ("post", "put", "patch", "delete"):
+            for method in ("put", "patch", "delete"):
                 r = await getattr(client, method)(path)
                 assert r.status_code == 405, f"{method} {path}"
-    h.close()
+    await app.state.run_supervisor.aclose()
+    await h.aclose()
 
 
 @pytest.mark.asyncio
@@ -48,7 +54,7 @@ async def test_health_locks_web_build_identity_at_server_start(data_dir, tmp_pat
     web_dist.mkdir()
     (web_dist / "index.html").write_text('<div id="root"></div>', encoding="utf-8")
     (web_dist / "build-meta.json").write_text(
-        '{"web_build_id":"build-before-start","api_schema_version":4}',
+        '{"web_build_id":"build-before-start","api_schema_version":5}',
         encoding="utf-8",
     )
     h = Harness(data_dir=data_dir)
@@ -56,7 +62,7 @@ async def test_health_locks_web_build_identity_at_server_start(data_dir, tmp_pat
 
     # Simulate an in-place frontend rebuild after the Python routes were loaded.
     (web_dist / "build-meta.json").write_text(
-        '{"web_build_id":"build-after-start","api_schema_version":4}',
+        '{"web_build_id":"build-after-start","api_schema_version":5}',
         encoding="utf-8",
     )
     transport = ASGITransport(app=app)
@@ -84,38 +90,6 @@ async def test_app_lifespan_closes_only_internally_owned_harness(data_dir, tmp_p
         assert external._closed is False
     assert external._closed is False
     await external.aclose()
-
-
-@pytest.mark.asyncio
-async def test_context_manifest_readonly_api_returns_redacted_real_turn_data(
-    data_dir, workspace
-):
-    (workspace / "AGENTS.md").write_text(
-        "Authorization: Bearer secret-context-token", encoding="utf-8"
-    )
-    h = Harness(data_dir=data_dir)
-    result = await h.run(
-        RunRequest(
-            message="[fake:text]context api",
-            provider="fake",
-            approval=ApprovalMode.auto,
-            cwd=str(workspace),
-        )
-    )
-    app = create_app(harness=h)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(f"/api/runs/{result.run_id}/contexts")
-
-    assert response.status_code == 200
-    manifests = response.json()
-    assert len(manifests) == 1
-    assert manifests[0]["run_id"] == result.run_id
-    assert manifests[0]["total_tokens"] <= manifests[0]["budget_tokens"]
-    assert manifests[0]["prefix_fingerprint"]
-    assert manifests[0]["artifact_id"]
-    assert "secret-context-token" not in response.text
-    await h.aclose()
 
 
 @pytest.mark.asyncio

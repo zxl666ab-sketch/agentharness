@@ -1,1 +1,0 @@
-Keep context sources deterministic and never expose credentials.

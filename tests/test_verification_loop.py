@@ -20,8 +20,8 @@ from agentharness.contracts import (
     VerificationPolicy,
 )
 from agentharness.engine.verification import VerificationLoop
-from agentharness.providers.fake import FakeModelAdapter
 from agentharness.security.redaction import Redactor
+from tests.fake_provider import FakeModelAdapter
 
 
 def _candidate(tmp_path: Path, output: str) -> VerificationCandidate:
@@ -38,11 +38,11 @@ def _candidate(tmp_path: Path, output: str) -> VerificationCandidate:
 
 
 @pytest.mark.asyncio
-async def test_eval_assert_failure_returns_structured_retry_feedback(tmp_path: Path) -> None:
+async def test_output_assertion_failure_returns_structured_retry_feedback(tmp_path: Path) -> None:
     loop = VerificationLoop(redactor=Redactor())
     policy = VerificationPolicy(
         validators=[
-            VerificationCheck(kind="eval_assert", assertions={"contains": ["DONE"]})
+            VerificationCheck(kind="output", assertions={"contains": ["DONE"]})
         ],
         max_retries=2,
     )
@@ -50,7 +50,7 @@ async def test_eval_assert_failure_returns_structured_retry_feedback(tmp_path: P
     failed = await loop.evaluate(_candidate(tmp_path, "not ready"), policy, attempt=0)
 
     assert failed.action == "retry"
-    assert failed.failures[0].validator == "eval_assert"
+    assert failed.failures[0].validator == "output"
     assert failed.failures[0].retryable
     assert failed.feedback_message is not None
     assert failed.feedback_message.role == MessageRole.user
@@ -252,7 +252,7 @@ async def test_run_engine_retries_failed_candidate_then_completes(harness, works
             cwd=str(workspace),
             verification=VerificationPolicy(
                 validators=[
-                    VerificationCheck(kind="eval_assert", assertions={"contains": ["DONE"]})
+                    VerificationCheck(kind="output", assertions={"contains": ["DONE"]})
                 ],
                 max_retries=2,
             ),
@@ -290,7 +290,7 @@ async def test_run_engine_stops_when_verification_retries_are_exhausted(harness,
             cwd=str(workspace),
             verification=VerificationPolicy(
                 validators=[
-                    VerificationCheck(kind="eval_assert", assertions={"contains": ["DONE"]})
+                    VerificationCheck(kind="output", assertions={"contains": ["DONE"]})
                 ],
                 max_retries=1,
                 on_exhausted="failed",
@@ -335,6 +335,43 @@ async def test_command_verifier_flows_through_shell_approval_and_events(
 
 
 @pytest.mark.asyncio
+async def test_multiple_command_verifiers_receive_unique_audit_ordinals(
+    ask_harness, workspace
+) -> None:
+    commands = [
+        f'"{sys.executable}" -c "print(\'first-validator\')"',
+        f'"{sys.executable}" -c "print(\'second-validator\')"',
+    ]
+    result = await ask_harness.run(
+        RunRequest(
+            message="[fake:text]candidate",
+            provider="fake",
+            approval=ApprovalMode.auto,
+            cwd=str(workspace),
+            verification=VerificationPolicy(
+                validators=[
+                    VerificationCheck(
+                        kind="command",
+                        command=commands[0],
+                        contains=["first-validator"],
+                    ),
+                    VerificationCheck(
+                        kind="command",
+                        command=commands[1],
+                        contains=["second-validator"],
+                    ),
+                ]
+            ),
+        )
+    )
+
+    assert result.status == RunStatus.completed
+    invocations = ask_harness.list_tool_invocations(result.run_id)
+    assert len({item.step for item in invocations}) == 1
+    assert [item.ordinal for item in invocations] == [0, 1]
+
+
+@pytest.mark.asyncio
 async def test_nonretryable_verification_failure_pauses_with_checkpoint(harness, workspace) -> None:
     result = await harness.run(
         RunRequest(
@@ -368,7 +405,7 @@ async def test_verification_retry_remains_bounded_by_step_budget(harness, worksp
             budget=BudgetConfig(max_steps=1),
             verification=VerificationPolicy(
                 validators=[
-                    VerificationCheck(kind="eval_assert", assertions={"contains": ["DONE"]})
+                    VerificationCheck(kind="output", assertions={"contains": ["DONE"]})
                 ],
                 max_retries=10,
             ),

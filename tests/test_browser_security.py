@@ -19,9 +19,13 @@ class _FakePage:
 class _FakeBrowserContext:
     def __init__(self) -> None:
         self.pages = [_FakePage()]
+        self.routes: list[str] = []
 
     async def new_page(self) -> _FakePage:
         return self.pages[0]
+
+    async def route(self, pattern: str, handler: Any) -> None:  # noqa: ARG002
+        self.routes.append(pattern)
 
 
 class _FakeChromium:
@@ -171,3 +175,24 @@ async def test_browser_screenshot_revalidates_context_path(
 
     assert result.is_error
     assert not (outside / "shot.png").exists()
+
+
+@pytest.mark.asyncio
+async def test_browser_interaction_failure_is_indeterminate(
+    monkeypatch, data_dir: Path, workspace: Path
+):
+    tool = BrowserTool()
+
+    async def fail_click(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise TimeoutError("navigation started before timeout")
+
+    monkeypatch.setattr(tool, "_click", fail_click)
+    result = await tool.run(
+        _context(data_dir, workspace),
+        {"action": "click", "selector": "#submit"},
+    )
+
+    assert result.is_error is True
+    assert result.error_code == "outcome_indeterminate"
+    assert result.error_category == "recovery"
+    assert result.retryable is False

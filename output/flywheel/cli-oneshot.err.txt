@@ -1,6 +1,0 @@
-Usage: agentharness run [OPTIONS] {message}
-Try 'agentharness run --help' for help.
-┌─ Error ─────────────────────────────────────────────────────────────────────┐
-│ Got unexpected extra argument(s) (with exactly: CLI_OK. No tools. Do not    │
-│ modify files.)                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘

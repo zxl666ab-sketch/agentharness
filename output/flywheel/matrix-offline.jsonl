@@ -1,6 +1,0 @@
-{"case": "S1_prefix", "status": "completed", "session": "a0353fe01cdd49a7ae63fe9ab15892f3", "resolved": "a0353fe01cdd49a7ae63fe9ab15892f3", "ok": true}
-{"case": "S1_continue", "status": "completed", "session": "a0353fe01cdd49a7ae63fe9ab15892f3", "same": true, "output": "BLUE_MANGO_OFFLINE"}
-{"case": "S3_read", "status": "completed", "run_id": "a49ac59251aa49b2aec5658ddf763c69", "has_agent": true, "output": "Calling tools...Tool results received. # Agent Harness\n\nAgent Harness is a local, long-lived agent runtime with a streaming interactive CLI, a scriptable one-shot command, sandboxed tools, durable SQL"}
-{"case": "S3_sandbox_write", "status": "completed", "note_ok": true, "run_id": "33314d6c9aa74f0793db903199aa5383"}
-{"case": "S5_shell_auto", "status": "completed", "error": null, "output": "Calling tools...Tool results received. SHELL_OK\r\n", "run_id": "b40a1d868f9d4ab7a68f204274443c35", "no_approval_denied": true}
-{"case": "S4_search", "status": "completed", "run_id": "b45d8d53c8094032858d7eb1b81d78bf", "output": "Calling tools...Tool results received. .env.example:11:AGENTHARNESS_DATA_DIR=~/.agentharness\n.gitignore:21:.agentharness/\n.gitignore:56:agentharness-*.png\npyproject.toml:2:name = \"agentharness\"\npyproject.toml:37:agentharness = \"agentharness.cli.main:main\"\npyproject.toml:75:source-include = [\"src/age"}

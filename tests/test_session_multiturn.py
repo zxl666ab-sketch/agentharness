@@ -10,10 +10,10 @@ import pytest
 
 import agentharness.storage.sqlite as storage_sqlite
 from agentharness.contracts import ApprovalMode, RunRequest, RunStatus
-from agentharness.providers.fake import FakeModelAdapter
 from agentharness.session_history import session_title_from_message
 from agentharness.storage.migrations import SCHEMA_VERSION
 from agentharness.storage.sqlite import Storage
+from tests.fake_provider import FakeModelAdapter
 
 
 @pytest.mark.asyncio

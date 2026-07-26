@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from agentharness.contracts import EffectKind
 
@@ -53,21 +53,17 @@ class EffectScheduler:
 
     async def run_batch(
         self,
-        items: list[tuple[EffectKind, Callable[[], Awaitable[T]], str | None]],
+        items: list[tuple[Any, ...]],
+        *,
+        max_concurrency: int = 4,
     ) -> list[T]:
-        """Run a batch: concurrent pure/read/network (browser ctx still serial via lock);
-        serial write/process/destructive.
+        """Run parallel-safe segments concurrently and preserve effectful barriers.
+
+        Three-item tuples retain the historical effect-derived behavior. A fourth
+        boolean lets the runtime apply the tool's explicit ``parallel_safe`` policy.
         """
         results: list[T | None] = [None] * len(items)
-        concurrent: list[tuple[int, EffectKind, Callable[[], Awaitable[T]], str | None]] = []
-        serial: list[tuple[int, EffectKind, Callable[[], Awaitable[T]], str | None]] = []
-
-        for i, (effect, fn, browser_id) in enumerate(items):
-            # Browser-bound work still goes through concurrent gather but serializes on lock.
-            if effect in (EffectKind.pure, EffectKind.workspace_read, EffectKind.network):
-                concurrent.append((i, effect, fn, browser_id))
-            else:
-                serial.append((i, effect, fn, browser_id))
+        semaphore = asyncio.Semaphore(max(1, max_concurrency))
 
         async def _one(
             idx: int,
@@ -75,12 +71,30 @@ class EffectScheduler:
             fn: Callable[[], Awaitable[T]],
             browser_id: str | None,
         ) -> None:
-            results[idx] = await self.run(effect, fn, browser_context_id=browser_id)
+            async with semaphore:
+                results[idx] = await self.run(effect, fn, browser_context_id=browser_id)
 
-        if concurrent:
-            await asyncio.gather(*[_one(i, e, f, b) for i, e, f, b in concurrent])
-        for i, e, f, b in serial:
-            await _one(i, e, f, b)
+        segment: list[tuple[int, EffectKind, Callable[[], Awaitable[T]], str | None]] = []
+
+        async def flush_segment() -> None:
+            if not segment:
+                return
+            await asyncio.gather(*[_one(i, e, f, b) for i, e, f, b in segment])
+            segment.clear()
+
+        for index, item in enumerate(items):
+            effect, fn, browser_id = item[:3]
+            parallel_safe = (
+                bool(item[3])
+                if len(item) >= 4
+                else effect in (EffectKind.pure, EffectKind.workspace_read, EffectKind.network)
+            )
+            if parallel_safe:
+                segment.append((index, effect, fn, browser_id))
+                continue
+            await flush_segment()
+            await _one(index, effect, fn, browser_id)
+        await flush_segment()
 
         # Preserve position + count: every slot was assigned by _one. Filtering None
         # here would drop legitimate None returns and misalign results with inputs.

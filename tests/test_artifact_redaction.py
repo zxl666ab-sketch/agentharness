@@ -7,9 +7,9 @@ from httpx import ASGITransport, AsyncClient
 
 from agentharness.api.server import create_app
 from agentharness.contracts import ApprovalMode, RunRequest
-from agentharness.harness import Harness
 from agentharness.security.redaction import Redactor
 from agentharness.storage.artifacts import ArtifactStore
+from tests.fake_provider import create_test_harness
 
 
 def test_artifact_summary_redacts_caller_supplied_secret(tmp_path):
@@ -34,7 +34,7 @@ async def test_large_tool_result_uses_redacted_artifact_through_api(
     secret = "SECRET_ENGINE_ARTIFACT_SENTINEL_44556"
     source = workspace / "large-secret.txt"
     source.write_text((f"line {secret}\n" + "x" * 300) * 30, encoding="utf-8")
-    harness = Harness(
+    harness = create_test_harness(
         data_dir=data_dir,
         redactor=Redactor(extra_sentinels=[secret]),
     )

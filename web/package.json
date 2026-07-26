@@ -1,25 +1,24 @@
 {
-  "name": "agentharness-console",
+  "name": "agentharness-web",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -p tsconfig.app.json --noEmit && vite build",
     "lint": "eslint . --ext ts,tsx --max-warnings 0",
     "test": "vitest run",
-    "preview": "vite preview",
-    "e2e": "npm run build && playwright test"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.51.0",
     "lucide-react": "^0.414.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-virtuoso": "^4.7.11"
+    "react-markdown": "^9.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
-    "@playwright/test": "^1.45.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@typescript-eslint/eslint-plugin": "^7.16.0",

@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="trace-native-ci" tests="1" failures="0" errors="0" time="0.015">
-  <testcase classname="fake" name="regression-case" time="0.015">
-  </testcase>
-</testsuite>

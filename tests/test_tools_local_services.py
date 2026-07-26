@@ -23,11 +23,10 @@ from agentharness.contracts import (
     StreamItemType,
     Usage,
 )
-from agentharness.harness import Harness
-from agentharness.providers.fake import FakeModelAdapter
 from agentharness.security.egress import EgressPolicy
 from agentharness.security.redaction import Redactor
 from agentharness.tools.mcp_tool import MCPBridge
+from tests.fake_provider import FakeModelAdapter, create_test_harness
 
 
 def _loopback_policy() -> EgressPolicy:
@@ -97,7 +96,7 @@ def local_http_url():
 async def test_http_tool_uses_local_service_and_enforces_timeout(
     data_dir: Path, workspace: Path, local_http_url: str
 ):
-    harness = Harness(data_dir=data_dir, egress_policy=_loopback_policy())
+    harness = create_test_harness(data_dir=data_dir, egress_policy=_loopback_policy())
     try:
         success = await harness.run(
             RunRequest(
@@ -133,7 +132,7 @@ async def test_http_tool_uses_local_service_and_enforces_timeout(
 async def test_http_tool_stops_reading_after_response_limit(
     data_dir: Path, workspace: Path, local_http_url: str
 ):
-    harness = Harness(data_dir=data_dir, egress_policy=_loopback_policy())
+    harness = create_test_harness(data_dir=data_dir, egress_policy=_loopback_policy())
     try:
         result = await harness.run(
             RunRequest(
@@ -199,7 +198,7 @@ async def test_browser_tool_real_local_flow_and_harness_cleanup(
             {"kind": "text", "text": "browser flow complete"},
         ]
     )
-    harness = Harness(
+    harness = create_test_harness(
         data_dir=data_dir, providers={"fake": provider}, egress_policy=_loopback_policy()
     )
     browser = harness.tools["browser"]
@@ -266,7 +265,7 @@ async def test_browser_goto_honors_timeout_and_cleanup(
             {"kind": "text", "text": "timeout observed"},
         ]
     )
-    harness = Harness(
+    harness = create_test_harness(
         data_dir=data_dir, providers={"fake": provider}, egress_policy=_loopback_policy()
     )
     started = time.monotonic()
@@ -292,7 +291,7 @@ async def test_browser_goto_honors_timeout_and_cleanup(
 
 @pytest.mark.asyncio
 async def test_mcp_unavailable_is_isolated_as_tool_error(data_dir: Path, workspace: Path):
-    harness = Harness(data_dir=data_dir)
+    harness = create_test_harness(data_dir=data_dir)
 
     async def approve(_request):
         # call_tool runs arbitrary remote code → destructive → requires approval.
@@ -329,7 +328,7 @@ async def test_max_steps_limits_tool_batches(data_dir: Path, workspace: Path):
             }
         ]
     )
-    harness = Harness(data_dir=data_dir, providers={"fake": provider})
+    harness = create_test_harness(data_dir=data_dir, providers={"fake": provider})
     try:
         result = await harness.run(
             RunRequest(
@@ -350,7 +349,7 @@ async def test_max_steps_limits_tool_batches(data_dir: Path, workspace: Path):
 
 @pytest.mark.asyncio
 async def test_delegate_depth_zero_blocks_child_run(data_dir: Path, workspace: Path):
-    harness = Harness(data_dir=data_dir)
+    harness = create_test_harness(data_dir=data_dir)
     try:
         result = await harness.run(
             RunRequest(
@@ -428,7 +427,9 @@ async def test_delegate_concurrent_children_limit_is_enforced(
     data_dir: Path, workspace: Path
 ):
     provider = _ConcurrentDelegateProvider()
-    harness = Harness(data_dir=data_dir, providers={"delegate-test": provider})
+    harness = create_test_harness(
+        data_dir=data_dir, providers={"delegate-test": provider}
+    )
     try:
         result = await harness.run(
             RunRequest(
@@ -462,7 +463,7 @@ async def test_search_files_is_literal_and_stops_before_reading_large_tail(
         handle.truncate(16 * 1024 * 1024)
     (workspace / "regex-like.txt").write_text("axb\n", encoding="utf-8")
 
-    harness = Harness(data_dir=data_dir)
+    harness = create_test_harness(data_dir=data_dir)
     tracemalloc.start()
     try:
         found = await harness.run(
@@ -504,7 +505,7 @@ async def test_read_file_limit_does_not_load_large_tail(
         handle.write(b"head\n")
         handle.truncate(16 * 1024 * 1024)
 
-    harness = Harness(data_dir=data_dir)
+    harness = create_test_harness(data_dir=data_dir)
     tracemalloc.start()
     try:
         result = await harness.run(
@@ -537,7 +538,7 @@ async def test_shell_does_not_inherit_agentharness_secret_environment(
     data_dir: Path, workspace: Path, monkeypatch
 ):
     monkeypatch.setenv("AGENTHARNESS_SECRET", "never-forward-this-value")
-    harness = Harness(data_dir=data_dir)
+    harness = create_test_harness(data_dir=data_dir)
 
     async def approve(_request):
         from agentharness.contracts import ApprovalDecision
@@ -571,7 +572,7 @@ async def test_shell_does_not_inherit_agentharness_secret_environment(
 
 @pytest.mark.asyncio
 async def test_shell_output_limit_is_memory_bounded(data_dir: Path, workspace: Path):
-    harness = Harness(data_dir=data_dir)
+    harness = create_test_harness(data_dir=data_dir)
 
     async def approve(_request):
         from agentharness.contracts import ApprovalDecision

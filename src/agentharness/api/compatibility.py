@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-API_SCHEMA_VERSION = 4
+API_SCHEMA_VERSION = 6
 API_CAPABILITIES = (
-    "context_manifest_v1",
-    "verification_events_v1",
-    "trace_native_evaluation_v2",
+    "run_execution_v1",
+    "interactive_approval_v1",
+    "run_resume_v1",
+    "sse_events_v1",
+    "tool_execution_v2",
 )

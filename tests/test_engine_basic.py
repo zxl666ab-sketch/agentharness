@@ -3,8 +3,8 @@ import asyncio
 import pytest
 
 from agentharness.contracts import ApprovalMode, RunRequest, RunStatus
-from agentharness.providers.fake import FakeModelAdapter
 from agentharness.storage.sqlite import Storage
+from tests.fake_provider import FakeModelAdapter
 
 
 @pytest.mark.asyncio

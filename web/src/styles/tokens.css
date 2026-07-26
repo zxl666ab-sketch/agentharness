@@ -1,61 +1,91 @@
 :root {
-  --font: Inter, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  --font: Inter, "Segoe UI Variable", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
   --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
-  --bg: #eef1ee;
+  --bg: #f2f4f5;
   --surface: #ffffff;
-  --surface-subtle: #f7f9f7;
-  --surface-strong: #e7ebe7;
-  --text: #172019;
-  --text-secondary: #526057;
-  --text-muted: #78837b;
-  --border: #dce2dd;
-  --border-strong: #c8d0ca;
-  --accent: #147a4b;
-  --accent-hover: #0e633c;
-  --accent-soft: #e4f3ea;
-  --danger: #b83a3a;
-  --danger-soft: #f9e9e8;
-  --warning: #a46312;
-  --warning-soft: #fbf0d9;
-  --radius: 8px;
-  --radius-sm: 5px;
-  --header-height: 64px;
+  --surface-subtle: #f7f9f9;
+  --surface-strong: #edf1f0;
+  --surface-elevated: #ffffff;
+  --text: #17211d;
+  --text-secondary: #4f5e57;
+  --text-muted: #7a8781;
+  --border: #e1e6e3;
+  --border-strong: #cdd6d1;
+  --accent: #087a55;
+  --accent-hover: #066443;
+  --accent-strong: #075f43;
+  --accent-soft: #e4f4ed;
+  --accent-softer: #f1f9f5;
+  --danger: #c44141;
+  --danger-soft: #fceded;
+  --warning: #a96618;
+  --warning-soft: #fff4df;
+  --info: #416e9d;
+  --info-soft: #eaf2fa;
+  --shadow-xs: 0 1px 2px rgb(23 33 29 / 5%);
+  --shadow-sm: 0 6px 20px rgb(23 33 29 / 7%);
+  --shadow-md: 0 18px 50px rgb(23 33 29 / 10%);
+  --radius: 14px;
+  --radius-sm: 9px;
   color-scheme: light;
 }
 
 :root[data-theme="dark"] {
-  --bg: #111512;
-  --surface: #181d19;
-  --surface-subtle: #1d231f;
-  --surface-strong: #29302b;
-  --text: #edf2ee;
-  --text-secondary: #b2bdb5;
-  --text-muted: #87928a;
-  --border: #2b342d;
-  --border-strong: #3b463e;
-  --accent: #57c88a;
-  --accent-hover: #71d69d;
-  --accent-soft: #1a3828;
-  --danger: #ef7772;
-  --danger-soft: #3b2322;
-  --warning: #efb75f;
-  --warning-soft: #3b3020;
+  --bg: #0f1412;
+  --surface: #171d1a;
+  --surface-subtle: #1b221e;
+  --surface-strong: #252e29;
+  --surface-elevated: #1d2420;
+  --text: #eef3f0;
+  --text-secondary: #b5c0ba;
+  --text-muted: #839087;
+  --border: #29332d;
+  --border-strong: #3a4740;
+  --accent: #55d39b;
+  --accent-hover: #72dfae;
+  --accent-strong: #36b981;
+  --accent-soft: #193a2b;
+  --accent-softer: #152a21;
+  --danger: #f07b78;
+  --danger-soft: #3b2424;
+  --warning: #f0b861;
+  --warning-soft: #382e1e;
+  --info: #8db8e4;
+  --info-soft: #1e3041;
+  --shadow-xs: 0 1px 2px rgb(0 0 0 / 20%);
+  --shadow-sm: 0 8px 24px rgb(0 0 0 / 24%);
+  --shadow-md: 0 20px 60px rgb(0 0 0 / 34%);
   color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
 html, body, #root { width: 100%; height: 100%; margin: 0; }
-body { overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; }
-button, input, select { font: inherit; }
+body {
+  overflow: auto;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
-button:disabled { cursor: not-allowed; opacity: .55; }
-button, input, select { outline: none; }
-button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+button:disabled { cursor: not-allowed; opacity: .48; }
+button, input, select, textarea { outline: none; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible,
+summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 code, pre, .mono { font-family: var(--mono); }
 code { font-size: .9em; }
 ::selection { background: var(--accent-soft); }
-::-webkit-scrollbar { width: 9px; height: 9px; }
-::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 99px; background: var(--border-strong); background-clip: padding-box; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: var(--border-strong);
+  background-clip: padding-box;
+}

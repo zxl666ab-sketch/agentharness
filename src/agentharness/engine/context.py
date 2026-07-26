@@ -21,6 +21,7 @@ from agentharness.contracts import (
     ToolSpec,
     Usage,
 )
+from agentharness.memory_scope import session_memory_scope, workspace_memory_scope
 from agentharness.security.redaction import Redactor, default_redactor
 
 _RULE_FILES = ("AGENTS.md", "WORKBUDDY.md")
@@ -217,7 +218,7 @@ class ContextPlanner:
         ]
         items.extend(self._discover_workspace_rules(request))
         items.extend(self._select_skills(request))
-        items.extend(self._select_memories(request.message))
+        items.extend(self._select_memories(request))
         return ContextState(items=items)
 
     def _pinned(
@@ -367,7 +368,8 @@ class ContextPlanner:
             try:
                 if path.is_symlink() or path.stat().st_size > _MAX_SKILL_BYTES:
                     raise OSError("unsafe or oversized skill")
-                body = _load_skill_body(path)
+                skill_root = skill.get("root")
+                body = _load_skill_body(path, root=Path(skill_root) if skill_root else None)
             except OSError as exc:
                 items.append(
                     self._pinned(
@@ -384,11 +386,21 @@ class ContextPlanner:
             items.append(self._pinned("skills", source, content, f"task match score={score}"))
         return items
 
-    def _select_memories(self, query: str) -> list[ContextPinnedItem]:
+    def _select_memories(self, request: RunRequest) -> list[ContextPinnedItem]:
+        query = request.message
         if self.storage is None or not query.strip():
             return []
+        scopes = [
+            scope
+            for scope in (
+                workspace_memory_scope(request.cwd),
+                session_memory_scope(request.session_id),
+                "global",
+            )
+            if scope
+        ]
         try:
-            rows = self.storage.search_memories(query, limit=5)
+            rows = self.storage.search_memories(query, limit=5, scopes=scopes)
             if not rows:
                 terms = sorted(
                     {
@@ -398,10 +410,11 @@ class ContextPlanner:
                     }
                 )
                 if terms:
-                    rows = self.storage.search_memories(" OR ".join(terms), limit=5)
+                    rows = self.storage.search_memories(
+                        " OR ".join(terms), limit=5, scopes=scopes
+                    )
         except Exception:  # noqa: BLE001
             return []
-        rows = sorted(rows, key=lambda row: str(row.get("id", "")))
         return [
             self._pinned(
                 "memories",

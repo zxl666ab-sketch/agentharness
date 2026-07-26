@@ -10,8 +10,8 @@ os.environ.setdefault("AGENTHARNESS_NO_DOTENV", "1")
 
 from agentharness.contracts import ApprovalDecision, ApprovalRequest
 from agentharness.harness import Harness
-from agentharness.providers.fake import FakeModelAdapter
 from agentharness.security.redaction import Redactor
+from tests.fake_provider import FakeModelAdapter
 
 
 @pytest.fixture

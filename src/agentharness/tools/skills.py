@@ -37,7 +37,14 @@ def discover_skills(dirs: list[str] | None) -> list[dict[str, str]]:
                     desc = m.group(1).strip()
                 else:
                     desc = text[:120].replace("\n", " ")
-            found.append({"name": name, "description": desc, "path": str(skill_md)})
+            found.append(
+                {
+                    "name": name,
+                    "description": desc,
+                    "path": str(skill_md),
+                    "root": str(root),
+                }
+            )
     return found
 
 
@@ -60,12 +67,44 @@ def load_matching_skills(dirs: list[str] | None, task: str, limit: int = 3) -> l
     scored.sort(key=lambda x: -x[0])
     bodies: list[str] = []
     for _, s in scored[:limit]:
-        body = _load_skill_body(Path(s["path"]))
+        body = _load_skill_body(Path(s["path"]), root=Path(s["root"]) if s.get("root") else None)
         bodies.append(f"### Skill: {s['name']}\n{body}")
     return bodies
 
 
-def _load_skill_body(path: Path) -> str:
+_MAX_REF_BYTES = 4000
+
+
+def _safe_ref_path(ref: str, skill_path: Path, root: Path) -> Path | None:
+    """Resolve a SKILL.md reference, refusing anything that escapes ``root``.
+
+    Refs come from a file an agent may be able to write, so they are untrusted
+    input: absolute paths, dot-segments, symlinks and oversized files are all
+    rejected rather than read into model context.
+    """
+    if not ref or "\x00" in ref:
+        return None
+    candidate = Path(ref)
+    if candidate.is_absolute() or candidate.drive or candidate.root:
+        return None
+    try:
+        resolved = (skill_path.parent / candidate).resolve()
+        root_resolved = root.resolve()
+    except OSError:
+        return None
+    if resolved != root_resolved and root_resolved not in resolved.parents:
+        return None
+    try:
+        if resolved.is_symlink() or not resolved.is_file():
+            return None
+        if resolved.stat().st_size > _MAX_REF_BYTES:
+            return None
+    except OSError:
+        return None
+    return resolved
+
+
+def _load_skill_body(path: Path, root: Path | None = None) -> str:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -73,18 +112,20 @@ def _load_skill_body(path: Path) -> str:
     # strip frontmatter
     text = re.sub(r"^---\s*\n.*?\n---\s*\n", "", text, count=1, flags=re.S)
     # load referenced relative files if mentioned as [ref](./file)
+    ref_root = root if root is not None else path.parent
     refs = re.findall(r"\((?:\./)?([^)]+\.(?:md|txt|py))\)", text)
     extras: list[str] = []
     for ref in refs[:5]:
-        ref_path = path.parent / ref
-        if ref_path.exists() and ref_path.is_file():
-            try:
-                extras.append(
-                    f"\n#### Ref: {ref}\n"
-                    + ref_path.read_text(encoding="utf-8", errors="replace")[:4000]
-                )
-            except OSError:
-                pass
+        ref_path = _safe_ref_path(ref, path, ref_root)
+        if ref_path is None:
+            continue
+        try:
+            extras.append(
+                f"\n#### Ref: {ref}\n"
+                + ref_path.read_text(encoding="utf-8", errors="replace")[:_MAX_REF_BYTES]
+            )
+        except OSError:
+            pass
     return text[:8000] + "".join(extras)
 
 
@@ -94,7 +135,7 @@ class ListSkillsTool:
         return ToolSpec(
             name="list_skills",
             description="List available SKILL.md skills (name + description only).",
-            parameters={"type": "object", "properties": {}},
+            parameters={"type": "object", "properties": {}, "additionalProperties": False},
             effect=EffectKind.pure,
         )
 

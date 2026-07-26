@@ -42,7 +42,8 @@ Thumbs.db
 
 # Screenshots local
 screenshots/
-output/playwright/
+output/
+.playwright-cli/
 *.log
 
 # Accidental absolute-path junk (IME etc.)
