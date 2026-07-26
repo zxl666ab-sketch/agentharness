@@ -85,7 +85,7 @@ describe("Web-first Agent workspace", () => {
     expect(html).toContain("把目标交给 Agent");
     expect(html).toContain('data-testid="run-composer"');
     expect(html).toContain('aria-label="搜索任务"');
-    expect(html).toContain("只读模式");
+    expect(html).toContain("允许写入");
     expect(html).toContain("OpenAI");
     expect(html).toContain("运行 Agent");
     expect(html).not.toContain("模型服务");

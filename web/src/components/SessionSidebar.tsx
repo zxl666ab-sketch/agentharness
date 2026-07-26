@@ -31,10 +31,12 @@ export function SessionSidebar({
   return (
     <aside id="session-sidebar" className="session-sidebar" aria-label="任务列表">
       <div className="sidebar-heading">
-        <div className="sidebar-title">
-          <span>Agent workspace</span>
-          <h2>任务</h2>
-        </div>
+        <h2>
+          任务
+          <span className="sidebar-count">
+            {query ? `${filtered.length}/${sessions.length}` : sessions.length}
+          </span>
+        </h2>
         <button
           className="new-task-button"
           type="button"
@@ -61,15 +63,14 @@ export function SessionSidebar({
         ) : null}
       </div>
 
-      <div className="session-list-heading">
-        <span>{query ? `${filtered.length} 个结果` : `${sessions.length} 个任务`}</span>
-        <span>最近更新</span>
-      </div>
-
       <div className="session-list" data-testid="session-list">
         {filtered.map((session) => {
           const title = session.display_title || session.title || "未命名任务";
           const selected = session.id === selectedSessionId;
+          const status = session.latest_status || "pending";
+          const detail = session.latest_error
+            ? session.latest_error
+            : `${session.run_count || 0} 轮对话`;
           return (
             <button
               key={session.id}
@@ -77,18 +78,17 @@ export function SessionSidebar({
               aria-current={selected ? "page" : undefined}
               onClick={() => onSelect(session.id, session.latest_run_id)}
             >
-              <span className={`status-dot ${session.latest_status || "pending"}`} />
+              <span className={`status-dot ${status}`} />
               <span className="session-copy">
                 <strong>{title}</strong>
                 <small>
-                  <MessageSquareText size={12} />
-                  {session.latest_error || `${session.run_count || 0} 轮对话`}
+                  <span className={`session-state ${status}`}>{statusLabel(status)}</span>
+                  <span className="session-detail">{detail}</span>
+                  <time dateTime={session.updated_at}>
+                    {formatRelativeTime(session.updated_at)}
+                  </time>
                 </small>
               </span>
-              <span className={`session-status ${session.latest_status || "pending"}`}>
-                {statusLabel(session.latest_status)}
-              </span>
-              <time dateTime={session.updated_at}>{formatRelativeTime(session.updated_at)}</time>
             </button>
           );
         })}

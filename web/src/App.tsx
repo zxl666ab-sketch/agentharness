@@ -1,13 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Activity,
-  Bot,
   Cpu,
   Hash,
   Moon,
   Sparkles,
   Sun,
-  UserRound,
   Wifi,
   WifiOff,
   Workflow,
@@ -18,32 +15,23 @@ import {
   api,
   type ApprovalRow,
   type CreateRunInput,
-  type EventRow,
+  type RuntimeInfo,
   type ToolInvocationRow,
   type ToolRecoveryDecision,
 } from "./api/client";
 import { checkBackendCompatibility } from "./api/compatibility";
+import { EffectBadge } from "./components/EffectBadge";
 import { MessageContent } from "./components/MessageContent";
-import { RunComposer } from "./components/RunComposer";
+import { RunComposer, type ComposerPrefill } from "./components/RunComposer";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { ToolTimeline } from "./components/ToolTimeline";
 import { useAgentStream } from "./useAgentStream";
-import {
-  eventLabel,
-  eventTone,
-  statusLabel,
-  TERMINAL_STATUSES,
-} from "./viewModel";
+import { eventLabel, statusLabel, TERMINAL_STATUSES } from "./viewModel";
 
 export { eventLabel } from "./viewModel";
 
 const NOTABLE_EVENT_TYPES = new Set([
   "run_started",
-  "run_status",
-  "run_completed",
-  "run_failed",
-  "run_cancelled",
-  "run_interrupted",
   "tool_call_start",
   "tool_call_validated",
   "tool_execution_queued",
@@ -52,16 +40,19 @@ const NOTABLE_EVENT_TYPES = new Set([
   "tool_execution_cancelled",
   "tool_execution_indeterminate",
   "tool_recovery_resolved",
-  "tool_call_end",
   "tool_result",
   "approval_requested",
   "approval_resolved",
   "verification_started",
   "verification_result",
   "provider_retry",
-  "budget_warning",
-  "error",
 ]);
+
+const EXAMPLE_TASKS = [
+  "梳理这个工作区的目录结构，总结每个模块的职责",
+  "搜索代码里的 TODO 和 FIXME，整理成一份清单",
+  "读取 README，然后解释如何启动这个项目",
+];
 
 export default function App() {
   const queryClient = useQueryClient();
@@ -71,7 +62,10 @@ export default function App() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [draftNewTask, setDraftNewTask] = useState(false);
+  const [prefill, setPrefill] = useState<ComposerPrefill | null>(null);
   const lastHandledSequence = useRef(0);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottom = useRef(true);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -124,11 +118,6 @@ export default function App() {
     queryFn: () => api.transcript(selectedSessionId!),
     enabled: backendReady && !!selectedSessionId,
   });
-  const eventsQuery = useQuery({
-    queryKey: ["events", selectedRunId],
-    queryFn: () => api.events(selectedRunId!),
-    enabled: backendReady && !!selectedRunId,
-  });
   const messagesQuery = useQuery({
     queryKey: ["messages", selectedRunId],
     queryFn: () => api.messages(selectedRunId!),
@@ -155,9 +144,13 @@ export default function App() {
     );
     if (!fresh.length) return;
     lastHandledSequence.current = Math.max(...fresh.map((event) => event.global_seq));
+    // text_delta streams through stream.events directly — only lifecycle events
+    // should invalidate queries, or streaming floods the API with list refetches.
+    const meaningful = fresh.filter((event) => event.type !== "text_delta");
+    if (!meaningful.length) return;
     void queryClient.invalidateQueries({ queryKey: ["runs"] });
     void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-    for (const event of fresh) {
+    for (const event of meaningful) {
       void queryClient.invalidateQueries({ queryKey: ["run", event.run_id] });
       if (event.type.startsWith("tool_")) {
         void queryClient.invalidateQueries({
@@ -179,7 +172,6 @@ export default function App() {
   }, [queryClient, stream.events]);
 
   const liveEvents = stream.events.filter((event) => event.run_id === selectedRunId);
-  const events = mergeEvents(eventsQuery.data || [], liveEvents);
   const pendingApproval =
     approvalsQuery.data?.find(
       (approval) => !approval.decision && (!approval.status || approval.status === "pending")
@@ -196,6 +188,28 @@ export default function App() {
   const hasSelectedTurn =
     !!selectedRunId && transcript.some((turn) => turn.run_id === selectedRunId);
   const currentOutput = storedAssistant || streamingText;
+  const latestActivity = liveEvents
+    .filter((event) => NOTABLE_EVENT_TYPES.has(event.type))
+    .at(-1);
+  const toolInvocations = toolInvocationsQuery.data || [];
+
+  useEffect(() => {
+    stickToBottom.current = true;
+  }, [selectedRunId]);
+
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (element && stickToBottom.current) {
+      element.scrollTop = element.scrollHeight;
+    }
+  }, [transcript.length, currentOutput, toolInvocations.length, selectedRunId]);
+
+  const handleScroll = useCallback(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    stickToBottom.current =
+      element.scrollHeight - element.scrollTop - element.clientHeight < 120;
+  }, []);
 
   const selectSession = useCallback((sessionId: string, runId?: string | null) => {
     setDraftNewTask(false);
@@ -207,6 +221,10 @@ export default function App() {
     setDraftNewTask(true);
     setSelectedSessionId(null);
     setSelectedRunId(null);
+  }, []);
+
+  const pickExample = useCallback((text: string) => {
+    setPrefill({ text, nonce: Date.now() });
   }, []);
 
   const createRun = useCallback(
@@ -286,32 +304,29 @@ export default function App() {
   }
 
   const selectedSession = sessions.find((session) => session.id === selectedSessionId);
-  const notableEvents = events
-    .filter((event) => NOTABLE_EVENT_TYPES.has(event.type))
-    .slice(-5)
-    .reverse();
   const workspaceName = runtimeQuery.data?.workspaces[0]?.name || "Workspace";
   const modelName = [selectedRun?.provider, selectedRun?.model]
     .filter(Boolean)
     .join(" / ");
   const usage = formatUsage(selectedRun?.usage_json);
+  const activityLabel = latestActivity ? eventLabel(latestActivity) : null;
 
   return (
     <div className="agent-app">
       <header className="agent-header">
         <div className="header-leading">
           <div className="brand">
-            <span><Sparkles size={20} /></span>
+            <span><Sparkles size={18} /></span>
             <div><strong>Agent Harness</strong><small>Web Runtime</small></div>
           </div>
           <div className="header-workspace">
-            <span>当前工作区</span>
+            <span>工作区</span>
             <strong>{workspaceName}</strong>
           </div>
         </div>
         <div className="header-actions">
           <div className={`connection ${stream.status}`}>
-            {stream.status === "live" ? <Wifi size={15} /> : <WifiOff size={15} />}
+            {stream.status === "live" ? <Wifi size={14} /> : <WifiOff size={14} />}
             <span>
               {stream.status === "live"
                 ? "实时连接"
@@ -326,7 +341,7 @@ export default function App() {
             aria-label="切换主题"
             onClick={() => setTheme(theme === "light" ? "dark" : "light")}
           >
-            {theme === "light" ? <Moon size={17} /> : <Sun size={17} />}
+            {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
           </button>
         </div>
       </header>
@@ -341,47 +356,75 @@ export default function App() {
 
         <section className="conversation-panel">
           <div className="conversation-heading">
-            <div className="conversation-heading-copy">
-              <span className="conversation-kicker">
-                {selectedSession ? "当前任务" : "准备开始"}
-              </span>
-              <div className="conversation-title-row">
-                <h1>{selectedSession?.display_title || selectedSession?.title || "新任务"}</h1>
-                {selectedRun ? (
-                  <span className={`status-pill ${selectedRun.status}`}>
-                    <i />{statusLabel(selectedRun.status)}
-                  </span>
-                ) : null}
-              </div>
+            <div className="conversation-title-row">
+              <h1>{selectedSession?.display_title || selectedSession?.title || "新任务"}</h1>
               {selectedRun ? (
-                <div className="run-metadata">
-                  <span><Cpu size={13} />{modelName || "未指定模型"}</span>
-                  <span><Workflow size={13} />{selectedRun.steps || 0} 步</span>
-                  {usage ? <span>{usage}</span> : null}
-                </div>
-              ) : (
-                <p>从下方描述目标，Agent 会实时汇报过程。</p>
-              )}
+                <span className={`status-pill ${selectedRun.status}`}>
+                  <i />{statusLabel(selectedRun.status)}
+                </span>
+              ) : null}
             </div>
             {selectedRun ? (
-              <code className="run-id" title={selectedRun.id}>
-                <Hash size={12} />{selectedRun.id.slice(0, 10)}
-              </code>
-            ) : null}
+              <div className="run-metadata">
+                <span><Cpu size={13} />{modelName || "未指定模型"}</span>
+                <span><Workflow size={13} />{selectedRun.steps || 0} 步</span>
+                {usage ? <span>{usage}</span> : null}
+                <span className="run-id" title={selectedRun.id}>
+                  <Hash size={12} />{selectedRun.id.slice(0, 10)}
+                </span>
+              </div>
+            ) : (
+              <p className="conversation-subtitle">描述目标，Agent 会实时汇报每一步。</p>
+            )}
           </div>
 
-          <div className="conversation-scroll" data-testid="conversation">
+          <div
+            className="conversation-scroll"
+            data-testid="conversation"
+            ref={scrollRef}
+            onScroll={handleScroll}
+          >
             <div className="conversation-content">
-              {transcript.map((turn) => (
-                <div className="turn" key={turn.run_id}>
-                  <UserMessage content={turn.user_content} />
-                  <AssistantMessage content={turn.assistant_content || "没有返回内容"} error={turn.error} />
-                </div>
-              ))}
+              {transcript.map((turn) => {
+                const isLive = turn.run_id === selectedRunId;
+                return (
+                  <div
+                    className={`turn${isLive && active ? " active-turn" : ""}`}
+                    key={turn.run_id}
+                  >
+                    <UserMessage content={turn.user_content} />
+                    {isLive ? (
+                      <ToolTimeline
+                        invocations={toolInvocations}
+                        onResolve={resolveToolRecovery}
+                      />
+                    ) : null}
+                    <AssistantMessage
+                      content={
+                        isLive
+                          ? currentOutput ||
+                            (!active
+                              ? turn.assistant_content ||
+                                selectedRun?.output_summary ||
+                                "没有返回内容"
+                              : "")
+                          : turn.assistant_content || "没有返回内容"
+                      }
+                      error={isLive ? turn.error || selectedRun?.error : turn.error}
+                      thinking={isLive && active && !currentOutput}
+                      activity={isLive ? activityLabel : undefined}
+                    />
+                  </div>
+                );
+              })}
 
               {selectedRun && !hasSelectedTurn ? (
                 <div className="turn active-turn">
                   <UserMessage content={selectedRun.user_summary || ""} />
+                  <ToolTimeline
+                    invocations={toolInvocations}
+                    onResolve={resolveToolRecovery}
+                  />
                   <AssistantMessage
                     content={
                       currentOutput ||
@@ -389,42 +432,23 @@ export default function App() {
                     }
                     error={selectedRun.error}
                     thinking={active && !currentOutput}
+                    activity={activityLabel}
                   />
                 </div>
               ) : null}
 
-              {selectedRun ? (
-                <ToolTimeline
-                  invocations={toolInvocationsQuery.data || []}
-                  onResolve={resolveToolRecovery}
-                />
+              {!transcript.length && !selectedRun ? (
+                <Welcome runtime={runtimeQuery.data || null} onPick={pickExample} />
               ) : null}
-
-              {!transcript.length && !selectedRun ? <Welcome /> : null}
             </div>
           </div>
-
-          {notableEvents.length ? (
-            <div className="activity-rail" aria-label="最近活动">
-              <div className="activity-title"><Activity size={14} /><span>运行动态</span></div>
-              <div className="activity-items">
-                {notableEvents.map((event) => (
-                  <span
-                    className={`activity-chip ${eventTone(event)}`}
-                    key={event.event_id}
-                  >
-                    <i />{eventLabel(event)}
-                  </span>
-                ))}
-              </div>
-            </div>
-          ) : null}
 
           <RunComposer
             runtime={runtimeQuery.data || null}
             selectedSessionId={selectedSessionId || null}
             selectedRun={selectedRun || null}
             pendingApproval={pendingApproval}
+            prefill={prefill}
             onCreate={createRun}
             onCancel={cancelRun}
             onResume={resumeRun}
@@ -439,11 +463,7 @@ export default function App() {
 function UserMessage({ content }: { content: string }) {
   return (
     <article className="message message-user">
-      <div className="message-body">
-        <div className="message-meta"><span>你</span></div>
-        <div className="message-bubble"><p>{content}</p></div>
-      </div>
-      <span className="message-avatar user-avatar"><UserRound size={15} /></span>
+      <div className="message-bubble"><p>{content}</p></div>
     </article>
   );
 }
@@ -452,53 +472,66 @@ function AssistantMessage({
   content,
   error,
   thinking = false,
+  activity,
 }: {
   content: string;
   error?: string | null;
   thinking?: boolean;
+  activity?: string | null;
 }) {
+  if (thinking) {
+    return (
+      <article className="message message-assistant">
+        <div className="thinking-indicator" aria-label="Agent 正在处理">
+          <span className="thinking-dots"><i /><i /><i /></span>
+          <span>{activity || "Agent 正在处理任务"}</span>
+        </div>
+      </article>
+    );
+  }
   return (
     <article className="message message-assistant">
-      <span className="message-avatar agent-avatar"><Bot size={16} /></span>
-      <div className="message-body">
-        <div className="message-meta"><span>Agent Harness</span></div>
-        <div className="message-bubble">
-          {thinking ? (
-            <div className="thinking-indicator" aria-label="Agent 正在处理">
-              <span className="thinking-dots"><i /><i /><i /></span>
-              <span>Agent 正在处理任务</span>
-            </div>
-          ) : (
-            <MessageContent content={content} />
-          )}
-          {error ? <small className="run-error">{error}</small> : null}
-        </div>
+      <div className="message-bubble">
+        <MessageContent content={content} />
+        {error ? <small className="run-error">{error}</small> : null}
       </div>
     </article>
   );
 }
 
-function Welcome() {
+function Welcome({
+  runtime,
+  onPick,
+}: {
+  runtime: RuntimeInfo | null;
+  onPick: (text: string) => void;
+}) {
   return (
     <div className="welcome">
-      <div className="welcome-mark"><Sparkles size={26} /></div>
-      <span className="welcome-kicker">WEB AGENT RUNTIME</span>
+      <div className="welcome-mark"><Sparkles size={24} /></div>
       <h2>把目标交给 Agent</h2>
-      <p>从分析代码到执行工具，过程会实时呈现；涉及写入与高风险操作时，由你最终确认。</p>
-      <div className="welcome-capabilities">
-        <span>理解项目</span>
-        <span>调用工具</span>
-        <span>人工审批</span>
-        <span>持续会话</span>
+      <p>
+        任务在你授权的工作区内执行；每一次工具调用都带效果标记，写入和高风险操作由你审批。
+      </p>
+      <div className="welcome-examples" aria-label="示例任务">
+        {EXAMPLE_TASKS.map((task) => (
+          <button key={task} type="button" onClick={() => onPick(task)}>
+            {task}
+          </button>
+        ))}
       </div>
+      {runtime?.tools.length ? (
+        <div className="welcome-capabilities" aria-label="可用工具">
+          {runtime.tools.map((tool) => (
+            <span key={tool.name} title={tool.description}>
+              <EffectBadge effect={tool.effect} />
+              {tool.name}
+            </span>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
-}
-
-function mergeEvents(stored: EventRow[], live: EventRow[]): EventRow[] {
-  const events = new Map<number, EventRow>();
-  for (const event of [...stored, ...live]) events.set(event.global_seq, event);
-  return [...events.values()].sort((left, right) => left.global_seq - right.global_seq);
 }
 
 function formatUsage(value?: string): string | null {
