@@ -51,6 +51,7 @@ from agentharness.contracts import (
 )
 from agentharness.engine.context import ContextPlanner, billable_turn_usage, estimate_tokens
 from agentharness.engine.events import EventEmitter
+from agentharness.engine.lease import LeaseManager
 from agentharness.engine.run_state import RunContext, ensure_ctx
 from agentharness.engine.scheduler import EffectScheduler
 from agentharness.engine.tool_execution import (
@@ -197,10 +198,11 @@ class RunEngine:
         self.redactor = redactor or default_redactor
         self.approval_callback = approval_callback
         self.harness = harness
-        self.lease_owner_id = lease_owner_id or new_id()
-        self.lease_ttl_s = max(5.0, lease_ttl_s)
-        self.lease_heartbeat_s = max(
-            0.5, min(lease_heartbeat_s, self.lease_ttl_s / 2)
+        self.lease = LeaseManager(
+            storage,
+            owner_id=lease_owner_id,
+            ttl_s=lease_ttl_s,
+            heartbeat_s=lease_heartbeat_s,
         )
         self.scheduler = EffectScheduler()
         self.context_planner = ContextPlanner(
@@ -237,28 +239,17 @@ class RunEngine:
         self.active_run_id = run_id
 
     def _start_run_lease(self, run_id: str) -> None:
-        acquired = self.storage.acquire_run_lease(
-            run_id, self.lease_owner_id, ttl_s=self.lease_ttl_s
-        )
-        if not acquired:
-            raise RuntimeError(f"run {run_id} is leased by another active process")
-        self._ctx(run_id).lease_heartbeat_task = asyncio.create_task(
-            self._lease_heartbeat_loop(run_id),
-            name=f"agentharness-lease-{run_id[:12]}",
+        self.lease.acquire(run_id)
+        self._ctx(run_id).lease_heartbeat_task = self.lease.start_heartbeat(
+            run_id, on_lost=self._on_lease_lost
         )
 
-    async def _lease_heartbeat_loop(self, run_id: str) -> None:
-        while True:
-            await asyncio.sleep(self.lease_heartbeat_s)
-            renewed = self.storage.heartbeat_run_lease(
-                run_id, self.lease_owner_id, ttl_s=self.lease_ttl_s
-            )
-            if not renewed:
-                ctx = self._runs.get(run_id)
-                if ctx is not None:
-                    ctx.stop_mode = "interrupt"
-                    ctx.cancel_event.set()
-                return
+    def _on_lease_lost(self, run_id: str) -> None:
+        """Lost the single-writer lease: interrupt the run instead of double-writing."""
+        ctx = self._runs.get(run_id)
+        if ctx is not None:
+            ctx.stop_mode = "interrupt"
+            ctx.cancel_event.set()
 
     def _deactivate_run(self, run_id: str) -> None:
         self._active_run_ids.discard(run_id)
@@ -275,7 +266,7 @@ class RunEngine:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat
-        self.storage.release_run_lease(run_id, self.lease_owner_id)
+        self.lease.release(run_id)
         with ExitStack() as stack:
             stack.callback(self._forget_run, run_id)
             seen: set[int] = set()
