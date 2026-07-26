@@ -10,9 +10,14 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
-from agentharness.contracts import EffectKind, ReplayPolicy, ToolResult, ToolSpec
+from agentharness.contracts import EffectKind, ReplayPolicy, ToolCall, ToolResult, ToolSpec
 
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def tool_call_completed(tool_call: ToolCall, completed: set[str]) -> bool:
+    """Use invocation ids for v8 checkpoints and provider ids for legacy checkpoints."""
+    return tool_call.invocation_id in completed or tool_call.id in completed
 
 
 def canonical_arguments(arguments: dict[str, Any]) -> str:
@@ -112,6 +117,7 @@ __all__ = [
     "invalid_arguments_result",
     "resolved_parallel_safe",
     "resolved_replay_policy",
+    "tool_call_completed",
     "tool_result_model_content",
     "validate_tool_arguments",
     "validate_tool_spec",
