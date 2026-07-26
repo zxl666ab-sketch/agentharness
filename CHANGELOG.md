@@ -2,6 +2,15 @@
 
 All notable changes are documented here. The project follows semantic versioning for public Python and Web API contracts.
 
+## [Unreleased]
+
+### Added
+
+- Auto-compaction: when live history crosses `context_compact_ratio × max_context_tokens` (default 80%), the engine folds old message groups into a rolling model-written summary rendered in the stable prefix. Tool pairs stay atomic, the latest user goal and the newest groups stay verbatim, originals are externalized to an artifact, and the compacted view is checkpointed for resume. Every failure path degrades to the planner's externalization fallback.
+- `context_compacted` event (applied/skipped, tokens before, coverage, artifact id) surfaced in the Web activity feed.
+- Prompt-cache metrics: the OpenAI adapter reads `cached_tokens` from both Chat Completions and Responses usage shapes; `Usage` gains cumulative/per-turn `cached_input_tokens` and a serialized `cache_hit_rate`; provider attempts record per-attempt cache reads; the Web run header shows the hit rate.
+- Cache-aware cost: optional `PricingConfig.cached_input_per_million_usd` prices cached input tokens at the discounted rate in run cost estimates and budgets.
+
 ## [0.3.0] - 2026-07-25
 
 ### Changed

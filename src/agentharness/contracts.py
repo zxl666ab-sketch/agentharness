@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 
 def _utcnow() -> datetime:
@@ -107,6 +107,7 @@ class EventType(StrEnum):
     model_turn_start = "model_turn_start"
     model_turn_end = "model_turn_end"
     context_manifest = "context_manifest"
+    context_compacted = "context_compacted"
     verification_started = "verification_started"
     verification_result = "verification_result"
     verification_feedback = "verification_feedback"
@@ -148,6 +149,7 @@ class ProviderAttempt(BaseModel):
     error_kind: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_input_tokens: int = 0
     had_output: bool = False
     fallback: bool = False
     estimated_cost_usd: float | None = None
@@ -160,20 +162,31 @@ class Usage(BaseModel):
     across model turns (used for budget enforcement). ``last_*`` describe only
     the most recent model call; ``last_local_estimate`` is the harness-side
     context size estimate (~4 chars/token) for that call — useful when a
-    provider gateway reports inflated prompt_tokens.
+    provider gateway reports inflated prompt_tokens. ``cached_input_tokens``
+    counts the provider-reported prompt-cache reads inside ``input_tokens``.
     """
 
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    cached_input_tokens: int = 0
     estimated: bool = False
     last_input_tokens: int = 0
     last_output_tokens: int = 0
+    last_cached_input_tokens: int = 0
     last_local_estimate: int = 0
     model_turns: int = 0
     provider_attempts: list[ProviderAttempt] = Field(default_factory=list)
     estimated_cost_usd: float | None = None
     cost_status: Literal["unknown", "estimated"] = "unknown"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def cache_hit_rate(self) -> float:
+        """Fraction of cumulative input tokens served from the provider prompt cache."""
+        if self.input_tokens <= 0 or self.cached_input_tokens <= 0:
+            return 0.0
+        return round(min(1.0, self.cached_input_tokens / self.input_tokens), 4)
 
 
 class ProviderRetryConfig(BaseModel):
@@ -186,6 +199,7 @@ class ProviderRetryConfig(BaseModel):
 class PricingConfig(BaseModel):
     input_per_million_usd: float | None = Field(default=None, ge=0)
     output_per_million_usd: float | None = Field(default=None, ge=0)
+    cached_input_per_million_usd: float | None = Field(default=None, ge=0)
 
     @property
     def known(self) -> bool:
@@ -349,6 +363,7 @@ class ContextPinnedItem(BaseModel):
     token_estimate: int = 0
     selected: bool = True
     reason: str = "selected"
+    artifact_id: str | None = None
 
 
 class ContextState(BaseModel):
@@ -356,6 +371,9 @@ class ContextState(BaseModel):
 
     schema_version: int = 1
     items: list[ContextPinnedItem] = Field(default_factory=list)
+    # Message ids folded into the `history_summary` pinned item by auto-compaction.
+    summarized_message_ids: list[str] = Field(default_factory=list)
+    compaction_count: int = 0
 
 
 class ContextManifestItem(BaseModel):
@@ -466,6 +484,11 @@ class BudgetConfig(BaseModel):
     max_tool_argument_bytes: int = Field(default=262_144, ge=1024, le=262_144)
     max_tool_result_bytes: int = Field(default=1_048_576, ge=1024, le=1_048_576)
     max_inline_tool_result_bytes: int = Field(default=4096, ge=256, le=4096)
+    # Auto-compaction: summarize old history once its estimate crosses
+    # ratio × max_context_tokens; the newest groups stay verbatim.
+    context_compact_enabled: bool = True
+    context_compact_ratio: float = Field(default=0.8, ge=0.2, le=1.0)
+    context_compact_keep_recent: int = Field(default=2, ge=0, le=16)
 
 
 class ShellExecutionConfig(BaseModel):

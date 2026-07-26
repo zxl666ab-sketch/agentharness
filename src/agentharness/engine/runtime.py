@@ -42,6 +42,12 @@ from agentharness.contracts import (
     VerificationPolicy,
     new_id,
 )
+from agentharness.engine.compaction import (
+    CompactionError,
+    plan_compaction,
+    render_transcript,
+    summarize_history,
+)
 from agentharness.engine.context import ContextPlanner, billable_turn_usage, estimate_tokens
 from agentharness.engine.events import EventEmitter
 from agentharness.engine.lease import LeaseManager
@@ -85,19 +91,36 @@ def _retry_delay(config: ProviderRetryConfig, retry_number: int) -> float:
     return max(0.0, base * random.uniform(1 - config.jitter_ratio, 1 + config.jitter_ratio))
 
 
-def _cost_usd(input_tokens: int, output_tokens: int, pricing: PricingConfig) -> float | None:
+def _cost_usd(
+    input_tokens: int,
+    output_tokens: int,
+    pricing: PricingConfig,
+    *,
+    cached_input_tokens: int = 0,
+) -> float | None:
     if not pricing.known:
         return None
     assert pricing.input_per_million_usd is not None
     assert pricing.output_per_million_usd is not None
-    return (
-        input_tokens * pricing.input_per_million_usd
-        + output_tokens * pricing.output_per_million_usd
-    ) / 1_000_000
+    cached = min(max(0, cached_input_tokens), max(0, input_tokens))
+    cached_rate = pricing.cached_input_per_million_usd
+    if cached and cached_rate is not None:
+        input_cost = (
+            (input_tokens - cached) * pricing.input_per_million_usd
+            + cached * cached_rate
+        )
+    else:
+        input_cost = input_tokens * pricing.input_per_million_usd
+    return (input_cost + output_tokens * pricing.output_per_million_usd) / 1_000_000
 
 
 def _update_usage_cost(usage: Usage, pricing: PricingConfig) -> None:
-    cost = _cost_usd(usage.input_tokens, usage.output_tokens, pricing)
+    cost = _cost_usd(
+        usage.input_tokens,
+        usage.output_tokens,
+        pricing,
+        cached_input_tokens=usage.cached_input_tokens,
+    )
     usage.estimated_cost_usd = round(cost, 10) if cost is not None else None
     usage.cost_status = "estimated" if cost is not None else "unknown"
 
@@ -917,6 +940,18 @@ class RunEngine:
                     messages=messages,
                 )
 
+            # Fold oversized old history into the rolling summary before planning;
+            # planner externalization stays the hard fallback if this is skipped.
+            await self._maybe_compact(
+                run_id=run_id,
+                request=request,
+                messages=messages,
+                usage=usage,
+                step=step,
+                completed_tool_ids=completed_tool_ids,
+                cancel=cancel,
+            )
+
             run_row = self.storage.get_run(run_id)
             assert run_row is not None
             # ContextPlanner is the sole seam for selection, stable prefix,
@@ -1177,6 +1212,9 @@ class RunEngine:
                         elif item.type == StreamItemType.usage and item.usage:
                             turn_usage.input_tokens += item.usage.input_tokens
                             turn_usage.output_tokens += item.usage.output_tokens
+                            turn_usage.cached_input_tokens += (
+                                item.usage.cached_input_tokens
+                            )
                             turn_usage.total_tokens = (
                                 turn_usage.input_tokens + turn_usage.output_tokens
                             )
@@ -1211,6 +1249,7 @@ class RunEngine:
                 attempt_output = turn_usage.output_tokens or estimate_tokens(
                     "".join(text_parts)
                 )
+                attempt_cached = min(turn_usage.cached_input_tokens, attempt_input)
                 usage.provider_attempts.append(
                     ProviderAttempt(
                         provider=self.redactor.redact_text(request.provider),
@@ -1224,10 +1263,14 @@ class RunEngine:
                         error_kind=error_kind,
                         input_tokens=attempt_input,
                         output_tokens=attempt_output,
+                        cached_input_tokens=attempt_cached,
                         had_output=had_provider_output,
                         fallback=False,
                         estimated_cost_usd=_cost_usd(
-                            attempt_input, attempt_output, request.pricing
+                            attempt_input,
+                            attempt_output,
+                            request.pricing,
+                            cached_input_tokens=attempt_cached,
                         ),
                     )
                 )
@@ -1244,6 +1287,7 @@ class RunEngine:
                     usage.input_tokens += attempt_input
                     usage.output_tokens += attempt_output
                     usage.total_tokens += attempt_input + attempt_output
+                    usage.cached_input_tokens += attempt_cached
                     usage.estimated = usage.estimated or not turn_usage.total_tokens
                     _update_usage_cost(usage, request.pricing)
                     turn_usage_charged = True
@@ -1310,9 +1354,13 @@ class RunEngine:
                 usage.input_tokens += billable.input_tokens
                 usage.output_tokens += billable.output_tokens
                 usage.total_tokens += billable.total_tokens
+                usage.cached_input_tokens += min(
+                    turn_usage.cached_input_tokens, billable.input_tokens
+                )
                 usage.estimated = usage.estimated or billable.estimated
                 usage.last_input_tokens = raw_in
                 usage.last_output_tokens = raw_out
+                usage.last_cached_input_tokens = turn_usage.cached_input_tokens
                 usage.last_local_estimate = local_est
                 _update_usage_cost(usage, request.pricing)
             usage.model_turns = step + 1
@@ -1538,6 +1586,126 @@ class RunEngine:
                     "max_output_length exceeded",
                     messages=messages,
                 )
+
+    async def _maybe_compact(
+        self,
+        *,
+        run_id: str,
+        request: RunRequest,
+        messages: list[Message],
+        usage: Usage,
+        step: int,
+        completed_tool_ids: set[str],
+        cancel: asyncio.Event,
+    ) -> None:
+        """Summarize old history into the planner state when it crosses the threshold.
+
+        Every failure path degrades to "continue uncompacted": the planner's
+        externalization still enforces the hard context budget, so compaction
+        can never make a run fail that would otherwise succeed.
+        """
+        if cancel.is_set():
+            return
+        budget = request.budget or BudgetConfig()
+        ctx = self._ctx(run_id)
+        plan = plan_compaction(messages, ctx.context_state, budget)
+        if plan is None:
+            return
+        run_row = self.storage.get_run(run_id)
+        provider = self.providers.get(request.provider)
+        if run_row is None or provider is None:
+            return
+
+        state = ctx.context_state
+        if state is None:
+            state = self.context_planner.select_state(
+                request, system=request.system
+            )
+        prior_summary = ContextPlanner.summary_text(state)
+        goal = str(
+            request.metadata.get("_agentharness_original_goal") or request.message
+        )
+        transcript = render_transcript(
+            plan.cover_messages, prior_summary=prior_summary, goal=goal
+        )
+
+        def emit_compaction(payload: dict[str, Any]) -> None:
+            self.events.emit_and_update(
+                run_id,
+                events=[
+                    self.events.event(
+                        run_row,
+                        EventType.context_compacted,
+                        {
+                            "step": step,
+                            "tokens_before": plan.live_tokens_before,
+                            "threshold_tokens": plan.threshold_tokens,
+                            "messages_covered": len(plan.cover_ids),
+                            "groups_covered": plan.groups_covered,
+                            **payload,
+                        },
+                    )
+                ],
+            )
+
+        # The summarization call itself must fit inside the run token budget.
+        projected = estimate_tokens(transcript) + 2048
+        if usage.total_tokens + projected >= budget.max_tokens:
+            emit_compaction(
+                {"status": "skipped", "reason": "insufficient token budget"}
+            )
+            return
+
+        try:
+            summary, summarize_usage = await summarize_history(
+                provider, model=request.model, transcript=transcript
+            )
+        except CompactionError as exc:
+            emit_compaction({"status": "skipped", "reason": str(exc)})
+            return
+        if cancel.is_set():
+            return
+
+        billable = billable_turn_usage(
+            provider_usage=summarize_usage,
+            local_input_estimate=estimate_tokens(transcript),
+            output_text=summary,
+        )
+        usage.input_tokens += billable.input_tokens
+        usage.output_tokens += billable.output_tokens
+        usage.total_tokens += billable.total_tokens
+        usage.cached_input_tokens += min(
+            summarize_usage.cached_input_tokens, billable.input_tokens
+        )
+        usage.estimated = usage.estimated or billable.estimated
+        _update_usage_cost(usage, request.pricing)
+
+        artifact_id = self.context_planner.externalize_messages(plan.cover_messages)
+        ctx.context_state = self.context_planner.apply_compaction(
+            state,
+            summary_text=summary,
+            covered_ids=plan.cover_ids,
+            artifact_id=artifact_id,
+        )
+        emit_compaction(
+            {
+                "status": "applied",
+                "summary_tokens": estimate_tokens(summary),
+                "artifact_id": artifact_id,
+                "compaction_count": ctx.context_state.compaction_count,
+                "usage": billable.model_dump(),
+            }
+        )
+        # Persist the new context state so resume continues from the compacted view.
+        self.lifecycle.checkpoint(
+            run_id,
+            phase="model_turn",
+            step=step,
+            messages=messages,
+            pending=[],
+            completed=completed_tool_ids,
+            usage=usage,
+        )
 
     def _verification_policy(self, request: RunRequest) -> VerificationPolicy | None:
         policy = request.verification
@@ -1782,6 +1950,9 @@ class RunEngine:
             usage.input_tokens += input_tokens
             usage.output_tokens += output_tokens
             usage.total_tokens += total_tokens
+            usage.cached_input_tokens += min(
+                int(raw.get("cached_input_tokens") or 0), input_tokens
+            )
 
     def _pause_for_verification_human(
         self,

@@ -7,7 +7,7 @@ Agent Harness 是一个本地、自托管、Web-first 的 Agent Runtime。用户
 - 原生 `asyncio` Agent 循环与多轮会话；
 - OpenAI 与 OpenAI-compatible Provider；
 - 文件、Shell、HTTP、Browser、MCP、Memory、Skills、Delegate 工具；
-- Context Planner、预算、OpenAI Provider retry、确定性与独立模型验证；
+- Context Planner、预算、自动上下文压缩（滚动摘要）、prompt cache 命中率与缓存感知成本、OpenAI Provider retry、确定性与独立模型验证；
 - SQLite 运行状态、Checkpoint、租约和进程丢失恢复；
 - JSON Schema 工具参数校验、调用预算、持久化执行状态和副作用恢复治理；
 - 工作区隔离、审批、egress/SSRF 防护、脱敏；
@@ -73,6 +73,8 @@ OPENAI_API_MODE=chat
 - 工作目录限制在服务启动时授权的 workspace root 内。
 
 启用“允许修改工作区”只授予运行级写权限，具体写文件、Shell、网络等动作仍按效果类型进入审批。Shell 永远被视为 destructive；长期记忆修改要求单独确认。
+
+上下文管理：会话历史超过上下文预算的 80%（`context_compact_ratio`）时，引擎自动把旧消息组压缩成滚动摘要并继续执行——工具调用对保持原子、最新用户目标与最近若干组保持原文、原始消息外部化为 artifact 供审计，压缩后的视图随 checkpoint 持久化，恢复运行时直接生效。摘要调用失败时自动降级为按预算外部化，不会让本可完成的运行失败。Provider 返回的 prompt cache 命中会被记入 `usage.cache_hit_rate`，配置 `cached_input_per_million_usd` 后成本估算按缓存折扣价计费。
 
 网页支持：
 

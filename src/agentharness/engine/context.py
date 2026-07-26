@@ -165,6 +165,7 @@ class ContextPlanner:
             messages=messages,
             base_tokens=estimate_tokens(system_text or "") + tool_tokens,
             budget=budget,
+            summarized_ids=set(pinned.summarized_message_ids),
         )
         manifest_items.extend(message_items)
         total = estimate_tokens(system_text or "") + tool_tokens + estimate_messages_tokens(
@@ -433,13 +434,19 @@ class ContextPlanner:
             ("workspace_rules", "Workspace rules"),
             ("skills", "Active skills"),
             ("memories", "Retrieved memories"),
+            ("history_summary", "Conversation summary"),
         ):
             section_items = [item for item in selected if item.section == section]
             if not section_items:
                 continue
             rendered = []
             for item in section_items:
-                source = item.source if section != "memories" else "memory"
+                if section == "memories":
+                    source = "memory"
+                elif section == "history_summary":
+                    source = "summary of earlier conversation (auto-compacted)"
+                else:
+                    source = item.source
                 rendered.append(f"### {source}\n{item.content}")
             parts.append(f"## {title}\n" + "\n\n".join(rendered))
         return "\n\n".join(parts) if parts else None
@@ -454,6 +461,7 @@ class ContextPlanner:
                 included=item.selected,
                 reason=item.reason,
                 compression="none" if item.selected else "excluded",
+                artifact_id=item.artifact_id,
                 preview=self.redactor.redact_text(item.content[:160]) if item.selected else "",
             )
             for item in state.items
@@ -465,17 +473,29 @@ class ContextPlanner:
         messages: list[Message],
         base_tokens: int,
         budget: int,
+        summarized_ids: set[str] | None = None,
     ) -> tuple[list[Message], list[ContextManifestItem], bool]:
         copied = [message.model_copy(deep=True) for message in messages]
         groups = _message_groups(copied)
+        summarized = summarized_ids or set()
         last_user = max(
             (index for index, message in enumerate(copied) if message.role == MessageRole.user),
             default=-1,
         )
         items: list[ContextManifestItem] = []
         for group in groups:
+            covered = bool(group["valid"]) and all(
+                message.id in summarized for message in group["messages"]
+            )
+            group["covered"] = covered
             tokens = estimate_messages_tokens(group["messages"])
             group["tokens"] = tokens
+            if covered:
+                reason = "summarized into rolling history summary"
+            elif group["valid"]:
+                reason = "conversation history"
+            else:
+                reason = "excluded: orphaned tool pair"
             group["item"] = ContextManifestItem(
                 section="messages",
                 source=f"message:{group['messages'][0].id}",
@@ -483,14 +503,18 @@ class ContextPlanner:
                     _stable_json([message.model_dump(mode="json") for message in group["messages"]])
                 ),
                 token_estimate=tokens,
-                included=bool(group["valid"]),
-                reason="conversation history" if group["valid"] else "excluded: orphaned tool pair",
-                compression="none" if group["valid"] else "excluded",
+                included=bool(group["valid"]) and not covered,
+                reason=reason,
+                compression=(
+                    "summarized" if covered else "none" if group["valid"] else "excluded"
+                ),
                 preview=self.redactor.redact_text(group["messages"][0].content[:160]),
             )
             items.append(group["item"])
 
-        included = [group for group in groups if group["valid"]]
+        included = [
+            group for group in groups if group["valid"] and not group["covered"]
+        ]
         total = base_tokens + sum(int(group["tokens"]) for group in included)
         compacted = len(included) != len(groups)
 
@@ -557,6 +581,66 @@ class ContextPlanner:
             return str(meta.get("id") or "") or None
         except Exception:  # noqa: BLE001
             return None
+
+    def select_state(
+        self, request: RunRequest, *, system: str | None = None
+    ) -> ContextState:
+        """Materialize the initial pinned selection without running a full plan.
+
+        The engine needs this when auto-compaction fires before the first
+        ``plan`` call of a run (e.g. a resumed session with long history):
+        compaction must extend the real selection, not an empty state.
+        """
+        return self._coerce_or_select_state(None, request, system=system)
+
+    def externalize_messages(self, messages: list[Message]) -> str | None:
+        """Persist original messages as an artifact; returns its id (audit trail)."""
+        return self._externalize_messages(messages)
+
+    def apply_compaction(
+        self,
+        state: ContextState,
+        *,
+        summary_text: str,
+        covered_ids: list[str],
+        artifact_id: str | None = None,
+        reason: str | None = None,
+    ) -> ContextState:
+        """Fold covered messages into the single rolling ``history_summary`` item.
+
+        The summary replaces any previous one (the caller chains prior summary
+        text into the new summarization input), covered ids accumulate, and the
+        planner excludes covered groups from every later ``plan`` call.
+        """
+        updated = ContextState.model_validate(state).model_copy(deep=True)
+        updated.items = [
+            item for item in updated.items if item.section != "history_summary"
+        ]
+        count = updated.compaction_count + 1
+        item = self._pinned(
+            "history_summary",
+            f"compaction:{count}",
+            summary_text,
+            reason or f"auto-compacted {len(covered_ids)} earlier messages",
+        )
+        item.artifact_id = artifact_id
+        updated.items.append(item)
+        existing = set(updated.summarized_message_ids)
+        updated.summarized_message_ids.extend(
+            message_id for message_id in covered_ids if message_id not in existing
+        )
+        updated.compaction_count = count
+        return updated
+
+    @staticmethod
+    def summary_text(state: ContextState | None) -> str:
+        """Current rolling summary content, empty when no compaction happened."""
+        if state is None:
+            return ""
+        for item in state.items:
+            if item.section == "history_summary" and item.selected:
+                return item.content
+        return ""
 
     @staticmethod
     def _default_system(request: RunRequest) -> str:

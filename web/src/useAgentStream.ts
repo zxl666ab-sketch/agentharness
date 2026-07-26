@@ -25,6 +25,7 @@ export const AGENT_EVENT_TYPES = [
   "verification_started",
   "verification_result",
   "verification_feedback",
+  "context_compacted",
   "provider_retry",
   "budget_warning",
   "error",

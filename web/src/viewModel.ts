@@ -63,6 +63,12 @@ export function eventLabel(event: EventRow): string {
     if (event.payload.passed === false) return "验证未通过";
     return `验证 ${String(event.payload.action || "完成")}`;
   }
+  if (event.type === "context_compacted") {
+    if (event.payload.status === "applied") {
+      return `上下文已压缩（${String(event.payload.messages_covered || "?")} 条消息并入摘要）`;
+    }
+    return "上下文压缩已跳过";
+  }
   if (event.type === "provider_retry") return "模型请求重试";
   if (event.type === "budget_warning") return "预算预警";
   if (event.type === "error") return "运行错误";

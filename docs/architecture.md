@@ -31,6 +31,7 @@ flowchart LR
 | `ToolInvocationExecutor` (`engine/tool_execution.py`) | Governed tool batches: validation, approvals, effect-aware scheduling, retry/reconcile recovery, result bounding |
 | `RunSpawner` | Narrow surface tools get via `ToolContext.harness`: storage + run + child_run_ids |
 | `ContextPlanner` | Authorized context sources, token budgeting, compaction and manifests |
+| Auto-compaction (`engine/compaction.py`) | Threshold-triggered selection of old message groups, bounded summarization call, rolling-summary state applied through the planner |
 | `VerificationLoop` | Deterministic output, file, governed command and independent-model checks |
 | OpenAI adapter | Normalized async `stream(ModelRequest)` contract for OpenAI and compatible gateways |
 | Tool | Backward-compatible `ToolSpec`/`run` plus schema, timeout, replay and concurrency policy |
@@ -68,6 +69,10 @@ sequenceDiagram
 ```
 
 The API generates the run and session identities before scheduling work, so a browser receives a stable handle immediately. Shutdown interrupts owned runs before closing providers, tools and SQLite.
+
+## Context compaction
+
+Before each planning step the engine compares the not-yet-summarized history against `context_compact_ratio × max_context_tokens`. Above the threshold it summarizes the oldest complete groups with one bounded, tool-free provider call, replaces the previous rolling summary (prior summary text is chained into the new call), externalizes the originals as an artifact and stores covered message ids in the planner state. The planner renders the summary inside the stable prefix and excludes covered groups from later turns, marking them `summarized` in the manifest. The state travels with every checkpoint, so resume continues from the compacted view. Any summarization failure emits a skipped `context_compacted` event and the run continues; the planner's budget externalization remains the hard limit. Provider-reported prompt-cache reads are accumulated per turn into `usage.cached_input_tokens` / `cache_hit_rate`, and cost estimates price cached input at `cached_input_per_million_usd` when configured.
 
 ## Workspace model
 
