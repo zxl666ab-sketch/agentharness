@@ -9,7 +9,6 @@ import random
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import ExitStack, suppress
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -21,7 +20,6 @@ from agentharness.contracts import (
     Checkpoint,
     ContextState,
     EffectKind,
-    EventEnvelope,
     EventType,
     Message,
     MessageRole,
@@ -52,6 +50,8 @@ from agentharness.contracts import (
     new_id,
 )
 from agentharness.engine.context import ContextPlanner, billable_turn_usage, estimate_tokens
+from agentharness.engine.events import EventEmitter
+from agentharness.engine.run_state import RunContext, ensure_ctx
 from agentharness.engine.scheduler import EffectScheduler
 from agentharness.engine.tool_execution import (
     approval_scope,
@@ -122,38 +122,6 @@ def _update_usage_cost(usage: Usage, pricing: PricingConfig) -> None:
     cost = _cost_usd(usage.input_tokens, usage.output_tokens, pricing)
     usage.estimated_cost_usd = round(cost, 10) if cost is not None else None
     usage.cost_status = "estimated" if cost is not None else "unknown"
-
-
-@dataclass
-class RunContext:
-    """All per-run in-memory engine state, grouped so a run's state is created and
-    torn down atomically. Replacing 13 parallel ``dict[run_id, ...]`` maps with one
-    ``dict[run_id, RunContext]`` means cleanup is a single ``pop`` — a newly added
-    field cannot be forgotten in ``_cleanup_run_state``, and a failure mid-teardown
-    cannot leave some fields lingering while others are freed.
-    """
-
-    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
-    approval_scopes: set[str] = field(default_factory=set)
-    child_runs: list[str] = field(default_factory=list)
-    delta_buf: list[str] = field(default_factory=list)
-    delta_buf_size: int = 0
-    delta_last_flush: float = 0.0
-    # Completed tool ids must survive interrupt/cancel checkpoints for resume.
-    completed_tool_ids: set[str] = field(default_factory=set)
-    pending_tool_calls: list[ToolCall] = field(default_factory=list)
-    stop_mode: str | None = None  # "cancel" | "interrupt"
-    # In-memory message list (incl. session-history splice) for resume-safe checkpoints.
-    run_messages: list[Message] = field(default_factory=list)
-    # Opaque ContextPlanner selection; persisted in every checkpoint.
-    context_state: ContextState | None = None
-    verification_attempt: int = 0
-    provider_owner_task: asyncio.Task[Any] | None = None
-    lease_heartbeat_task: asyncio.Task[Any] | None = None
-    tool_call_count: int = 0
-    indeterminate_reason: str | None = None
-
-
 
 
 # Tool-argument summarizer lives in one place (shared with the CLI / event payloads);
@@ -242,6 +210,12 @@ class RunEngine:
         )
         # One RunContext per active run; see RunContext for why this replaces 13 maps.
         self._runs: dict[str, RunContext] = {}
+        self.events = EventEmitter(
+            storage=storage,
+            runs=self._runs,
+            redactor=self.redactor,
+            harness=harness,
+        )
         # Process handles per run. Kept separate from RunContext because the shell tools
         # share this dict by reference (harness wires its own registry in), registering
         # handles the engine later kills — a per-run field could not be shared that way.
@@ -251,11 +225,7 @@ class RunEngine:
 
     def _ctx(self, run_id: str) -> RunContext:
         """Return (creating if needed) the RunContext for a run."""
-        ctx = self._runs.get(run_id)
-        if ctx is None:
-            ctx = RunContext()
-            self._runs[run_id] = ctx
-        return ctx
+        return ensure_ctx(self._runs, run_id)
 
     def child_run_ids(self, run_id: str) -> list[str]:
         """Child run ids spawned by a run (used by the delegate concurrency limiter)."""
@@ -466,12 +436,12 @@ class RunEngine:
                 RunStatus.waiting_approval.value,
                 RunStatus.pending.value,
             ):
-                self._emit_and_update(
+                self.events.emit_and_update(
                     run_id,
                     status=RunStatus.cancelled,
                     finished=True,
                     events=[
-                        self._event(
+                        self.events.event(
                             run,
                             EventType.run_cancelled,
                             {"reason": "cancel"},
@@ -559,10 +529,10 @@ class RunEngine:
             self._ctx(parent_run_id).child_runs.append(run_id)
             parent = self.storage.get_run(parent_run_id)
             if parent:
-                self._emit_and_update(
+                self.events.emit_and_update(
                     parent_run_id,
                     events=[
-                        self._event(
+                        self.events.event(
                             parent,
                             EventType.child_run_started,
                             {
@@ -608,10 +578,10 @@ class RunEngine:
 
         run_row = self.storage.get_run(run_id)
         assert run_row is not None
-        self._emit_and_update(
+        self.events.emit_and_update(
             run_id,
             events=[
-                self._event(
+                self.events.event(
                     run_row,
                     EventType.run_started,
                     {
@@ -681,10 +651,10 @@ class RunEngine:
                 parent = self.storage.get_run(parent_run_id)
                 child = self.storage.get_run(run_id)
                 if parent and child:
-                    self._emit_and_update(
+                    self.events.emit_and_update(
                         parent_run_id,
                         events=[
-                            self._event(
+                            self.events.event(
                                 parent,
                                 EventType.child_run_ended,
                                 {
@@ -807,10 +777,10 @@ class RunEngine:
             clear_error=True,
             clear_finished_at=True,
         )
-        self._emit_and_update(
+        self.events.emit_and_update(
             run_id,
             events=[
-                self._event(run, EventType.run_status, {"status": "running", "resumed": True})
+                self.events.event(run, EventType.run_status, {"status": "running", "resumed": True})
             ],
         )
 
@@ -963,10 +933,10 @@ class RunEngine:
             expected_arguments_sha256=arguments_sha256,
         ):
             raise RuntimeError("tool recovery was already resolved or became stale")
-        self._emit_and_update(
+        self.events.emit_and_update(
             invocation.run_id,
             events=[
-                self._event(
+                self.events.event(
                     run,
                     EventType.tool_recovery_resolved,
                     {
@@ -1098,10 +1068,10 @@ class RunEngine:
             }
 
             span_id = new_id()
-            self._emit_and_update(
+            self.events.emit_and_update(
                 run_id,
                 events=[
-                    self._event(
+                    self.events.event(
                         run_row,
                         EventType.context_manifest,
                         {
@@ -1111,7 +1081,7 @@ class RunEngine:
                         },
                         span_id=span_id,
                     ),
-                    self._event(
+                    self.events.event(
                         run_row,
                         EventType.model_turn_start,
                         {
@@ -1122,7 +1092,7 @@ class RunEngine:
                         },
                         span_id=span_id,
                     ),
-                    self._event(
+                    self.events.event(
                         run_row,
                         EventType.span_start,
                         {"kind": "model", "step": step},
@@ -1227,7 +1197,7 @@ class RunEngine:
                             chunk = item.text[:available]
                             text_parts.append(chunk)
                             streamed_length += len(chunk)
-                            await self._buffer_delta(run_id, run_row, chunk, span_id)
+                            await self.events.buffer_delta(run_id, run_row, chunk, span_id)
                             if len(item.text) > available:
                                 error_msg = "max_output_length exceeded"
                                 error_kind = "budget"
@@ -1256,10 +1226,10 @@ class RunEngine:
                             tool_acc[tc_id] = tc
                             order.append(tc_id)
                             self._ctx(run_id).tool_call_count += 1
-                            self._emit_and_update(
+                            self.events.emit_and_update(
                                 run_id,
                                 events=[
-                                    self._event(
+                                    self.events.event(
                                         run_row,
                                         EventType.tool_call_start,
                                         {
@@ -1399,10 +1369,10 @@ class RunEngine:
                     _update_usage_cost(usage, request.pricing)
                     turn_usage_charged = True
                     delay = _retry_delay(request.provider_retry, target_attempt)
-                    self._emit_and_update(
+                    self.events.emit_and_update(
                         run_id,
                         events=[
-                            self._event(
+                            self.events.event(
                                 run_row,
                                 EventType.provider_retry,
                                 {
@@ -1424,7 +1394,7 @@ class RunEngine:
 
                 break
 
-            await self._flush_delta(run_id, run_row, span_id)
+            await self.events.flush_delta(run_id, run_row, span_id)
 
             unfinished_tool_ids = [
                 tool_id for tool_id in order if tool_id not in ended_tool_ids
@@ -1495,10 +1465,10 @@ class RunEngine:
                 output_parts.append(text)
                 output_length += len(text)
 
-            self._emit_and_update(
+            self.events.emit_and_update(
                 run_id,
                 events=[
-                    self._event(
+                    self.events.event(
                         run_row,
                         EventType.model_turn_end,
                         {
@@ -1512,7 +1482,7 @@ class RunEngine:
                         },
                         span_id=span_id,
                     ),
-                    self._event(
+                    self.events.event(
                         run_row,
                         EventType.span_end,
                         {"kind": "model", "step": step},
@@ -1734,10 +1704,10 @@ class RunEngine:
         assert run_row is not None
         attempt = self._ctx(run_id).verification_attempt
         verification_span_id = new_id()
-        self._emit_and_update(
+        self.events.emit_and_update(
             run_id,
             events=[
-                self._event(
+                self.events.event(
                     run_row,
                     EventType.verification_started,
                     {
@@ -1880,7 +1850,7 @@ class RunEngine:
         decision = await loop.evaluate(candidate, policy, attempt=attempt)
         safe_decision = self.redactor.redact_obj(decision.model_dump(mode="json"))
         events = [
-            self._event(
+            self.events.event(
                 run_row,
                 EventType.verification_result,
                 {
@@ -1896,7 +1866,7 @@ class RunEngine:
         ]
         if decision.feedback:
             events.append(
-                self._event(
+                self.events.event(
                     run_row,
                     EventType.verification_feedback,
                     {
@@ -1908,7 +1878,7 @@ class RunEngine:
                     parent_span_id=model_span_id,
                 )
             )
-        self._emit_and_update(run_id, events=events)
+        self.events.emit_and_update(run_id, events=events)
         return decision
 
     @staticmethod
@@ -1962,7 +1932,7 @@ class RunEngine:
         )
         run = self.storage.get_run(run_id)
         if run:
-            self._emit_and_update(
+            self.events.emit_and_update(
                 run_id,
                 status=RunStatus.require_human,
                 error=reason,
@@ -1970,7 +1940,7 @@ class RunEngine:
                 usage=usage,
                 steps=steps,
                 events=[
-                    self._event(
+                    self.events.event(
                         run,
                         EventType.run_status,
                         {"status": RunStatus.require_human.value, "reason": reason},
@@ -2133,10 +2103,10 @@ class RunEngine:
                 self._ctx(run_id).indeterminate_reason = (
                     f"Tool {tc.name} may have produced an external side effect before interruption"
                 )
-                self._emit_and_update(
+                self.events.emit_and_update(
                     run_id,
                     events=[
-                        self._event(
+                        self.events.event(
                             run_row,
                             EventType.tool_execution_indeterminate,
                             {
@@ -2191,10 +2161,10 @@ class RunEngine:
                 }
             )
             self.storage.save_tool_invocation(invocation)
-            self._emit_and_update(
+            self.events.emit_and_update(
                 run_id,
                 events=[
-                    self._event(
+                    self.events.event(
                         run_row,
                         EventType.tool_call_validated,
                         {
@@ -2287,10 +2257,10 @@ class RunEngine:
                 self.storage.save_tool_invocation(invocation)
                 self.storage.save_approval(apr.model_dump(mode="json"))
                 self.storage.update_run(run_id, status=RunStatus.waiting_approval)
-                self._emit_and_update(
+                self.events.emit_and_update(
                     run_id,
                     events=[
-                        self._event(
+                        self.events.event(
                             run_row,
                             EventType.approval_requested,
                             {
@@ -2356,10 +2326,10 @@ class RunEngine:
                 )
                 if not cancelled_while_waiting:
                     self.storage.update_run(run_id, status=RunStatus.running)
-                self._emit_and_update(
+                self.events.emit_and_update(
                     run_id,
                     events=[
-                        self._event(
+                        self.events.event(
                             run_row,
                             EventType.approval_resolved,
                             {
@@ -2438,10 +2408,10 @@ class RunEngine:
             effect = self._effect_for(tool, tc)
             browser_id = self._resolve_browser_context_id(tc)
             parallel_safe = self._parallel_safe_for(tool, tc, effect)
-            self._emit_and_update(
+            self.events.emit_and_update(
                 run_id,
                 events=[
-                    self._event(
+                    self.events.event(
                         run_row,
                         EventType.tool_execution_queued,
                         {
@@ -2539,10 +2509,10 @@ class RunEngine:
         spec = tool.spec
         span_id = new_id()
         t0 = time.monotonic()
-        self._emit_and_update(
+        self.events.emit_and_update(
             run_id,
             events=[
-                self._event(
+                self.events.event(
                     run_row,
                     EventType.tool_execution_started,
                     {
@@ -2558,7 +2528,7 @@ class RunEngine:
                     },
                     span_id=span_id,
                 ),
-                self._event(
+                self.events.event(
                     run_row,
                     EventType.span_start,
                     {
@@ -2886,10 +2856,10 @@ class RunEngine:
             if not can_retry:
                 break
             delay = min(2.0, 0.25 * (2 ** (attempt - 1))) * random.uniform(0.5, 1.5)
-            self._emit_and_update(
+            self.events.emit_and_update(
                 run_id,
                 events=[
-                    self._event(
+                    self.events.event(
                         run_row,
                         EventType.tool_retry,
                         {
@@ -2956,10 +2926,10 @@ class RunEngine:
                 if terminal_status == ToolInvocationStatus.indeterminate
                 else EventType.tool_execution_cancelled
             )
-            self._emit_and_update(
+            self.events.emit_and_update(
                 run_id,
                 events=[
-                    self._event(
+                    self.events.event(
                         run_row,
                         lifecycle_type,
                         {
@@ -2972,10 +2942,10 @@ class RunEngine:
                     )
                 ],
             )
-        self._emit_and_update(
+        self.events.emit_and_update(
             run_id,
             events=[
-                self._event(
+                self.events.event(
                     run_row,
                     EventType.tool_result,
                     {
@@ -2996,13 +2966,13 @@ class RunEngine:
                     },
                     span_id=span_id,
                 ),
-                self._event(
+                self.events.event(
                     run_row,
                     EventType.span_end,
                     {"kind": "tool", "name": tc.name, "status": terminal_status.value},
                     span_id=span_id,
                 ),
-                self._event(
+                self.events.event(
                     run_row,
                     EventType.tool_call_end,
                     {
@@ -3308,97 +3278,16 @@ class RunEngine:
         self.storage.save_checkpoint(cp)
         run = self.storage.get_run(run_id)
         if run:
-            self._emit_and_update(
+            self.events.emit_and_update(
                 run_id,
                 events=[
-                    self._event(
+                    self.events.event(
                         run,
                         EventType.checkpoint,
                         {"phase": phase, "step": step},
                     )
                 ],
             )
-
-    def _event(
-        self,
-        run: dict[str, Any],
-        etype: EventType,
-        payload: dict[str, Any],
-        span_id: str | None = None,
-        parent_span_id: str | None = None,
-    ) -> EventEnvelope:
-        return EventEnvelope(
-            session_id=run["session_id"],
-            root_run_id=run["root_run_id"],
-            run_id=run["id"],
-            parent_run_id=run.get("parent_run_id"),
-            span_id=span_id,
-            parent_span_id=parent_span_id,
-            type=etype,
-            payload=payload,
-        )
-
-    def _emit_and_update(
-        self,
-        run_id: str,
-        *,
-        status: RunStatus | None = None,
-        finished: bool = False,
-        error: str | None = None,
-        output_summary: str | None = None,
-        usage: Usage | None = None,
-        steps: int | None = None,
-        events: list[EventEnvelope] | None = None,
-    ) -> list[EventEnvelope]:
-        assigned = self.storage.update_run(
-            run_id,
-            status=status,
-            finished=finished,
-            error=error,
-            output_summary=output_summary,
-            usage=usage,
-            steps=steps,
-            events=events,
-        )
-        # Fan out redacted events to live CLI and Web observers.
-        if assigned and self.harness is not None:
-            notify = getattr(self.harness, "_notify_events", None)
-            if callable(notify):
-                notify(assigned)
-        return assigned
-
-    async def _buffer_delta(
-        self, run_id: str, run_row: dict[str, Any], text: str, span_id: str
-    ) -> None:
-        ctx = self._ctx(run_id)
-        ctx.delta_buf.append(text)
-        ctx.delta_buf_size += len(text)
-        now = time.monotonic()
-        if ctx.delta_buf_size >= 256 or (now - ctx.delta_last_flush) >= 0.15:
-            await self._flush_delta(run_id, run_row, span_id)
-
-    async def _flush_delta(
-        self, run_id: str, run_row: dict[str, Any], span_id: str | None
-    ) -> None:
-        ctx = self._runs.get(run_id)
-        buf = ctx.delta_buf if ctx else []
-        if not buf or ctx is None:
-            return
-        text = "".join(buf)
-        ctx.delta_buf = []
-        ctx.delta_buf_size = 0
-        ctx.delta_last_flush = time.monotonic()
-        self._emit_and_update(
-            run_id,
-            events=[
-                self._event(
-                    run_row,
-                    EventType.text_delta,
-                    {"text": self.redactor.redact_text(text)},
-                    span_id=span_id,
-                )
-            ],
-        )
 
     async def _finish_wall_timeout(
         self,
@@ -3483,7 +3372,7 @@ class RunEngine:
                 usage=usage,
                 status=status,
             )
-            self._emit_and_update(
+            self.events.emit_and_update(
                 run_id,
                 status=status,
                 finished=True,
@@ -3492,7 +3381,7 @@ class RunEngine:
                 usage=usage,
                 steps=steps,
                 events=[
-                    self._event(
+                    self.events.event(
                         run,
                         etype,
                         {
@@ -3522,13 +3411,13 @@ class RunEngine:
         run = self.storage.get_run(run_id)
         if not run:
             return
-        self._emit_and_update(
+        self.events.emit_and_update(
             run_id,
             status=RunStatus.interrupted,
             finished=True,
             error=reason,
             events=[
-                self._event(run, EventType.run_interrupted, {"reason": reason})
+                self.events.event(run, EventType.run_interrupted, {"reason": reason})
             ],
         )
         self.storage.clear_stop_request(run_id)
@@ -3537,11 +3426,11 @@ class RunEngine:
         run = self.storage.get_run(run_id)
         if not run:
             return
-        self._emit_and_update(
+        self.events.emit_and_update(
             run_id,
             status=RunStatus.failed,
             finished=True,
             error=error,
-            events=[self._event(run, EventType.run_failed, {"error": error})],
+            events=[self.events.event(run, EventType.run_failed, {"error": error})],
         )
         self.storage.clear_stop_request(run_id)
