@@ -46,6 +46,7 @@ const NOTABLE_EVENT_TYPES = new Set([
   "verification_started",
   "verification_result",
   "provider_retry",
+  "context_compacted",
 ]);
 
 const EXAMPLE_TASKS = [
@@ -537,9 +538,16 @@ function Welcome({
 function formatUsage(value?: string): string | null {
   if (!value) return null;
   try {
-    const usage = JSON.parse(value) as { total_tokens?: number };
+    const usage = JSON.parse(value) as {
+      total_tokens?: number;
+      cache_hit_rate?: number;
+    };
     if (!usage.total_tokens) return null;
-    return `${new Intl.NumberFormat("zh-CN").format(usage.total_tokens)} tokens`;
+    const tokens = `${new Intl.NumberFormat("zh-CN").format(usage.total_tokens)} tokens`;
+    if (usage.cache_hit_rate && usage.cache_hit_rate > 0) {
+      return `${tokens} · 缓存命中 ${(usage.cache_hit_rate * 100).toFixed(0)}%`;
+    }
+    return tokens;
   } catch {
     return null;
   }

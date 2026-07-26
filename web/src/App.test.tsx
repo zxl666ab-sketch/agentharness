@@ -174,6 +174,12 @@ describe("Web-first Agent workspace", () => {
     expect(eventLabel(event("tool_execution_indeterminate"))).toBe(
       "工具结果需要人工确认"
     );
+    expect(
+      eventLabel(event("context_compacted", { status: "applied", messages_covered: 12 }))
+    ).toBe("上下文已压缩（12 条消息并入摘要）");
+    expect(eventLabel(event("context_compacted", { status: "skipped" }))).toBe(
+      "上下文压缩已跳过"
+    );
     expect(eventTone(event("tool_result", { is_error: true }))).toBe("danger");
     expect(eventTone(event("approval_resolved", { decision: "deny" }))).toBe(
       "danger"

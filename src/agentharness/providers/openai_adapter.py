@@ -229,6 +229,27 @@ def _stream_options_unsupported(exc: BaseException) -> bool:
     )
 
 
+def _attr_or_key(raw: Any, name: str) -> Any:
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw.get(name)
+    return getattr(raw, name, None)
+
+
+def _cached_input_tokens(raw: Any) -> int:
+    """Prompt-cache reads: Chat exposes prompt_tokens_details, Responses input_tokens_details."""
+    for details_name in ("prompt_tokens_details", "input_tokens_details"):
+        details = _attr_or_key(raw, details_name)
+        cached = _attr_or_key(details, "cached_tokens")
+        if cached is not None:
+            try:
+                return max(0, int(cached))
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
 def _usage_item(raw: Any) -> Usage | None:
     if raw is None:
         return None
@@ -251,6 +272,7 @@ def _usage_item(raw: Any) -> Usage | None:
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         total_tokens=total_tokens,
+        cached_input_tokens=min(_cached_input_tokens(raw), input_tokens),
     )
 
 

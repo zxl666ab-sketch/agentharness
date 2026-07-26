@@ -315,6 +315,7 @@ class FakeModelAdapter:
                 input_tokens=step.get("input_tokens", 10),
                 output_tokens=step.get("output_tokens", 5),
                 total_tokens=step.get("total_tokens", 15),
+                cached_input_tokens=step.get("cached_input_tokens", 0),
             ),
         )
         yield ModelStreamItem(type=StreamItemType.done)
