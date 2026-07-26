@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "agentharness-web",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "agentharness", "--workspace", ".", "--no-open"],
+      "port": 8741
+    }
+  ]
+}

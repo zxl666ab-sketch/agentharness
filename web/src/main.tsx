@@ -7,7 +7,8 @@ import "./styles/app.css";
 
 const qc = new QueryClient({
   defaultOptions: {
-    queries: { staleTime: 2000, retry: 1 },
+    // SSE drives freshness; focus refetch would only duplicate it.
+    queries: { staleTime: 2000, retry: 1, refetchOnWindowFocus: false },
   },
 });
 

@@ -6,6 +6,7 @@ import {
   FolderKanban,
   LockKeyhole,
   MessagesSquare,
+  PenLine,
   Play,
   RotateCcw,
   Settings2,
@@ -18,6 +19,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -27,14 +29,18 @@ import type {
   RunRow,
   RuntimeInfo,
 } from "../api/client";
+import { EffectBadge } from "./EffectBadge";
 
 type ApprovalDecision = "deny" | "allow_once" | "allow_run";
+
+export type ComposerPrefill = { text: string; nonce: number };
 
 type Props = {
   runtime: RuntimeInfo | null;
   selectedSessionId: string | null;
   selectedRun: RunRow | null;
   pendingApproval: ApprovalRow | null;
+  prefill?: ComposerPrefill | null;
   onCreate: (input: CreateRunInput) => Promise<void>;
   onCancel: (runId: string) => Promise<void>;
   onResume: (runId: string, input?: string) => Promise<void>;
@@ -49,6 +55,7 @@ export function RunComposer({
   selectedSessionId,
   selectedRun,
   pendingApproval,
+  prefill,
   onCreate,
   onCancel,
   onResume,
@@ -63,6 +70,7 @@ export function RunComposer({
   const [showSettings, setShowSettings] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     if (!runtime) return;
@@ -74,6 +82,12 @@ export function RunComposer({
   useEffect(() => {
     setConversationMode(selectedSessionId ? "continue" : "new");
   }, [selectedSessionId]);
+
+  useEffect(() => {
+    if (!prefill) return;
+    setMessage(prefill.text);
+    textareaRef.current?.focus();
+  }, [prefill]);
 
   const openai = runtime?.providers.find((item) => item.name === "openai") || null;
   const selectedWorkspace = useMemo(
@@ -134,12 +148,18 @@ export function RunComposer({
   return (
     <section className="run-composer" data-testid="run-composer" aria-label="运行 Agent">
       {pendingApproval ? (
-        <div className="approval-prompt" role="alert" data-testid="approval-prompt">
-          <span className="approval-prompt-icon"><LockKeyhole size={18} /></span>
-          <div className="approval-prompt-copy">
-            <span className="approval-eyebrow">需要你的批准</span>
-            <strong>{pendingApproval.tool_name}</strong>
-            <code>{pendingApproval.arguments_summary || pendingApproval.effect}</code>
+        <div className="approval-card" role="alert" data-testid="approval-prompt">
+          <div className="approval-heading">
+            <span className="approval-icon"><LockKeyhole size={16} /></span>
+            <strong>需要你的批准</strong>
+            <span className="approval-hint">Agent 请求执行受治理操作，确认后才会继续</span>
+          </div>
+          <div className="approval-body">
+            <EffectBadge effect={pendingApproval.effect} />
+            <code className="approval-tool">{pendingApproval.tool_name}</code>
+            <code className="approval-args">
+              {pendingApproval.arguments_summary || pendingApproval.effect}
+            </code>
           </div>
           <div className="approval-actions">
             <button
@@ -150,6 +170,17 @@ export function RunComposer({
             >
               <X size={14} />拒绝
             </button>
+            {!pendingApproval.requires_confirmation &&
+            pendingApproval.effect !== "destructive" ? (
+              <button
+                type="button"
+                className="allow-run"
+                disabled={busy}
+                onClick={() => void perform(() => onDecision(pendingApproval, "allow_run"))}
+              >
+                <ShieldCheck size={14} />本次运行允许
+              </button>
+            ) : null}
             <button
               type="button"
               className="approve"
@@ -158,16 +189,6 @@ export function RunComposer({
             >
               <Check size={14} />允许一次
             </button>
-            {!pendingApproval.requires_confirmation &&
-            pendingApproval.effect !== "destructive" ? (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void perform(() => onDecision(pendingApproval, "allow_run"))}
-              >
-                <ShieldCheck size={14} />本次运行允许
-              </button>
-            ) : null}
           </div>
         </div>
       ) : null}
@@ -176,6 +197,7 @@ export function RunComposer({
         <form onSubmit={(event) => void submit(event)}>
           <div className="composer-input">
             <textarea
+              ref={textareaRef}
               aria-label="任务描述"
               value={message}
               onChange={(event) => setMessage(event.target.value)}
@@ -184,14 +206,14 @@ export function RunComposer({
               rows={3}
               disabled={busy || !runtime?.execution_enabled}
             />
-            <span className="composer-shortcut">Ctrl ↵</span>
+            <span className="composer-shortcut">Ctrl ↵ 运行</span>
           </div>
 
           {showSettings ? (
             <div className="composer-settings" id="run-settings">
               <div className="settings-heading">
                 <div><Settings2 size={15} /><strong>运行设置</strong></div>
-                <span>这些设置仅作用于下一次运行</span>
+                <span>仅作用于下一次运行</span>
               </div>
               <div className="composer-options">
                 <label>
@@ -265,18 +287,28 @@ export function RunComposer({
                 type="button"
                 className={`mode-toggle${allowWrite ? " enabled" : ""}`}
                 aria-pressed={allowWrite}
-                title="写操作仍然需要逐次审批"
+                title={
+                  allowWrite
+                    ? "已允许写入，具体写操作仍需逐次审批"
+                    : "当前只读，Agent 不能修改工作区"
+                }
                 onClick={() => setAllowWrite((current) => !current)}
                 disabled={busy}
               >
-                {allowWrite ? <ShieldCheck size={14} /> : <LockKeyhole size={14} />}
-                <span>{allowWrite ? "写入需审批" : "只读模式"}</span>
+                {allowWrite ? <PenLine size={14} /> : <LockKeyhole size={14} />}
+                <span>允许写入</span>
+                <i className={`toggle-track${allowWrite ? " on" : ""}`} aria-hidden />
               </button>
               {selectedSessionId ? (
                 <button
                   type="button"
                   className={`mode-toggle${conversationMode === "continue" ? " enabled" : ""}`}
                   aria-pressed={conversationMode === "continue"}
+                  title={
+                    conversationMode === "continue"
+                      ? "在当前任务里继续对话"
+                      : "作为全新任务开始"
+                  }
                   onClick={() =>
                     setConversationMode((current) =>
                       current === "continue" ? "new" : "continue"
