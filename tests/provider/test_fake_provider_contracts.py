@@ -1,13 +1,13 @@
-"""Provider contract tests against the shipped FakeModelAdapter."""
+"""Provider contract tests against the test-only FakeModelAdapter."""
 
 from __future__ import annotations
 
 import asyncio
 
 import pytest
+from tests.fake_provider import FakeModelAdapter
 
 from agentharness.contracts import Message, MessageRole, ModelRequest, StreamItemType, ToolSpec
-from agentharness.providers.fake import FakeModelAdapter
 
 
 async def collect(adapter, request):
@@ -131,3 +131,24 @@ async def test_historical_tool_results_do_not_override_latest_user_directive():
     text = "".join(item.text or "" for item in items)
 
     assert text == "SECOND_OK"
+
+
+@pytest.mark.asyncio
+async def test_verification_feedback_repairs_missing_substring():
+    fake = FakeModelAdapter()
+    request = ModelRequest(
+        messages=[
+            Message(
+                role=MessageRole.user,
+                content=(
+                    '[verification_feedback]\n{"failures": '
+                    '[{"message": "missing substring: \'REPAIRED\'"}]}'
+                ),
+            )
+        ]
+    )
+
+    items = await collect(fake, request)
+    text = "".join(item.text or "" for item in items)
+
+    assert text == "REPAIRED"

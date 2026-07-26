@@ -7,9 +7,12 @@ selected automatically. Override with ``OPENAI_API_MODE=chat|responses``.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import os
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from agentharness.contracts import (
@@ -20,6 +23,151 @@ from agentharness.contracts import (
 )
 
 ApiMode = Literal["auto", "chat", "responses"]
+
+
+class _ProviderProtocolError(ValueError):
+    pass
+
+
+@dataclass(slots=True)
+class _ToolCallState:
+    key: str
+    call_id: str | None = None
+    name: str = ""
+    argument_parts: list[str] = field(default_factory=list)
+    emitted_parts: int = 0
+    final_arguments: str | None = None
+    started: bool = False
+    ended: bool = False
+
+
+class _ToolCallAccumulator:
+    """Normalize provider fragments without exposing provisional call ids."""
+
+    def __init__(self) -> None:
+        self._states: dict[str, _ToolCallState] = {}
+        self._call_owners: dict[str, str] = {}
+
+    def observe(
+        self,
+        key: str,
+        *,
+        call_id: str | None = None,
+        name: str | None = None,
+        delta: str | None = None,
+    ) -> list[ModelStreamItem]:
+        state = self._states.setdefault(key, _ToolCallState(key=key))
+        if state.ended and delta:
+            raise _ProviderProtocolError("received arguments after tool call completed")
+        if call_id:
+            normalized_id = str(call_id).strip()
+            if not normalized_id:
+                raise _ProviderProtocolError("tool call id is empty")
+            if state.call_id and state.call_id != normalized_id:
+                raise _ProviderProtocolError("tool call id changed during streaming")
+            owner = self._call_owners.get(normalized_id)
+            if owner is not None and owner != key:
+                raise _ProviderProtocolError(
+                    f"duplicate tool call id: {normalized_id}"
+                )
+            state.call_id = normalized_id
+            self._call_owners[normalized_id] = key
+        if name:
+            normalized_name = str(name).strip()
+            if state.name and state.name != normalized_name:
+                raise _ProviderProtocolError("tool name changed during streaming")
+            state.name = normalized_name
+        if delta:
+            state.argument_parts.append(str(delta))
+        return self._emit_ready(state)
+
+    def arguments_done(
+        self,
+        key: str,
+        raw: str,
+        *,
+        call_id: str | None = None,
+        name: str | None = None,
+    ) -> list[ModelStreamItem]:
+        events = self.observe(key, call_id=call_id, name=name)
+        state = self._states[key]
+        normalized_raw = str(raw)
+        if state.final_arguments is not None:
+            if state.final_arguments != normalized_raw:
+                raise _ProviderProtocolError(
+                    "tool arguments changed after completion"
+                )
+            return events
+        state.final_arguments = normalized_raw
+        events.extend(self._emit_ready(state))
+        return events
+
+    def finalize(self) -> list[ModelStreamItem]:
+        events: list[ModelStreamItem] = []
+        for state in self._states.values():
+            events.extend(self._emit_ready(state))
+            if not state.ended:
+                raise _ProviderProtocolError(
+                    "provider ended before tool call identity or arguments completed"
+                )
+        return events
+
+    def complete_buffered(self) -> list[ModelStreamItem]:
+        events: list[ModelStreamItem] = []
+        for state in self._states.values():
+            if state.final_arguments is None:
+                events.extend(
+                    self.arguments_done(state.key, "".join(state.argument_parts))
+                )
+        return events
+
+    def _emit_ready(self, state: _ToolCallState) -> list[ModelStreamItem]:
+        if not state.call_id:
+            return []
+        events: list[ModelStreamItem] = []
+        if not state.started:
+            state.started = True
+            events.append(
+                ModelStreamItem(
+                    type=StreamItemType.tool_call_start,
+                    tool_call_id=state.call_id,
+                    tool_name=state.name or None,
+                )
+            )
+        for part in state.argument_parts[state.emitted_parts :]:
+            events.append(
+                ModelStreamItem(
+                    type=StreamItemType.tool_call_delta,
+                    tool_call_id=state.call_id,
+                    tool_name=state.name or None,
+                    arguments_delta=part,
+                )
+            )
+        state.emitted_parts = len(state.argument_parts)
+        if state.final_arguments is None or state.ended:
+            return events
+        if not state.name:
+            raise _ProviderProtocolError("tool call completed without a name")
+        try:
+            arguments = json.loads(state.final_arguments)
+        except json.JSONDecodeError as exc:
+            raise _ProviderProtocolError(
+                f"tool call {state.call_id} arguments are invalid JSON"
+            ) from exc
+        if not isinstance(arguments, dict):
+            raise _ProviderProtocolError(
+                f"tool call {state.call_id} arguments must be a JSON object"
+            )
+        state.ended = True
+        events.append(
+            ModelStreamItem(
+                type=StreamItemType.tool_call_end,
+                tool_call_id=state.call_id,
+                tool_name=state.name,
+                arguments=arguments,
+            )
+        )
+        return events
 
 
 def resolve_openai_api_mode(
@@ -52,8 +200,12 @@ def _classify_error(exc: BaseException) -> tuple[str, str]:
         status = getattr(exc, "status", None)
     if "rate" in low or status == 429:
         kind = "rate_limit"
-    elif "timeout" in low or type(exc).__name__ == "TimeoutError":
+    elif "timeout" in low or "timeout" in type(exc).__name__.lower():
         kind = "timeout"
+    elif isinstance(status, int) and 500 <= status <= 599:
+        kind = "server_error"
+    elif "connection" in low or "connect" in type(exc).__name__.lower():
+        kind = "connection"
     elif "cancel" in low:
         kind = "cancelled"
     return msg, kind
@@ -67,6 +219,69 @@ def _is_not_found(exc: BaseException) -> bool:
         return True
     low = str(exc).lower()
     return "404" in low or "not found" in low
+
+
+def _stream_options_unsupported(exc: BaseException) -> bool:
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    message = str(exc).lower()
+    return status in {400, 422} and (
+        "stream_options" in message or "include_usage" in message
+    )
+
+
+def _usage_item(raw: Any) -> Usage | None:
+    if raw is None:
+        return None
+    input_tokens = int(
+        getattr(raw, "input_tokens", 0)
+        or getattr(raw, "prompt_tokens", 0)
+        or 0
+    )
+    output_tokens = int(
+        getattr(raw, "output_tokens", 0)
+        or getattr(raw, "completion_tokens", 0)
+        or 0
+    )
+    total_tokens = int(
+        getattr(raw, "total_tokens", 0) or input_tokens + output_tokens
+    )
+    if not (input_tokens or output_tokens or total_tokens):
+        return None
+    return Usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+    )
+
+
+def _event_error_message(event: Any) -> str:
+    error = getattr(event, "error", None)
+    response = getattr(event, "response", None)
+    if error is None and response is not None:
+        error = getattr(response, "error", None) or getattr(
+            response, "incomplete_details", None
+        )
+    return str(
+        getattr(event, "message", None)
+        or getattr(error, "message", None)
+        or getattr(error, "code", None)
+        or error
+        or getattr(event, "type", "provider error")
+    )
+
+
+async def _close_provider_stream(stream: Any) -> None:
+    for name in ("close", "aclose"):
+        close = getattr(stream, name, None)
+        if not callable(close):
+            continue
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:  # noqa: BLE001 - cleanup must not replace the run outcome
+            pass
+        return
 
 
 class OpenAIResponsesAdapter:
@@ -141,113 +356,155 @@ class OpenAIResponsesAdapter:
         model = request.model or self.default_model
         input_items = self._to_input(request)
         tools = self._to_tools_responses(request)
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "input": input_items,
+            "stream": True,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        if request.max_tokens:
+            kwargs["max_output_tokens"] = request.max_tokens
         try:
-            kwargs: dict[str, Any] = {
-                "model": model,
-                "input": input_items,
-                "stream": True,
-            }
-            if tools:
-                kwargs["tools"] = tools
-            if request.max_tokens:
-                kwargs["max_output_tokens"] = request.max_tokens
             stream = await client.responses.create(**kwargs)
-            tc_buf: dict[str, dict[str, Any]] = {}
-            async for event in stream:
-                etype = getattr(event, "type", "") or ""
-                if etype == "response.output_text.delta":
-                    delta = getattr(event, "delta", "") or ""
-                    if delta:
-                        yield ModelStreamItem(type=StreamItemType.text_delta, text=delta)
-                elif etype == "response.function_call_arguments.delta":
-                    item_id = getattr(event, "item_id", None) or getattr(
-                        event, "output_index", "0"
-                    )
-                    key = str(item_id)
-                    if key not in tc_buf:
-                        tc_buf[key] = {
-                            "id": key,
-                            "name": getattr(event, "name", None) or "",
-                            "arguments": "",
-                        }
-                    delta = getattr(event, "delta", "") or ""
-                    tc_buf[key]["arguments"] += delta
-                    yield ModelStreamItem(
-                        type=StreamItemType.tool_call_delta,
-                        tool_call_id=key,
-                        tool_name=tc_buf[key]["name"] or None,
-                        arguments_delta=delta,
-                    )
-                elif etype == "response.output_item.added":
-                    item = getattr(event, "item", None)
-                    if item is not None and getattr(item, "type", "") == "function_call":
-                        tc_id = (
-                            getattr(item, "call_id", None)
-                            or getattr(item, "id", "")
-                            or ""
-                        )
-                        name = getattr(item, "name", "") or ""
-                        tc_buf[str(tc_id)] = {"id": tc_id, "name": name, "arguments": ""}
-                        yield ModelStreamItem(
-                            type=StreamItemType.tool_call_start,
-                            tool_call_id=str(tc_id),
-                            tool_name=name,
-                        )
-                elif etype == "response.output_item.done":
-                    item = getattr(event, "item", None)
-                    if item is not None and getattr(item, "type", "") == "function_call":
-                        tc_id = (
-                            getattr(item, "call_id", None)
-                            or getattr(item, "id", "")
-                            or ""
-                        )
-                        name = getattr(item, "name", "") or ""
-                        raw = getattr(item, "arguments", "") or ""
-                        try:
-                            args = json.loads(raw) if raw else {}
-                        except json.JSONDecodeError:
-                            args = {"_raw": raw}
-                        yield ModelStreamItem(
-                            type=StreamItemType.tool_call_end,
-                            tool_call_id=str(tc_id),
-                            tool_name=name,
-                            arguments=args if isinstance(args, dict) else {"_raw": raw},
-                        )
-                elif etype == "response.completed":
-                    resp = getattr(event, "response", None)
-                    usage = getattr(resp, "usage", None) if resp else None
-                    if usage:
-                        inp = int(getattr(usage, "input_tokens", 0) or 0)
-                        out = int(getattr(usage, "output_tokens", 0) or 0)
-                        yield ModelStreamItem(
-                            type=StreamItemType.usage,
-                            usage=Usage(
-                                input_tokens=inp,
-                                output_tokens=out,
-                                total_tokens=inp + out,
-                            ),
-                        )
-                elif etype == "error" or etype.endswith(".failed"):
-                    msg = str(
-                        getattr(event, "message", None) or getattr(event, "error", event)
-                    )
-                    kind = "provider"
-                    low = msg.lower()
-                    if "rate" in low and "limit" in low:
-                        kind = "rate_limit"
-                    elif "timeout" in low:
-                        kind = "timeout"
-                    yield ModelStreamItem(
-                        type=StreamItemType.error, error=msg, error_kind=kind
-                    )
-                    return
-            yield ModelStreamItem(type=StreamItemType.done)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001
             if _is_not_found(exc):
-                # Let outer stream() fall back to chat when nothing was emitted.
+                # Only endpoint discovery may switch the adapter to Chat mode.
                 raise
             msg, kind = _classify_error(exc)
             yield ModelStreamItem(type=StreamItemType.error, error=msg, error_kind=kind)
+            return
+
+        calls = _ToolCallAccumulator()
+        try:
+            async for event in stream:
+                etype = getattr(event, "type", "") or ""
+                try:
+                    if etype == "response.output_text.delta":
+                        delta = getattr(event, "delta", "") or ""
+                        if delta:
+                            yield ModelStreamItem(
+                                type=StreamItemType.text_delta, text=delta
+                            )
+                    elif etype == "response.output_item.added":
+                        item = getattr(event, "item", None)
+                        if item is not None and getattr(item, "type", "") == "function_call":
+                            item_id = str(getattr(item, "id", "") or "").strip()
+                            if not item_id:
+                                raise _ProviderProtocolError(
+                                    "function call item is missing id"
+                                )
+                            for normalized in calls.observe(
+                                item_id,
+                                call_id=getattr(item, "call_id", None),
+                                name=getattr(item, "name", None),
+                            ):
+                                yield normalized
+                    elif etype == "response.function_call_arguments.delta":
+                        item_id = str(getattr(event, "item_id", "") or "").strip()
+                        if not item_id:
+                            raise _ProviderProtocolError(
+                                "function arguments delta is missing item_id"
+                            )
+                        for normalized in calls.observe(
+                            item_id,
+                            delta=str(getattr(event, "delta", "") or ""),
+                        ):
+                            yield normalized
+                    elif etype == "response.function_call_arguments.done":
+                        item_id = str(getattr(event, "item_id", "") or "").strip()
+                        if not item_id:
+                            raise _ProviderProtocolError(
+                                "function arguments completion is missing item_id"
+                            )
+                        raw = getattr(event, "arguments", None)
+                        if raw is None:
+                            raise _ProviderProtocolError(
+                                "function arguments completion is missing arguments"
+                            )
+                        for normalized in calls.arguments_done(
+                            item_id,
+                            str(raw),
+                            name=getattr(event, "name", None),
+                        ):
+                            yield normalized
+                    elif etype == "response.output_item.done":
+                        item = getattr(event, "item", None)
+                        if item is not None and getattr(item, "type", "") == "function_call":
+                            item_id = str(getattr(item, "id", "") or "").strip()
+                            if not item_id:
+                                raise _ProviderProtocolError(
+                                    "completed function call item is missing id"
+                                )
+                            raw = getattr(item, "arguments", None)
+                            if raw is None:
+                                raise _ProviderProtocolError(
+                                    "completed function call item is missing arguments"
+                                )
+                            for normalized in calls.arguments_done(
+                                item_id,
+                                str(raw),
+                                call_id=getattr(item, "call_id", None),
+                                name=getattr(item, "name", None),
+                            ):
+                                yield normalized
+                    elif etype == "response.completed":
+                        for normalized in calls.finalize():
+                            yield normalized
+                        response = getattr(event, "response", None)
+                        usage = _usage_item(
+                            getattr(response, "usage", None) if response else None
+                        )
+                        if usage is not None:
+                            yield ModelStreamItem(
+                                type=StreamItemType.usage, usage=usage
+                            )
+                        yield ModelStreamItem(type=StreamItemType.done)
+                        return
+                    elif etype == "response.incomplete":
+                        yield ModelStreamItem(
+                            type=StreamItemType.error,
+                            error=_event_error_message(event),
+                            error_kind="provider",
+                        )
+                        return
+                    elif etype == "response.cancelled":
+                        yield ModelStreamItem(
+                            type=StreamItemType.error,
+                            error=_event_error_message(event),
+                            error_kind="cancelled",
+                        )
+                        return
+                    elif etype == "error" or etype.endswith(".failed"):
+                        message = _event_error_message(event)
+                        _unused, kind = _classify_error(Exception(message))
+                        yield ModelStreamItem(
+                            type=StreamItemType.error,
+                            error=message,
+                            error_kind=kind,
+                        )
+                        return
+                except _ProviderProtocolError as exc:
+                    yield ModelStreamItem(
+                        type=StreamItemType.error,
+                        error=str(exc),
+                        error_kind="provider_protocol",
+                    )
+                    return
+            yield ModelStreamItem(
+                type=StreamItemType.error,
+                error="OpenAI Responses stream ended before response.completed",
+                error_kind="connection",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            msg, kind = _classify_error(exc)
+            yield ModelStreamItem(type=StreamItemType.error, error=msg, error_kind=kind)
+        finally:
+            await _close_provider_stream(stream)
 
     # ------------------------------------------------------------------
     # Chat Completions (OpenAI-compatible gateways)
@@ -260,52 +517,61 @@ class OpenAIResponsesAdapter:
         model = request.model or self.default_model
         messages = self._to_chat_messages(request)
         tools = self._to_tools_chat(request)
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        if request.max_tokens:
+            kwargs["max_tokens"] = request.max_tokens
+        # Best-effort usage on stream; retry without it only when the gateway
+        # explicitly rejects this field.
+        kwargs["stream_options"] = {"include_usage": True}
         try:
-            kwargs: dict[str, Any] = {
-                "model": model,
-                "messages": messages,
-                "stream": True,
-            }
-            if tools:
-                kwargs["tools"] = tools
-            if request.max_tokens:
-                kwargs["max_tokens"] = request.max_tokens
-            # Best-effort usage on stream; many gateways ignore unknown fields.
-            kwargs["stream_options"] = {"include_usage": True}
+            stream = await client.chat.completions.create(**kwargs)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if not _stream_options_unsupported(exc):
+                msg, kind = _classify_error(exc)
+                yield ModelStreamItem(
+                    type=StreamItemType.error, error=msg, error_kind=kind
+                )
+                return
+            kwargs.pop("stream_options", None)
             try:
                 stream = await client.chat.completions.create(**kwargs)
-            except Exception:
-                kwargs.pop("stream_options", None)
-                stream = await client.chat.completions.create(**kwargs)
+            except asyncio.CancelledError:
+                raise
+            except Exception as retry_exc:  # noqa: BLE001
+                msg, kind = _classify_error(retry_exc)
+                yield ModelStreamItem(
+                    type=StreamItemType.error, error=msg, error_kind=kind
+                )
+                return
 
-            # index → {id, name, arguments, started}
-            tc_buf: dict[int, dict[str, Any]] = {}
+        calls = _ToolCallAccumulator()
+        finish_reason: str | None = None
+        latest_usage: Usage | None = None
+        try:
             async for chunk in stream:
-                usage = getattr(chunk, "usage", None)
+                usage = _usage_item(getattr(chunk, "usage", None))
                 if usage is not None:
-                    inp = int(
-                        getattr(usage, "prompt_tokens", 0)
-                        or getattr(usage, "input_tokens", 0)
-                        or 0
-                    )
-                    out = int(
-                        getattr(usage, "completion_tokens", 0)
-                        or getattr(usage, "output_tokens", 0)
-                        or 0
-                    )
-                    if inp or out:
-                        yield ModelStreamItem(
-                            type=StreamItemType.usage,
-                            usage=Usage(
-                                input_tokens=inp,
-                                output_tokens=out,
-                                total_tokens=inp + out,
-                            ),
-                        )
+                    latest_usage = usage
                 choices = getattr(chunk, "choices", None) or []
                 if not choices:
                     continue
                 choice = choices[0]
+                chunk_finish = getattr(choice, "finish_reason", None)
+                if chunk_finish:
+                    normalized_finish = str(chunk_finish)
+                    if finish_reason and finish_reason != normalized_finish:
+                        raise _ProviderProtocolError(
+                            "Chat completion finish reason changed during streaming"
+                        )
+                    finish_reason = normalized_finish
                 delta = getattr(choice, "delta", None)
                 if delta is None:
                     continue
@@ -315,74 +581,53 @@ class OpenAIResponsesAdapter:
                 tool_calls = getattr(delta, "tool_calls", None) or []
                 for tc in tool_calls:
                     idx = int(getattr(tc, "index", 0) or 0)
-                    row = tc_buf.get(idx)
-                    if row is None:
-                        row = {
-                            "id": "",
-                            "name": "",
-                            "arguments": "",
-                            "started": False,
-                        }
-                        tc_buf[idx] = row
-                    tc_id = getattr(tc, "id", None)
-                    if tc_id:
-                        row["id"] = str(tc_id)
                     fn = getattr(tc, "function", None)
-                    if fn is not None:
-                        name = getattr(fn, "name", None)
-                        if name:
-                            row["name"] = str(name)
-                        args_delta = getattr(fn, "arguments", None) or ""
-                        if args_delta:
-                            row["arguments"] += str(args_delta)
-                            if row["started"]:
-                                yield ModelStreamItem(
-                                    type=StreamItemType.tool_call_delta,
-                                    tool_call_id=row["id"] or f"call_{idx}",
-                                    tool_name=row["name"] or None,
-                                    arguments_delta=str(args_delta),
-                                )
-                    if not row["started"] and (row["name"] or row["id"]):
-                        if not row["id"]:
-                            row["id"] = f"call_{idx}"
-                        row["started"] = True
-                        yield ModelStreamItem(
-                            type=StreamItemType.tool_call_start,
-                            tool_call_id=row["id"],
-                            tool_name=row["name"] or None,
-                        )
-                        # If arguments already arrived with the start chunk, emit delta.
-                        if row["arguments"]:
-                            yield ModelStreamItem(
-                                type=StreamItemType.tool_call_delta,
-                                tool_call_id=row["id"],
-                                tool_name=row["name"] or None,
-                                arguments_delta=row["arguments"],
-                            )
+                    for normalized in calls.observe(
+                        f"index:{idx}",
+                        call_id=getattr(tc, "id", None),
+                        name=getattr(fn, "name", None) if fn is not None else None,
+                        delta=(
+                            str(getattr(fn, "arguments", None) or "")
+                            if fn is not None
+                            else None
+                        ),
+                    ):
+                        yield normalized
 
-            for idx in sorted(tc_buf):
-                row = tc_buf[idx]
-                raw = row["arguments"]
-                try:
-                    args = json.loads(raw) if raw else {}
-                except json.JSONDecodeError:
-                    args = {"_raw": raw}
-                if not row["started"]:
-                    yield ModelStreamItem(
-                        type=StreamItemType.tool_call_start,
-                        tool_call_id=row["id"] or f"call_{idx}",
-                        tool_name=row["name"] or None,
-                    )
+            if finish_reason is None:
                 yield ModelStreamItem(
-                    type=StreamItemType.tool_call_end,
-                    tool_call_id=row["id"] or f"call_{idx}",
-                    tool_name=row["name"] or None,
-                    arguments=args if isinstance(args, dict) else {"_raw": raw},
+                    type=StreamItemType.error,
+                    error="OpenAI Chat stream ended before finish_reason",
+                    error_kind="connection",
                 )
+                return
+            if finish_reason in {"length", "content_filter"}:
+                yield ModelStreamItem(
+                    type=StreamItemType.error,
+                    error=f"OpenAI Chat completion ended with {finish_reason}",
+                    error_kind="provider",
+                )
+                return
+            for normalized in calls.complete_buffered():
+                yield normalized
+            for normalized in calls.finalize():
+                yield normalized
+            if latest_usage is not None:
+                yield ModelStreamItem(type=StreamItemType.usage, usage=latest_usage)
             yield ModelStreamItem(type=StreamItemType.done)
+        except _ProviderProtocolError as exc:
+            yield ModelStreamItem(
+                type=StreamItemType.error,
+                error=str(exc),
+                error_kind="provider_protocol",
+            )
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001
             msg, kind = _classify_error(exc)
             yield ModelStreamItem(type=StreamItemType.error, error=msg, error_kind=kind)
+        finally:
+            await _close_provider_stream(stream)
 
     # ------------------------------------------------------------------
     # Message / tool conversion

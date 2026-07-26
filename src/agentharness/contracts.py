@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def _utcnow() -> datetime:
@@ -42,6 +42,30 @@ class EffectKind(StrEnum):
     process = "process"
     network = "network"
     destructive = "destructive"
+
+
+class ReplayPolicy(StrEnum):
+    safe = "safe"
+    reconcile = "reconcile"
+    never = "never"
+
+
+class ToolRecoveryDecision(StrEnum):
+    mark_succeeded = "mark_succeeded"
+    skip = "skip"
+    retry = "retry"
+
+
+class ToolInvocationStatus(StrEnum):
+    received = "received"
+    validated = "validated"
+    waiting_approval = "waiting_approval"
+    approved = "approved"
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"
+    cancelled = "cancelled"
+    indeterminate = "indeterminate"
 
 
 class ApprovalMode(StrEnum):
@@ -88,6 +112,13 @@ class EventType(StrEnum):
     verification_feedback = "verification_feedback"
     text_delta = "text_delta"
     tool_call_start = "tool_call_start"
+    tool_call_validated = "tool_call_validated"
+    tool_execution_queued = "tool_execution_queued"
+    tool_execution_started = "tool_execution_started"
+    tool_retry = "tool_retry"
+    tool_execution_cancelled = "tool_execution_cancelled"
+    tool_execution_indeterminate = "tool_execution_indeterminate"
+    tool_recovery_resolved = "tool_recovery_resolved"
     tool_call_end = "tool_call_end"
     tool_result = "tool_result"
     approval_requested = "approval_requested"
@@ -98,6 +129,7 @@ class EventType(StrEnum):
     child_run_started = "child_run_started"
     child_run_ended = "child_run_ended"
     budget_warning = "budget_warning"
+    provider_retry = "provider_retry"
     redaction = "redaction"
     heartbeat = "heartbeat"
     error = "error"
@@ -106,6 +138,19 @@ class EventType(StrEnum):
 # ---------------------------------------------------------------------------
 # Core models
 # ---------------------------------------------------------------------------
+
+
+class ProviderAttempt(BaseModel):
+    provider: str
+    model: str | None = None
+    attempt: int = 1
+    status: Literal["completed", "error"] = "completed"
+    error_kind: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    had_output: bool = False
+    fallback: bool = False
+    estimated_cost_usd: float | None = None
 
 
 class Usage(BaseModel):
@@ -126,6 +171,28 @@ class Usage(BaseModel):
     last_output_tokens: int = 0
     last_local_estimate: int = 0
     model_turns: int = 0
+    provider_attempts: list[ProviderAttempt] = Field(default_factory=list)
+    estimated_cost_usd: float | None = None
+    cost_status: Literal["unknown", "estimated"] = "unknown"
+
+
+class ProviderRetryConfig(BaseModel):
+    max_retries: int = Field(default=3, ge=0, le=3)
+    base_delay_s: float = Field(default=0.5, ge=0, le=60)
+    max_delay_s: float = Field(default=8.0, ge=0, le=120)
+    jitter_ratio: float = Field(default=0.25, ge=0, le=1)
+
+
+class PricingConfig(BaseModel):
+    input_per_million_usd: float | None = Field(default=None, ge=0)
+    output_per_million_usd: float | None = Field(default=None, ge=0)
+
+    @property
+    def known(self) -> bool:
+        return (
+            self.input_per_million_usd is not None
+            and self.output_per_million_usd is not None
+        )
 
 
 def format_usage_brief(usage: Usage | None, *, budget_max: int | None = None) -> str:
@@ -162,24 +229,38 @@ class Message(BaseModel):
     tool_call_id: str | None = None
     name: str | None = None
     tool_calls: list[ToolCall] | None = None
+    tool_result: ToolResult | None = None
     created_at: datetime = Field(default_factory=_utcnow)
 
 
 class ToolCall(BaseModel):
     id: str = Field(default_factory=new_id)
+    invocation_id: str = Field(default_factory=new_id)
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     arguments_raw: str = ""
+    ordinal: int = Field(default=0, ge=0)
     status: Literal["pending", "running", "completed", "failed", "skipped"] = "pending"
+
+
+class ToolContentPart(BaseModel):
+    type: Literal["text", "json", "image", "resource"] = "text"
+    text: str | None = None
+    data: Any = None
+    mime_type: str | None = None
+    artifact_id: str | None = None
 
 
 class ToolResult(BaseModel):
     tool_call_id: str
     name: str
     content: str
+    invocation_id: str | None = None
     is_error: bool = False
     artifact_id: str | None = None
+    parts: list[ToolContentPart] = Field(default_factory=list)
     duration_ms: float | None = None
+    attempts: int = Field(default=1, ge=0)
     error_code: str | None = None
     error_category: str | None = None
     retryable: bool = False
@@ -192,6 +273,37 @@ class ToolSpec(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     effect: EffectKind = EffectKind.pure
     requires_approval: bool = False
+    version: str = "1"
+    timeout_s: float = Field(default=60.0, gt=0, le=3600)
+    max_attempts: int = Field(default=1, ge=1, le=5)
+    replay_policy: ReplayPolicy | None = None
+    parallel_safe: bool | None = None
+    max_result_bytes: int = Field(default=1_048_576, ge=1, le=16_777_216)
+
+
+class ToolInvocationRecord(BaseModel):
+    id: str
+    run_id: str
+    session_id: str
+    step: int = Field(ge=0)
+    ordinal: int = Field(ge=0)
+    provider_call_id: str
+    tool_name: str
+    tool_version: str = "1"
+    status: ToolInvocationStatus = ToolInvocationStatus.received
+    effect: EffectKind = EffectKind.pure
+    replay_policy: ReplayPolicy = ReplayPolicy.never
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    arguments_sha256: str = ""
+    approval_id: str | None = None
+    attempt_count: int = 0
+    result: ToolResult | None = None
+    error_code: str | None = None
+    error_category: str | None = None
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 class ModelStreamItem(BaseModel):
@@ -293,7 +405,7 @@ class VerificationFailure(BaseModel):
 
 
 class VerificationCheck(BaseModel):
-    kind: Literal["eval_assert", "file", "command", "ai"]
+    kind: Literal["output", "file", "command", "ai"]
     assertions: dict[str, Any] = Field(default_factory=dict)
     path: str | None = None
     exists: bool = True
@@ -323,7 +435,7 @@ class VerificationCandidate(BaseModel):
     latency_s: float = 0.0
     tools_ordered: list[str] = Field(default_factory=list)
     messages: list[Message] = Field(default_factory=list)
-    eval_assert: dict[str, Any] | None = None
+    output_assertions: dict[str, Any] | None = None
     executor_provider: str | None = None
     executor_adapter: Any = None
     cancel_event: Any = None
@@ -347,6 +459,36 @@ class BudgetConfig(BaseModel):
     max_output_length: int = 500_000
     max_delegate_depth: int = 3
     max_concurrent_children: int = 4
+    max_cost_usd: float | None = Field(default=None, ge=0)
+    max_tool_calls_per_turn: int = Field(default=16, ge=1, le=16)
+    max_tool_calls: int = Field(default=128, ge=1, le=128)
+    max_concurrent_tools: int = Field(default=4, ge=1, le=4)
+    max_tool_argument_bytes: int = Field(default=262_144, ge=1024, le=262_144)
+    max_tool_result_bytes: int = Field(default=1_048_576, ge=1024, le=1_048_576)
+    max_inline_tool_result_bytes: int = Field(default=4096, ge=256, le=4096)
+
+
+class ShellExecutionConfig(BaseModel):
+    """Run-scoped shell backend selection; local remains the compatible default."""
+
+    executor: Literal["local", "docker"] = "local"
+    docker_image: str = "python:3.12.4-slim-bookworm"
+    docker_network: bool = False
+    docker_cpus: float = Field(default=1.0, gt=0, le=16)
+    docker_memory_mb: int = Field(default=512, ge=64, le=32768)
+    docker_pids_limit: int = Field(default=128, ge=16, le=4096)
+
+    @model_validator(mode="after")
+    def require_version_locked_docker_image(self) -> ShellExecutionConfig:
+        if self.executor != "docker":
+            return self
+        image = self.docker_image.strip()
+        leaf = image.rsplit("/", 1)[-1]
+        has_digest = "@sha256:" in image
+        has_version_tag = ":" in leaf and not leaf.lower().endswith(":latest")
+        if not image or (not has_digest and not has_version_tag):
+            raise ValueError("docker_image must use a version tag or sha256 digest")
+        return self
 
 
 class RunRequest(BaseModel):
@@ -354,9 +496,12 @@ class RunRequest(BaseModel):
     session_id: str | None = None
     system: str | None = None
     model: str | None = None
-    provider: str = "fake"
+    provider: str = "openai"
     approval: ApprovalMode = ApprovalMode.ask
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
+    provider_retry: ProviderRetryConfig = Field(default_factory=ProviderRetryConfig)
+    pricing: PricingConfig = Field(default_factory=PricingConfig)
+    shell: ShellExecutionConfig = Field(default_factory=ShellExecutionConfig)
     cwd: str | None = None
     extra_dirs: list[str] = Field(default_factory=list)
     skills_dirs: list[str] = Field(default_factory=list)
@@ -397,7 +542,6 @@ class ConversationTurn(BaseModel):
     model: str | None = None
     started_at: datetime | str | None = None
     finished_at: datetime | str | None = None
-    evaluation: dict[str, Any] | None = None
 
 
 class EventEnvelope(BaseModel):
@@ -441,8 +585,19 @@ class ApprovalRequest(BaseModel):
     run_id: str
     tool_call_id: str
     tool_name: str
+    invocation_id: str | None = None
+    tool_version: str = "1"
     effect: EffectKind
     arguments_summary: str
+    arguments_sha256: str = ""
+    approval_scope: str = ""
+    requires_confirmation: bool = False
+    """Tool opted into a dedicated confirmation regardless of its effect kind.
+
+    Approval callbacks must prompt when this is set, even under
+    ``ApprovalMode.auto``: it is how tools such as long-term memory mutation ask
+    for an explicit decision despite a non-destructive effect.
+    """
     decision: ApprovalDecision | None = None
     created_at: datetime = Field(default_factory=_utcnow)
 
@@ -472,6 +627,7 @@ class ToolContext(BaseModel):
     allow_write: bool = True
     cancel_event: Any = None  # asyncio.Event
     approval_mode: ApprovalMode = ApprovalMode.ask
+    shell: ShellExecutionConfig = Field(default_factory=ShellExecutionConfig)
     metadata: dict[str, Any] = Field(default_factory=dict)
     harness: Any = None  # forward ref to Harness for delegate
 

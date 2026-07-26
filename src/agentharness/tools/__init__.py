@@ -9,7 +9,12 @@ from agentharness.tools.delegate import DelegateTool
 from agentharness.tools.fs import ReadFileTool, SearchFilesTool, WriteFileTool
 from agentharness.tools.http_tool import HttpTool
 from agentharness.tools.mcp_tool import MCPBridge, MCPTool
-from agentharness.tools.memory import MemorySearchTool, MemoryStoreTool
+from agentharness.tools.memory import (
+    MemoryDeleteTool,
+    MemorySearchTool,
+    MemoryStoreTool,
+    MemoryUpdateTool,
+)
 from agentharness.tools.shell import ShellTool
 from agentharness.tools.skills import ListSkillsTool
 
@@ -33,6 +38,8 @@ def create_default_tools(
         MCPTool(bridge=mcp_bridge),
         MemoryStoreTool(),
         MemorySearchTool(),
+        MemoryUpdateTool(),
+        MemoryDeleteTool(),
         ListSkillsTool(),
         DelegateTool(),
     ]

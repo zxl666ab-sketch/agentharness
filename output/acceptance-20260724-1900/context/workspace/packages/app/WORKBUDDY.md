@@ -1,1 +1,0 @@
-Verify each alpha workspace result.

@@ -7,6 +7,7 @@ import json
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from tests.fake_provider import FakeModelAdapter
 
 from agentharness.api.server import create_app
 from agentharness.contracts import (
@@ -17,7 +18,7 @@ from agentharness.contracts import (
     RunStatus,
 )
 from agentharness.harness import Harness
-from agentharness.providers.fake import FakeModelAdapter
+from agentharness.memory_scope import workspace_memory_scope
 from agentharness.security.redaction import Redactor
 
 
@@ -283,7 +284,9 @@ async def test_shell_process_tree_cancel(data_dir, workspace):
 
     await h.cancel(rid)
     result = await asyncio.wait_for(task, timeout=20)
-    assert result.status in (RunStatus.cancelled, RunStatus.completed, RunStatus.failed)
+    assert result.status == RunStatus.require_human
+    invocations = h.list_tool_invocations(rid)
+    assert invocations[-1].status.value == "indeterminate"
     # Process tree dead + registry cleared
     for p in procs:
         try:
@@ -297,11 +300,10 @@ async def test_shell_process_tree_cancel(data_dir, workspace):
 
 
 @pytest.mark.asyncio
-async def test_interrupt_mid_batch_resume_skips_completed(data_dir, workspace):
-    """Interrupt after write completes mid-shell: write stays done, shell stays pending.
-
-    Resume must not re-exec write; must re-run incomplete shell (spot-check shell_on_resume).
-    """
+async def test_interrupt_mid_batch_requires_human_for_unknown_shell_outcome(
+    data_dir, workspace
+):
+    """A completed write is retained and an interrupted shell is never replayed."""
     import sys
 
     h = Harness(data_dir=data_dir)
@@ -372,7 +374,7 @@ async def test_interrupt_mid_batch_resume_skips_completed(data_dir, workspace):
 
     await h.interrupt(rid, "test_interrupt")
     result = await asyncio.wait_for(task, timeout=20)
-    assert result.status in (RunStatus.interrupted, RunStatus.cancelled, RunStatus.failed)
+    assert result.status == RunStatus.require_human
 
     cp = h.storage.load_checkpoint(rid)
     assert cp is not None
@@ -390,12 +392,10 @@ async def test_interrupt_mid_batch_resume_skips_completed(data_dir, workspace):
     resumed = await h.resume(rid)
     shell_on_resume = shell_calls["n"] - shell_before_resume
     assert write_calls["n"] == write_before_resume, "completed write_file re-executed"
-    assert shell_on_resume >= 1, (
-        f"incomplete shell must re-run on resume, shell_on_resume={shell_on_resume}, "
-        f"pending was {cp.pending_tool_calls}"
-    )
+    assert shell_on_resume == 0
     assert (workspace / "once.txt").read_text(encoding="utf-8") == "written-once"
     assert resumed.run_id == rid
+    assert resumed.status == RunStatus.require_human
     h.close()
 
 
@@ -467,8 +467,10 @@ async def test_sse_replay_and_readonly_api(data_dir, workspace):
         ev2 = await client.get(f"/api/runs/{result.run_id}/events?after={mid}")
         assert all(e["global_seq"] > mid for e in ev2.json())
 
-        # Write methods 405
-        for method in ("post", "put", "patch"):
+        # The Web control plane accepts POST /api/runs; an empty request reaches
+        # validation, while unsupported mutation methods remain blocked.
+        assert (await client.post("/api/runs", json={})).status_code == 422
+        for method in ("put", "patch"):
             resp = await getattr(client, method)("/api/runs", json={})
             assert resp.status_code == 405, method
         resp = await client.delete("/api/runs")
@@ -541,6 +543,8 @@ async def test_memory_explicit_only(data_dir, workspace):
         )
     )
     assert result.status == RunStatus.completed
-    hits = h.storage.search_memories("Paris capital")
+    scope = workspace_memory_scope(str(workspace))
+    assert scope is not None
+    hits = h.storage.search_memories("Paris capital", scopes=[scope])
     assert hits
     h.close()

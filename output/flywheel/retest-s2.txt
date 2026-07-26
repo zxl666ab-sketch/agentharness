@@ -1,8 +1,0 @@
-
-status=failed  run_id=ba6a9f4f181f4b898dc052b32781add4  
-session=64c63c5aef1d4ac0b61f924064720b9c  tokens=2014/657  last=109/0  est≈1030
-turns=3  est-fallback
-好的，我来帮你用浏览器搜索并查看结果。                                         
-error: Error code: 429 - {'error': {'message': "You have exceeded today's quota
-for model stepfun-ai/Step-3.7-Flash,  please try again tomorrow, or consider 
-using other models", 'request_id': '86914ed8-e327-4ee4-acd1-675c033a62db'}}

@@ -7,9 +7,10 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from agentharness.api.server import create_app
-from agentharness.contracts import ApprovalMode, RunRequest
+from agentharness.contracts import ApprovalMode, RunRequest, RunStatus
 from agentharness.harness import Harness
 from agentharness.security.redaction import Redactor
+from agentharness.storage.sqlite import Storage
 
 
 def test_sentinel_redaction():
@@ -62,6 +63,53 @@ def test_recursive_redaction_masks_values_under_sensitive_keys():
     assert all(secret not in serialized for secret in secrets)
     assert redacted["budget"]["max_tokens"] == 1234
     assert serialized.count("[REDACTED]") == 2
+
+
+def test_personal_absolute_paths_are_redacted_without_hiding_relative_paths() -> None:
+    redactor = Redactor()
+    text = (
+        r"Windows C:\Users\private\project\notes.txt and D:\work\private-project "
+        "plus /home/private/project/config.json and relative notes/readme.md"
+    )
+    redacted = redactor.redact_public_text(text)
+    assert "C:\\Users\\private" not in redacted
+    assert "D:\\work\\private-project" not in redacted
+    assert "/home/private/project" not in redacted
+    assert redacted.count("[REDACTED_PATH]") == 3
+    assert "notes/readme.md" in redacted
+
+
+def test_persisted_approval_scope_is_redacted(data_dir: Path) -> None:
+    secret = "SECRET_APPROVAL_SCOPE_TOKEN_24680"
+    storage = Storage(data_dir, redactor=Redactor(extra_sentinels=[secret]))
+    try:
+        session_id = storage.create_session("approval-session")
+        storage.create_run(
+            run_id="approval-run",
+            session_id=session_id,
+            root_run_id="approval-run",
+            status=RunStatus.waiting_approval,
+        )
+        storage.save_approval(
+            {
+                "id": "approval",
+                "run_id": "approval-run",
+                "tool_call_id": "call",
+                "tool_name": "http_request",
+                "effect": "network",
+                "invocation_id": "invocation",
+                "arguments_sha256": "a" * 64,
+                "approval_scope": (
+                    "http_request:network:url=https://example.test/"
+                    f"?token={secret}"
+                ),
+            }
+        )
+        scope = storage.list_approvals("approval-run")[0]["approval_scope"]
+        assert secret not in scope
+        assert "REDACTED" in scope
+    finally:
+        storage.close()
 
 
 @pytest.mark.asyncio

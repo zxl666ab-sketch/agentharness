@@ -180,6 +180,20 @@ def test_default_policy_has_empty_allowlist():
     assert policy.allow_cidrs == ()
 
 
+def test_exact_origin_allowance_is_port_scoped_and_revoked():
+    policy = default_policy()
+    with policy.allow_exact_origins(["http://127.0.0.1:8123"]):
+        target = policy.validate("http://127.0.0.1:8123/fixture.txt")
+        assert target.port == 8123
+        assert policy.peer_ip_allowed(
+            "127.0.0.1", "127.0.0.1", scheme="http", port=8123
+        )
+        with pytest.raises(EgressError):
+            policy.validate("http://127.0.0.1:8124/fixture.txt")
+    with pytest.raises(EgressError):
+        policy.validate("http://127.0.0.1:8123/fixture.txt")
+
+
 # -- peer verification (post-connect DNS-rebinding guard) -------------------
 
 

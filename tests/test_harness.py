@@ -4,13 +4,54 @@ import pytest
 
 from agentharness.contracts import (
     ApprovalMode,
+    Checkpoint,
     ModelRequest,
     ModelStreamItem,
     RunRequest,
+    RunStatus,
     StreamItemType,
 )
 from agentharness.harness import Harness
 from agentharness.storage.migrations import SCHEMA_VERSION
+from tests.fake_provider import FakeModelAdapter
+
+
+def test_default_runtime_registers_only_openai(data_dir: Path):
+    harness = Harness(data_dir=data_dir)
+    try:
+        assert list(harness.providers) == ["openai"]
+        assert RunRequest(message="hello").provider == "openai"
+    finally:
+        harness.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_removed_provider_before_mutating_run(data_dir: Path):
+    harness = Harness(data_dir=data_dir)
+    session_id = harness.storage.create_session()
+    run_id = "historical-removed-provider"
+    harness.storage.create_run(
+        run_id=run_id,
+        session_id=session_id,
+        root_run_id=run_id,
+        status=RunStatus.interrupted,
+        provider="removed-provider",
+    )
+    harness.storage.save_checkpoint(
+        Checkpoint(
+            run_id=run_id,
+            phase="model_turn",
+            step=0,
+            messages=[],
+            status=RunStatus.interrupted,
+        )
+    )
+    try:
+        with pytest.raises(RuntimeError, match="uses unavailable provider.*new run"):
+            await harness.resume(run_id)
+        assert harness.get_run(run_id)["status"] == RunStatus.interrupted.value
+    finally:
+        await harness.aclose()
 
 
 def test_harness_expands_tilde_data_dir(tmp_path: Path, monkeypatch):
@@ -57,7 +98,7 @@ async def test_harness_aclose_closes_provider_on_owning_loop(data_dir: Path):
 
 @pytest.mark.asyncio
 async def test_completed_run_releases_transient_engine_state(data_dir: Path, workspace: Path):
-    harness = Harness(data_dir=data_dir)
+    harness = Harness(data_dir=data_dir, providers={"fake": FakeModelAdapter()})
     try:
         result = await harness.run(
             RunRequest(
@@ -80,7 +121,7 @@ async def test_many_completed_runs_leave_no_lingering_engine_state(
     data_dir: Path, workspace: Path
 ):
     """Goal 2: after N runs complete, the RunContext registry is empty (no leak)."""
-    harness = Harness(data_dir=data_dir)
+    harness = Harness(data_dir=data_dir, providers={"fake": FakeModelAdapter()})
     try:
         for i in range(100):
             await harness.run(
@@ -99,7 +140,7 @@ async def test_many_completed_runs_leave_no_lingering_engine_state(
 @pytest.mark.asyncio
 async def test_cleanup_survives_tool_release_exception(data_dir: Path, workspace: Path):
     """Goal 2: a tool whose release_run raises must not leak the run's RunContext."""
-    harness = Harness(data_dir=data_dir)
+    harness = Harness(data_dir=data_dir, providers={"fake": FakeModelAdapter()})
 
     class _ExplodingTool:
         name = "boom"

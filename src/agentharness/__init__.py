@@ -1,4 +1,4 @@
-"""Agent Harness — extensible Python agent runtime with readonly React console."""
+"""Production Agent Runtime with a Web-first control plane."""
 
 from agentharness.contracts import (
     ContextBundle,
@@ -17,46 +17,10 @@ from agentharness.contracts import (
     VerificationDecision,
     VerificationPolicy,
 )
-from agentharness.eval.calibration import CalibrationDataset, JudgeCalibrator
-from agentharness.eval.contracts import (
-    AgentTrace,
-    CalibrationReport,
-    CheckResult,
-    DiagnosisReport,
-    EvaluationPolicy,
-    EvaluationReport,
-    EvidenceRef,
-    GateDecision,
-    ReplaySnapshot,
-    TraceSpan,
-    TraceVersions,
-)
-from agentharness.eval.diagnosis import DiagnosisEngine
-from agentharness.eval.regression import RegressionGate
-from agentharness.eval.replay import OfflineReplay, SnapshotStore
-from agentharness.eval.trusted_judge import JudgeOrchestrator
 from agentharness.harness import Harness
 
 __all__ = [
     "Harness",
-    "OfflineReplay",
-    "SnapshotStore",
-    "AgentTrace",
-    "TraceSpan",
-    "TraceVersions",
-    "EvaluationPolicy",
-    "CheckResult",
-    "EvidenceRef",
-    "EvaluationReport",
-    "DiagnosisReport",
-    "DiagnosisEngine",
-    "ReplaySnapshot",
-    "CalibrationReport",
-    "CalibrationDataset",
-    "GateDecision",
-    "RegressionGate",
-    "JudgeCalibrator",
-    "JudgeOrchestrator",
     "RunRequest",
     "RunResult",
     "ConversationTurn",
@@ -74,4 +38,4 @@ __all__ = [
     "VerificationDecision",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"

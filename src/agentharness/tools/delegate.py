@@ -8,7 +8,9 @@ from agentharness.contracts import (
     ApprovalMode,
     BudgetConfig,
     EffectKind,
+    PricingConfig,
     RunRequest,
+    ShellExecutionConfig,
     ToolContext,
     ToolResult,
     ToolSpec,
@@ -27,7 +29,12 @@ class DelegateTool:
             parameters={
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string", "description": "Subtask for the child agent"},
+                    "task": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200_000,
+                        "description": "Subtask for the child agent",
+                    },
                     "allow_write": {
                         "type": "boolean",
                         "description": "Explicitly grant write permission",
@@ -35,11 +42,14 @@ class DelegateTool:
                     },
                     "tools": {
                         "type": "array",
-                        "items": {"type": "string"},
+                        "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                        "maxItems": 128,
+                        "uniqueItems": True,
                         "description": "Optional tool allow-list for child",
                     },
                 },
                 "required": ["task"],
+                "additionalProperties": False,
             },
             effect=EffectKind.pure,
         )
@@ -91,12 +101,18 @@ class DelegateTool:
         child_req = RunRequest(
             message=task,
             session_id=ctx.session_id,
-            provider=(ctx.metadata or {}).get("provider") or "fake",
+            provider=(ctx.metadata or {}).get("provider") or "openai",
             model=(ctx.metadata or {}).get("model"),
             approval=ctx.approval_mode
             if isinstance(ctx.approval_mode, ApprovalMode)
             else ApprovalMode(str(ctx.approval_mode)),
             budget=budget,
+            pricing=PricingConfig.model_validate(
+                (ctx.metadata or {}).get("pricing") or {}
+            ),
+            shell=ShellExecutionConfig.model_validate(
+                (ctx.metadata or {}).get("shell") or ctx.shell.model_dump(mode="json")
+            ),
             cwd=ctx.cwd,
             extra_dirs=ctx.extra_dirs,
             skills_dirs=(ctx.metadata or {}).get("skills_dirs") or [],

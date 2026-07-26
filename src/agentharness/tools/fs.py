@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from agentharness.contracts import EffectKind, ToolContext, ToolResult, ToolSpec
+from agentharness.contracts import EffectKind, ReplayPolicy, ToolContext, ToolResult, ToolSpec
 from agentharness.security.sandbox import SandboxError, assert_in_workspace
 
 
@@ -39,13 +39,32 @@ class ReadFileTool:
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Relative or absolute path"},
-                    "offset": {"type": "integer", "description": "Start line (0-based)"},
-                    "limit": {"type": "integer", "description": "Max lines"},
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 32_768,
+                        "description": "Relative or absolute path",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10_000_000,
+                        "description": "Start line (0-based)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100_000,
+                        "description": "Max lines",
+                    },
                 },
                 "required": ["path"],
+                "additionalProperties": False,
             },
             effect=EffectKind.workspace_read,
+            replay_policy=ReplayPolicy.safe,
+            parallel_safe=True,
+            max_attempts=2,
         )
 
     async def run(self, ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
@@ -156,10 +175,12 @@ class WriteFileTool:
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"},
+                    "path": {"type": "string", "minLength": 1, "maxLength": 32_768},
+                    "content": {"type": "string", "maxLength": 262_144},
                     "expected_version": {
                         "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
                         "description": (
                             "SHA-256 returned by read_file. Existing files are written only "
                             "when this matches; omitted remains legacy-compatible."
@@ -167,9 +188,56 @@ class WriteFileTool:
                     },
                 },
                 "required": ["path", "content"],
+                "additionalProperties": False,
             },
             effect=EffectKind.workspace_write,
+            replay_policy=ReplayPolicy.reconcile,
         )
+
+    def reconcile(
+        self, ctx: ToolContext, arguments: dict[str, Any]
+    ) -> ToolResult | None:
+        path = arguments.get("path") or ""
+        try:
+            target = assert_in_workspace(
+                path, cwd=ctx.cwd, extra_dirs=ctx.extra_dirs, must_exist=False
+            )
+            if not target.exists():
+                return None
+            expected = str(arguments.get("content") or "")
+            expected_bytes = expected.encode("utf-8")
+            with target.open("rb") as handle:
+                actual = handle.read(len(expected_bytes) + 1)
+            if actual == expected_bytes:
+                version = hashlib.sha256(expected_bytes).hexdigest()
+                return ToolResult(
+                    tool_call_id="",
+                    name="write_file",
+                    content=(
+                        f"Reconciled completed write: {target}\n"
+                        f"file_version sha256={version}"
+                    ),
+                )
+            return ToolResult(
+                tool_call_id="",
+                name="write_file",
+                content="File state differs from the interrupted write",
+                is_error=True,
+                error_code="outcome_indeterminate",
+                error_category="recovery",
+                retryable=False,
+                recovery_hint="Inspect the file before deciding whether to overwrite it.",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(
+                tool_call_id="",
+                name="write_file",
+                content=f"Could not reconcile file write: {exc}",
+                is_error=True,
+                error_code="outcome_indeterminate",
+                error_category="recovery",
+                retryable=False,
+            )
 
     async def run(self, ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
         if not ctx.allow_write:
@@ -240,6 +308,30 @@ class WriteFileTool:
             )
 
 
+def _search_roots(cwd: Path, extra_dirs: list[str] | None) -> list[Path]:
+    """cwd plus any granted extra dirs, de-duplicated and nested paths dropped."""
+    roots: list[Path] = [cwd]
+    for entry in extra_dirs or []:
+        try:
+            candidate = Path(entry).expanduser().resolve()
+        except OSError:
+            continue
+        if not candidate.is_dir():
+            continue
+        if any(candidate == root or root in candidate.parents for root in roots):
+            continue
+        roots.append(candidate)
+    return roots
+
+
+def _display_path(path: Path, cwd: Path) -> str:
+    """Relative to cwd when inside it, else absolute so extra-dir hits are unambiguous."""
+    try:
+        return str(path.relative_to(cwd))
+    except ValueError:
+        return str(path)
+
+
 class SearchFilesTool:
     @property
     def spec(self) -> ToolSpec:
@@ -249,13 +341,22 @@ class SearchFilesTool:
             parameters={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string"},
-                    "glob": {"type": "string", "description": "Optional glob like *.py"},
-                    "max_results": {"type": "integer"},
+                    "query": {"type": "string", "minLength": 1, "maxLength": 16_384},
+                    "glob": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4_096,
+                        "description": "Optional glob like *.py",
+                    },
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 1_000},
                 },
                 "required": ["query"],
+                "additionalProperties": False,
             },
             effect=EffectKind.workspace_read,
+            replay_policy=ReplayPolicy.safe,
+            parallel_safe=True,
+            max_attempts=2,
         )
 
     async def run(self, ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
@@ -280,54 +381,60 @@ class SearchFilesTool:
             )
 
         chunks_seen = 0
-        for dirpath, dirnames, filenames in os.walk(root):
-            # skip common noise
-            dirnames[:] = [
-                d
-                for d in dirnames
-                if d not in {".git", "node_modules", ".venv", "__pycache__", ".agentharness"}
-            ]
-            for fn in filenames:
-                if glob_pat != "*" and not Path(fn).match(glob_pat):
-                    continue
-                fp = Path(dirpath) / fn
-                try:
-                    assert_in_workspace(fp, cwd=ctx.cwd, extra_dirs=ctx.extra_dirs)
-                    with fp.open("r", encoding="utf-8", errors="replace") as handle:
-                        line_number = 1
-                        overlap = ""
-                        while True:
-                            if ctx.cancel_event and ctx.cancel_event.is_set():
-                                return ToolResult(
-                                    tool_call_id="",
-                                    name="search_files",
-                                    content="cancelled",
-                                    is_error=True,
-                                )
-                            segment = handle.readline(64 * 1024)
-                            if not segment:
-                                break
-                            searchable = overlap + segment
-                            if query in searchable:
-                                rel = fp.relative_to(root)
-                                preview = searchable.rstrip("\r\n")[:200]
-                                hits.append(f"{rel}:{line_number}:{preview}")
-                                if len(hits) >= max_results:
+        # Search every readable root, not just cwd: read_file/write_file honour
+        # extra_dirs, so a search that silently skipped them made granted
+        # directories look empty.
+        for search_root in _search_roots(root, ctx.extra_dirs):
+            for dirpath, dirnames, filenames in os.walk(search_root):
+                # skip common noise
+                dirnames[:] = [
+                    d
+                    for d in dirnames
+                    if d not in {".git", "node_modules", ".venv", "__pycache__", ".agentharness"}
+                ]
+                for fn in filenames:
+                    if glob_pat != "*" and not Path(fn).match(glob_pat):
+                        continue
+                    fp = Path(dirpath) / fn
+                    try:
+                        assert_in_workspace(fp, cwd=ctx.cwd, extra_dirs=ctx.extra_dirs)
+                        with fp.open("r", encoding="utf-8", errors="replace") as handle:
+                            line_number = 1
+                            overlap = ""
+                            while True:
+                                if ctx.cancel_event and ctx.cancel_event.is_set():
                                     return ToolResult(
                                         tool_call_id="",
                                         name="search_files",
-                                        content="\n".join(hits),
+                                        content="cancelled",
+                                        is_error=True,
                                     )
-                            if segment.endswith(("\n", "\r")):
-                                line_number += 1
-                                overlap = ""
-                            else:
-                                overlap = searchable[-(len(query) - 1) :] if len(query) > 1 else ""
-                            chunks_seen += 1
-                            if chunks_seen % 128 == 0:
-                                await asyncio.sleep(0)
-                except (SandboxError, OSError, UnicodeError):
-                    continue
+                                segment = handle.readline(64 * 1024)
+                                if not segment:
+                                    break
+                                searchable = overlap + segment
+                                if query in searchable:
+                                    rel = _display_path(fp, root)
+                                    preview = searchable.rstrip("\r\n")[:200]
+                                    hits.append(f"{rel}:{line_number}:{preview}")
+                                    if len(hits) >= max_results:
+                                        return ToolResult(
+                                            tool_call_id="",
+                                            name="search_files",
+                                            content="\n".join(hits),
+                                        )
+                                if segment.endswith(("\n", "\r")):
+                                    line_number += 1
+                                    overlap = ""
+                                else:
+                                    overlap = (
+                                        searchable[-(len(query) - 1) :] if len(query) > 1 else ""
+                                    )
+                                chunks_seen += 1
+                                if chunks_seen % 128 == 0:
+                                    await asyncio.sleep(0)
+                    except (SandboxError, OSError, UnicodeError):
+                        continue
         return ToolResult(
             tool_call_id="",
             name="search_files",

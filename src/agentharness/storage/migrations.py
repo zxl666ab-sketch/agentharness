@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 8
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -150,14 +150,103 @@ MIGRATIONS: dict[int, str] = {
     -- Lets the filter+ORDER BY global_seq run off one index with no temp B-tree.
     CREATE INDEX IF NOT EXISTS idx_events_run_global ON events(run_id, global_seq);
     """,
+    5: """
+    CREATE TABLE IF NOT EXISTS run_leases (
+        run_id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        acquired_at TEXT NOT NULL,
+        heartbeat_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES runs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_run_leases_expires ON run_leases(expires_at);
+
+    CREATE TABLE IF NOT EXISTS run_pins (
+        run_id TEXT PRIMARY KEY,
+        pinned_at TEXT NOT NULL,
+        note TEXT,
+        FOREIGN KEY (run_id) REFERENCES runs(id)
+    );
+    """,
+    6: """
+    ALTER TABLE memories ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';
+    ALTER TABLE memories ADD COLUMN updated_at TEXT;
+    ALTER TABLE memories ADD COLUMN expires_at TEXT;
+    ALTER TABLE memories ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX IF NOT EXISTS idx_memories_scope_hash
+        ON memories(scope, content_hash);
+    CREATE INDEX IF NOT EXISTS idx_memories_scope_expiry
+        ON memories(scope, expires_at);
+    """,
+    7: """
+    ALTER TABLE approvals
+        ADD COLUMN requires_confirmation INTEGER NOT NULL DEFAULT 0;
+    """,
+    8: """
+    ALTER TABLE messages ADD COLUMN tool_result_json TEXT;
+    ALTER TABLE approvals ADD COLUMN invocation_id TEXT;
+    ALTER TABLE approvals ADD COLUMN tool_version TEXT NOT NULL DEFAULT '1';
+    ALTER TABLE approvals ADD COLUMN arguments_sha256 TEXT NOT NULL DEFAULT '';
+    ALTER TABLE approvals ADD COLUMN approval_scope TEXT NOT NULL DEFAULT '';
+    ALTER TABLE approvals ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';
+    UPDATE approvals SET status = 'resolved' WHERE decision IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS tool_invocations (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        step INTEGER NOT NULL,
+        ordinal INTEGER NOT NULL,
+        provider_call_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        tool_version TEXT NOT NULL DEFAULT '1',
+        status TEXT NOT NULL,
+        effect TEXT NOT NULL,
+        replay_policy TEXT NOT NULL,
+        arguments_json TEXT NOT NULL DEFAULT '{}',
+        arguments_sha256 TEXT NOT NULL,
+        approval_id TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        result_json TEXT,
+        error_code TEXT,
+        error_category TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        UNIQUE(run_id, step, ordinal),
+        FOREIGN KEY (run_id) REFERENCES runs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_tool_invocations_run
+        ON tool_invocations(run_id, step, ordinal);
+    CREATE INDEX IF NOT EXISTS idx_tool_invocations_status
+        ON tool_invocations(status, updated_at);
+
+    CREATE TABLE IF NOT EXISTS tool_attempts (
+        id TEXT PRIMARY KEY,
+        invocation_id TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        error_code TEXT,
+        error_category TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        duration_ms REAL,
+        FOREIGN KEY (invocation_id) REFERENCES tool_invocations(id),
+        UNIQUE(invocation_id, attempt)
+    );
+    CREATE INDEX IF NOT EXISTS idx_tool_attempts_invocation
+        ON tool_attempts(invocation_id, attempt);
+    """,
 }
 
 
 def apply_migrations(conn) -> int:
     """Apply pending migrations. `conn` is a sqlite3 connection."""
-    conn.executescript(
-        "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     )
+    conn.commit()
     row = conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
@@ -165,12 +254,19 @@ def apply_migrations(conn) -> int:
     for version in sorted(MIGRATIONS.keys()):
         if version <= current:
             continue
-        conn.executescript(MIGRATIONS[version])
-        conn.execute(
-            "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (str(version),),
-        )
-        conn.commit()
+        script = f"""
+        BEGIN IMMEDIATE;
+        {MIGRATIONS[version]}
+        INSERT INTO schema_meta(key, value)
+        VALUES('schema_version', '{version}')
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+        COMMIT;
+        """
+        try:
+            conn.executescript(script)
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
         current = version
     return current

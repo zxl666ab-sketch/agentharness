@@ -10,6 +10,8 @@ from typing import Any
 from agentharness.contracts import (
     Message,
     MessageRole,
+    ModelRequest,
+    StreamItemType,
     ToolResult,
     VerificationCandidate,
     VerificationCheck,
@@ -107,112 +109,93 @@ class VerificationLoop:
         policy: VerificationPolicy,
         check: VerificationCheck,
     ) -> tuple[VerificationFailure | None, dict[str, Any]]:
-        if check.kind == "eval_assert":
-            return self._eval_assert(candidate, check)
+        if check.kind == "output":
+            return self._output_check(candidate, check)
         if check.kind == "file":
             return self._file_check(candidate, check)
         if check.kind == "command":
             return await self._command_check(candidate, check)
         return await self._ai_check(candidate, policy, check)
 
-    def _eval_assert(
+    def _output_check(
         self, candidate: VerificationCandidate, check: VerificationCheck
     ) -> tuple[VerificationFailure | None, dict[str, Any]]:
-        # Lazy imports avoid evaluator -> Harness -> RunEngine import cycles.
-        from agentharness.eval.contracts import AgentTrace, TraceSpan
-        from agentharness.eval.dataset import AssertionSpec, EvalCase
-        from agentharness.eval.trajectory import TrajectoryEvaluator, policy_from_assertions
-
-        raw = check.assertions or candidate.eval_assert or {}
-        try:
-            assertions = AssertionSpec.model_validate(raw)
-        except Exception as exc:  # noqa: BLE001
+        raw = check.assertions or candidate.output_assertions or {}
+        if not isinstance(raw, dict):
             failure = VerificationFailure(
-                validator="eval_assert",
+                validator="output",
                 error_code="invalid_assertion",
-                message=f"Invalid eval assertion: {exc}",
+                message="Deterministic assertions must be an object.",
                 retryable=False,
                 recovery_hint="Fix the Verification Policy assertion schema.",
             )
             return failure, {"assertions": raw}
-        # Validate through the existing DSL contract, then interpret through the
-        # canonical policy/evaluator used by offline replay and CI.
-        EvalCase.model_validate(
-            {
-                "id": f"verify:{candidate.run_id}",
-                "prompt": candidate.goal,
-                "assert": assertions.model_dump(mode="json", by_alias=True),
-            }
-        )
-        policy_v2 = policy_from_assertions(
-            assertions, policy_id=f"verification:{candidate.run_id}"
-        )
-        if candidate.trace is not None:
-            trace = AgentTrace.model_validate(candidate.trace)
-        else:
-            spans = [
-                TraceSpan(
-                    trace_id=f"candidate:{candidate.run_id}",
-                    span_id=f"candidate-tool:{index}",
-                    run_id=candidate.run_id,
-                    kind="tool",
-                    name=name,
-                    status="completed",
-                    sequence_start=index + 1,
-                    sequence_end=index + 1,
-                    tool_call_id=f"candidate-call:{index}",
-                    tool_name=name,
-                )
-                for index, name in enumerate(candidate.tools_ordered)
-            ]
-            trace = AgentTrace(
-                trace_id=f"candidate:{candidate.run_id}",
-                run_id=candidate.run_id,
-                status="completed",
-                completeness="partial",
-                partial_reasons=["verification_candidate_without_persisted_trace"],
-                final_output=candidate.output,
-                usage=candidate.usage,
-                steps=candidate.steps,
-                duration_ms=candidate.latency_s * 1000.0,
-                messages=candidate.messages,
-                spans=spans,
-                event_count=1,
-                metadata={"cwd": candidate.cwd},
+
+        def string_list(name: str) -> list[str]:
+            value = raw.get(name, [])
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise ValueError(f"{name} must be a list of strings")
+            return value
+
+        try:
+            required = string_list("contains")
+            forbidden = string_list("not_contains")
+            expected_tools = string_list("tools_ordered")
+        except ValueError as exc:
+            return (
+                VerificationFailure(
+                    validator="output",
+                    error_code="invalid_assertion",
+                    message=str(exc),
+                    retryable=False,
+                    recovery_hint="Fix the Verification Policy assertion schema.",
+                ),
+                {"assertions": raw},
             )
-            policy_v2 = policy_v2.model_copy(
-                update={
-                    "require_tool_pairing": False,
-                    "safety": policy_v2.safety.model_copy(
-                        update={"forbid_unapproved_destructive": False}
+
+        missing = [needle for needle in required if needle not in candidate.output]
+        present_forbidden = [needle for needle in forbidden if needle in candidate.output]
+        reasons: list[str] = []
+        if missing:
+            reasons.append(f"output is missing required text: {missing}")
+        if present_forbidden:
+            reasons.append(f"output contains forbidden text: {present_forbidden}")
+        if expected_tools and candidate.tools_ordered != expected_tools:
+            reasons.append(
+                f"expected tools {expected_tools!r}, actual {candidate.tools_ordered!r}"
+            )
+        max_steps = raw.get("max_steps")
+        if max_steps is not None:
+            if not isinstance(max_steps, int) or max_steps < 0:
+                return (
+                    VerificationFailure(
+                        validator="output",
+                        error_code="invalid_assertion",
+                        message="max_steps must be a non-negative integer",
+                        retryable=False,
                     ),
-                }
-            )
-        report = TrajectoryEvaluator().evaluate(trace, policy_v2)
-        failed = [check for check in report.checks if check.status in {"failed", "error"}]
-        reasons = [
-            check.message
-            or f"{check.id}: expected {check.expected!r}, actual {check.actual!r}"
-            for check in failed
-        ]
+                    {"assertions": raw},
+                )
+            if candidate.steps > max_steps:
+                reasons.append(f"steps {candidate.steps} exceed maximum {max_steps}")
         evidence = {
-            "passed": report.passed,
-            "score": report.score,
+            "passed": not reasons,
             "reasons": reasons,
-            "report": report.model_dump(mode="json"),
+            "contains": {needle: needle not in missing for needle in required},
+            "not_contains": {
+                needle: needle not in present_forbidden for needle in forbidden
+            },
+            "tools_ordered": candidate.tools_ordered,
+            "steps": candidate.steps,
         }
-        if report.passed:
+        if not reasons:
             return None, evidence
         return (
             VerificationFailure(
-                validator="eval_assert",
+                validator="output",
                 error_code="assertion_failed",
                 message="; ".join(reasons) or "Deterministic assertion failed.",
-                evidence=self.redactor.redact_obj(
-                    report.first_divergence.model_dump(mode="json")
-                    if report.first_divergence
-                    else {}
-                ),
+                evidence=self.redactor.redact_obj(evidence),
                 retryable=True,
                 recovery_hint="Correct the candidate so every deterministic assertion passes.",
             ),
@@ -378,21 +361,52 @@ class VerificationLoop:
                 "Evaluator adapter must be isolated from the executing adapter.",
                 code="evaluator_not_independent",
             )
+        judge_prompt = json.dumps(
+            {
+                "goal": candidate.goal,
+                "candidate_output": candidate.output,
+                "steps": candidate.steps,
+                "tools_ordered": candidate.tools_ordered,
+                "instruction": (
+                    "Return JSON with dimensions.task_completion/correctness/completeness "
+                    "objects containing score 0..1, plus confidence, "
+                    "hard_safety_violation, failure_category, evidence and improvements."
+                ),
+            },
+            ensure_ascii=False,
+        )
         try:
-            from agentharness.eval.ai_judge import judge_trajectory
-
-            judged = await judge_trajectory(
-                adapter,
-                model=policy.evaluator_model,
-                trajectory={
-                    "goal": candidate.goal,
-                    "output": candidate.output,
-                    "steps": candidate.steps,
-                    "tools_ordered": candidate.tools_ordered,
-                    "messages": [m.model_dump(mode="json") for m in candidate.messages],
-                },
-                redactor=self.redactor,
-            )
+            chunks: list[str] = []
+            async for item in adapter.stream(
+                ModelRequest(
+                    model=policy.evaluator_model,
+                    system="You are an independent read-only verifier. Return JSON only.",
+                    messages=[Message(role=MessageRole.user, content=judge_prompt)],
+                    tools=[],
+                    temperature=0,
+                    max_tokens=2_000,
+                )
+            ):
+                if item.type == StreamItemType.text_delta and item.text:
+                    chunks.append(item.text)
+                elif item.type == StreamItemType.error:
+                    raise RuntimeError(item.error or "evaluator provider error")
+            raw_verdict = "".join(chunks).strip()
+            if raw_verdict.startswith("```"):
+                raw_verdict = raw_verdict.strip("`")
+                if raw_verdict.startswith("json"):
+                    raw_verdict = raw_verdict[4:].lstrip()
+            verdict = json.loads(raw_verdict)
+            dimensions = verdict.get("dimensions") or {}
+            scores: list[float] = []
+            for name in ("task_completion", "correctness", "completeness"):
+                raw_score = (dimensions.get(name) or {}).get("score")
+                if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+                    raise ValueError(f"evaluator dimension {name} has no numeric score")
+                scores.append(float(raw_score))
+            if any(score < 0 or score > 1 for score in scores):
+                raise ValueError("evaluator scores must be between 0 and 1")
+            core = sum(scores) / len(scores)
         except Exception as exc:  # noqa: BLE001
             return (
                 VerificationFailure(
@@ -404,36 +418,31 @@ class VerificationLoop:
                 ),
                 {"provider": provider_name},
             )
-        verdict = judged.verdict
-        core = (
-            verdict.dimensions.task_completion.score
-            + verdict.dimensions.correctness.score
-            + verdict.dimensions.completeness.score
-        ) / 3
+        hard_safety = bool(verdict.get("hard_safety_violation"))
+        improvements = [str(item) for item in (verdict.get("improvements") or [])]
         evidence = {
             "provider": provider_name,
             "score": core,
-            "confidence": verdict.confidence,
-            "hard_safety_violation": verdict.hard_safety_violation,
-            "failure_category": verdict.failure_category,
-            "evidence": verdict.evidence,
-            "improvements": verdict.improvements,
-            "usage": judged.usage.model_dump(),
+            "confidence": verdict.get("confidence"),
+            "hard_safety_violation": hard_safety,
+            "failure_category": verdict.get("failure_category"),
+            "evidence": verdict.get("evidence") or [],
+            "improvements": improvements,
         }
-        if core >= check.min_score and not verdict.hard_safety_violation:
+        if core >= check.min_score and not hard_safety:
             return None, evidence
         return (
             VerificationFailure(
                 validator="ai",
                 error_code=(
                     "hard_safety_violation"
-                    if verdict.hard_safety_violation
+                    if hard_safety
                     else "ai_score_below_threshold"
                 ),
                 message=f"Independent evaluator score {core:.3f} is below {check.min_score:.3f}.",
                 evidence=self.redactor.redact_obj(evidence),
-                retryable=not verdict.hard_safety_violation,
-                recovery_hint=(verdict.improvements[0] if verdict.improvements else "Correct the cited gaps."),
+                retryable=not hard_safety,
+                recovery_hint=(improvements[0] if improvements else "Correct the cited gaps."),
             ),
             evidence,
         )

@@ -9,10 +9,10 @@ import pytest
 from agentharness.contracts import EffectKind, ToolCall
 from agentharness.engine.runtime import RunEngine
 from agentharness.engine.scheduler import EffectScheduler
-from agentharness.providers.fake import FakeModelAdapter
 from agentharness.security.redaction import Redactor
 from agentharness.storage.sqlite import Storage
 from agentharness.tools.browser import BrowserTool
+from tests.fake_provider import FakeModelAdapter
 
 
 def test_resolve_browser_context_defaults_to_default(data_dir):
