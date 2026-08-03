@@ -173,6 +173,7 @@ def _pdf_font(locale: str) -> str:
         candidates = (
             Path("C:/Windows/Fonts/simhei.ttf"),
             Path("C:/Windows/Fonts/simsunb.ttf"),
+            Path("/usr/share/fonts/truetype/arphic/ukai.ttc"),
             Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttf"),
             Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
             Path("/Library/Fonts/Arial Unicode.ttf"),
