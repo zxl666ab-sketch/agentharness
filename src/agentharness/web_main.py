@@ -27,7 +27,7 @@ def _is_loopback(host: str) -> bool:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentharness",
-        description="Start the Web Agent workspace.",
+        description="启动采价台 Web 工作台。",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8741)
@@ -63,7 +63,7 @@ def main() -> None:
             "--allow-remote-execution and an authenticating proxy."
         )
     url = f"http://{args.host}:{args.port}"
-    print(f"Agent Harness Web: {url}")
+    print(f"采价台 Web: {url}")
     print("Workspaces: " + ", ".join(str(root) for root in roots))
     if not args.no_open and _is_loopback(args.host):
         timer = threading.Timer(0.8, webbrowser.open, args=(url,))

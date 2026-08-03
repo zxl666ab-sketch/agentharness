@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "scenario": "human_review_then_approval",
+  "synthetic_data": true,
+  "service_version": "0.3.0",
+  "reference": "RFQ-20260727-F7611E",
+  "input": {
+    "quote_count": 3,
+    "quote_sha256": {
+      "q-alpha": "b7130711cc72518ebe7669e2269fd8043d8bf3ae6459158d6d956cc8627cf00f",
+      "q-beta": "1fb7fe71600498310c09b6146982aba576bc1a5cf8a29f6a907c360f7e7cab54",
+      "q-theta": "3dfb6c2e4913d1bcedb09e9fdbf15ea36e6717a576a199043e0a14f2f9750ebf"
+    },
+    "human_correction": {
+      "case_id": "q-theta",
+      "field": "supplier_name",
+      "value": "星河包装"
+    }
+  },
+  "outcome": {
+    "request_status": "approved",
+    "selected_supplier": "华东优包",
+    "landed_total_cny": "5200.00",
+    "landed_unit_cny": "0.5200",
+    "report_sha256": "3cd941860f229ab9c88bcf36ad67423bfc2270dc10c7a18b2d3992697e044bd0",
+    "analysis_input_sha256": "c612eaa5cd0963d0effebc4140db1eea4986010c8f61cd114bb007fb8cbcfd6b"
+  },
+  "runtime": {
+    "run_count": 1,
+    "checkpoint_status": "completed",
+    "conclusion": "passed",
+    "provider": "procurement_fake",
+    "model_turns": 5,
+    "tool_invocations": [
+      "procurement_capture_requirement",
+      "procurement_execute_analysis",
+      "procurement_approve_supplier"
+    ],
+    "approval": "allow_once",
+    "artifact_count": 5,
+    "total_tokens": 212,
+    "estimated_cost_usd": 0
+  },
+  "screenshots": {
+    "comparison.png": "325ace625ee99b4d56bc5a174027ec1fcb0bf3e9026beb40199d5667c21b36d9",
+    "approved-report.png": "8f58a52f26815710cd81bdf1242adabd73f0f25b8842cf98b0ad274ac881cc48",
+    "runtime-audit.png": "77baa805144b15ee54b38ff520ab539a893f44cc7d95be6847d5241023dfd3d9"
+  },
+  "browser_console": {
+    "errors": 0,
+    "warnings": 0
+  }
+}

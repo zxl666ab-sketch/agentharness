@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -78,6 +79,226 @@ async def test_web_starts_background_run_and_returns_persisted_identity(data_dir
         assert metadata["source"] == "web"
         messages = (await client.get(f"/api/runs/{accepted['run_id']}/messages")).json()
         assert any(message["content"] == "created from web" for message in messages)
+        report = (await client.get(f"/api/runs/{accepted['run_id']}/report")).json()
+        assert report["conclusion"] == {
+            "status": "unverified",
+            "label": "运行结束",
+            "verified": False,
+            "reason": "该历史运行没有配置验收规则，因此不标记为已完成。",
+        }
+        assert report["verification"]["configured"] is False
+
+    await app.state.run_supervisor.aclose()
+    await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_web_maps_acceptance_rules_and_reports_persisted_evidence(
+    data_dir, workspace
+):
+    (workspace / "proof.txt").write_text("file proof", encoding="utf-8")
+    command = f'"{sys.executable}" -c "print(\'command-proof\')"'
+    harness = _web_harness(data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/runs",
+            json={
+                "message": "[fake:text]accepted output",
+                "allow_write": True,
+                "verification": {
+                    "output": {
+                        "contains": ["accepted"],
+                        "not_contains": ["rejected"],
+                    },
+                    "files": [
+                        {"path": "proof.txt", "exists": True, "contains": ["file proof"]}
+                    ],
+                    "commands": [
+                        {"command": command, "contains": ["command-proof"]}
+                    ],
+                    "max_retries": 0,
+                    "on_failure": "failed",
+                },
+            },
+        )
+        assert response.status_code == 202
+        run_id = response.json()["run_id"]
+        await _wait_for_status(client, run_id, {"waiting_approval"})
+        approvals = (await client.get(f"/api/runs/{run_id}/approvals")).json()
+        pending = next(item for item in approvals if item["status"] == "pending")
+        assert pending["tool_name"] == "shell"
+        decision = await client.post(
+            f"/api/approvals/{pending['id']}/decision",
+            json={
+                "decision": "allow_once",
+                "invocation_id": pending["invocation_id"],
+                "arguments_sha256": pending["arguments_sha256"],
+            },
+        )
+        assert decision.status_code == 200
+        await _wait_for_status(client, run_id, {"completed"})
+
+        report_response = await client.get(f"/api/runs/{run_id}/report")
+        assert report_response.status_code == 200
+        report = report_response.json()
+        assert report["conclusion"]["status"] == "passed"
+        assert report["conclusion"]["verified"] is True
+        assert [item["kind"] for item in report["verification"]["policy"]["validators"]] == [
+            "output",
+            "file",
+            "command",
+        ]
+        assert report["verification"]["attempts"][0]["passed"] is True
+        assert set(report["verification"]["attempts"][0]["evidence"]) == {
+            "0:output",
+            "1:file",
+            "2:command",
+        }
+        assert len(report["tools"]) == 1
+        assert report["tools"][0]["tool_name"] == "shell"
+        assert len(report["approvals"]) == 1
+        assert report["approvals"][0]["decision"] == "allow_once"
+        assert report["usage"]["total_tokens"] > 0
+        assert len(report["evidence_sha256"]) == 64
+
+    await app.state.run_supervisor.aclose()
+    await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_acceptance_report_survives_runtime_restart(data_dir, workspace):
+    harness = _web_harness(data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/runs",
+            json={
+                "message": "[fake:text]wrong output",
+                "verification": {
+                    "output": {"contains": ["required marker"]},
+                    "max_retries": 0,
+                    "on_failure": "failed",
+                },
+            },
+        )
+        run_id = response.json()["run_id"]
+        failed = await _wait_for_status(client, run_id, {"failed"})
+        assert "verification failed" in failed["error"]
+        before = (await client.get(f"/api/runs/{run_id}/report")).json()
+        assert before["conclusion"]["status"] == "failed"
+        assert before["verification"]["attempts"][0]["passed"] is False
+        assert before["verification"]["failure_reasons"] == [
+            "output is missing required text: ['required marker']"
+        ]
+
+    await app.state.run_supervisor.aclose()
+    await harness.aclose()
+
+    restored_harness = _web_harness(data_dir)
+    restored_app = create_app(harness=restored_harness, workspace_roots=[workspace])
+    restored_transport = ASGITransport(app=restored_app)
+    async with AsyncClient(
+        transport=restored_transport, base_url="http://test"
+    ) as restored_client:
+        restored_run = (await restored_client.get(f"/api/runs/{run_id}")).json()
+        after = (await restored_client.get(f"/api/runs/{run_id}/report")).json()
+        assert restored_run["status"] == "failed"
+        assert after["conclusion"] == before["conclusion"]
+        assert after["verification"] == before["verification"]
+        assert after["evidence_sha256"] == before["evidence_sha256"]
+
+    await restored_app.state.run_supervisor.aclose()
+    await restored_harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_web_can_route_exhausted_acceptance_to_human_review(data_dir, workspace):
+    harness = _web_harness(data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/runs",
+            json={
+                "message": "[fake:text]not accepted",
+                "verification": {
+                    "output": {"contains": ["required"]},
+                    "max_retries": 0,
+                    "on_failure": "require_human",
+                },
+            },
+        )
+        run_id = response.json()["run_id"]
+        await _wait_for_status(client, run_id, {"require_human"})
+        report = (await client.get(f"/api/runs/{run_id}/report")).json()
+        assert report["conclusion"]["status"] == "needs_review"
+        assert report["conclusion"]["label"] == "需要人工处理"
+        assert report["verification"]["attempts"][0]["action"] == "require_human"
+
+    await app.state.run_supervisor.aclose()
+    await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_run_report_links_persisted_tool_artifacts(data_dir, workspace):
+    (workspace / "large.txt").write_text("artifact evidence\n" * 1_000, encoding="utf-8")
+    harness = _web_harness(data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/runs",
+            json={
+                "message": '[fake:tools]read_file\n{"path":"large.txt"}',
+            },
+        )
+        run_id = response.json()["run_id"]
+        await _wait_for_status(client, run_id, {"completed"})
+        report = (await client.get(f"/api/runs/{run_id}/report")).json()
+        artifact_id = report["tools"][0]["result"]["artifact_id"]
+        assert artifact_id
+        linked = next(item for item in report["artifacts"] if item["id"] == artifact_id)
+        assert linked["sha256"]
+        artifact = await client.get(f"/api/artifacts/{artifact_id}")
+        assert artifact.status_code == 200
+        assert "artifact evidence" in artifact.json()["content"]
+
+    await app.state.run_supervisor.aclose()
+    await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_web_rejects_unsafe_or_ungoverned_acceptance_rules(data_dir, workspace):
+    harness = _web_harness(data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        empty = await client.post(
+            "/api/runs",
+            json={"message": "no", "verification": {"output": {}}},
+        )
+        traversal = await client.post(
+            "/api/runs",
+            json={
+                "message": "no",
+                "verification": {"files": [{"path": "../outside.txt"}]},
+            },
+        )
+        command_without_write = await client.post(
+            "/api/runs",
+            json={
+                "message": "no",
+                "verification": {"commands": [{"command": "echo proof"}]},
+            },
+        )
+
+        assert empty.status_code == 422
+        assert traversal.status_code == 422
+        assert command_without_write.status_code == 400
+        assert harness.list_runs() == []
 
     await app.state.run_supervisor.aclose()
     await harness.aclose()
@@ -129,6 +350,12 @@ async def test_web_approval_unblocks_governed_write(data_dir, workspace):
 
         await _wait_for_status(client, run_id, {"completed"})
         assert (workspace / "from-web.txt").read_text(encoding="utf-8") == "approved"
+        report = (await client.get(f"/api/runs/{run_id}/report")).json()
+        assert report["workspace_changes"][0]["path"] == "from-web.txt"
+        assert report["workspace_changes"][0]["changed"] is True
+        assert len(report["workspace_changes"][0]["resulting_version"]) == 64
+        assert report["tools"][0]["tool_name"] == "write_file"
+        assert report["approvals"][0]["decision"] == "allow_once"
         duplicate = await client.post(
             f"/api/approvals/{pending['id']}/decision",
             json={

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -79,6 +80,19 @@ class StorageCore:
         with self.lock:
             self.conn.close()
         self.reset_readers()
+
+    @contextmanager
+    def transaction(self):  # type: ignore[no-untyped-def]
+        with self.lock:
+            if self.conn.in_transaction:
+                raise RuntimeError("nested storage transactions are not supported")
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+                self.conn.execute("COMMIT")
+            except Exception:
+                self.conn.execute("ROLLBACK")
+                raise
 
     def integrity_check(self) -> str:
         with self.lock:

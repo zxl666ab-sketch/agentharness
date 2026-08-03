@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agentharness.storage.migrations import MIGRATIONS, apply_migrations
+from agentharness.storage.migrations import MIGRATIONS, SCHEMA_VERSION, apply_migrations
 from agentharness.storage.sqlite import Storage
 
 
@@ -52,7 +52,7 @@ def test_failed_migration_rolls_back_ddl_and_schema_version(
         assert "partial_column" not in columns
         assert version == ("5",)
 
-        assert apply_migrations(conn) == 8
+        assert apply_migrations(conn) == SCHEMA_VERSION
     finally:
         conn.close()
 
@@ -84,7 +84,7 @@ def test_v5_memory_data_survives_v6_forward_migration(tmp_path: Path) -> None:
     storage = Storage(tmp_path)
     try:
         row = storage.get_memory("historical-memory")
-        assert storage.schema_version() == 8
+        assert storage.schema_version() == SCHEMA_VERSION
         assert row is not None
         assert row["content"] == "historical migration fact"
         assert row["content_hash"]
@@ -121,7 +121,7 @@ def test_v6_approvals_gain_confirmation_flag(tmp_path: Path) -> None:
     storage = Storage(tmp_path)
     try:
         approvals = storage.list_approvals("run")
-        assert storage.schema_version() == 8
+        assert storage.schema_version() == SCHEMA_VERSION
         assert approvals[0]["requires_confirmation"] is False
     finally:
         storage.close()
@@ -147,10 +147,34 @@ def test_v7_gains_durable_tool_execution_tables(tmp_path: Path) -> None:
             row[1]
             for row in storage._conn.execute("PRAGMA table_info(approvals)").fetchall()  # noqa: SLF001
         }
-        assert storage.schema_version() == 8
+        assert storage.schema_version() == SCHEMA_VERSION
         assert {"tool_invocations", "tool_attempts"} <= tables
         assert "tool_result_json" in message_columns
         assert {"invocation_id", "arguments_sha256", "approval_scope", "status"} <= approval_columns
+    finally:
+        storage.close()
+
+
+def test_v8_gains_procurement_workflow_tables(tmp_path: Path) -> None:
+    conn = _database_at_version(tmp_path / "agentharness.db", 8)
+    conn.close()
+
+    storage = Storage(tmp_path)
+    try:
+        tables = {
+            row[0]
+            for row in storage._conn.execute(  # noqa: SLF001 - migration evidence
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        assert storage.schema_version() == SCHEMA_VERSION
+        assert {
+            "procurement_requests",
+            "procurement_quotes",
+            "procurement_comparison_snapshots",
+            "procurement_decisions",
+            "procurement_audit_events",
+        } <= tables
     finally:
         storage.close()
 

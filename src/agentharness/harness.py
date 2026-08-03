@@ -242,7 +242,11 @@ class Harness:
             for message in self.storage.get_messages(run["id"]):
                 if message.role == MessageRole.user and not user_content:
                     user_content = message.content or ""
-                elif message.role == MessageRole.assistant and message.content:
+                elif (
+                    message.role == MessageRole.assistant
+                    and message.content
+                    and not message.tool_calls
+                ):
                     assistant_parts.append(message.content)
             assistant_content = "".join(assistant_parts) or str(
                 run.get("output_summary") or ""

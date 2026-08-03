@@ -13,7 +13,7 @@ export function statusLabel(status?: string | null): string {
     pending: "等待中",
     running: "运行中",
     waiting_approval: "等待批准",
-    completed: "已完成",
+    completed: "运行结束",
     failed: "失败",
     cancelled: "已停止",
     interrupted: "已中断",
@@ -81,7 +81,9 @@ export function eventTone(event: EventRow): "success" | "warning" | "danger" | "
     return event.payload.is_error ? "danger" : "success";
   }
   if (type === "verification_result") {
-    return event.payload.passed === false ? "danger" : "success";
+    if (event.payload.passed === true || event.payload.action === "pass") return "success";
+    if (event.payload.action === "retry") return "warning";
+    return "danger";
   }
   if (type === "approval_resolved") {
     return event.payload.decision === "deny" ? "danger" : "success";

@@ -1,87 +1,92 @@
-# Architecture
+# 采价台架构
 
-Agent Harness v0.3 has one product path: the browser calls a narrow FastAPI control plane, which calls the Python Agent Runtime directly.
+采价台的产品入口是采购任务工作台。采购业务域拥有需求、报价、字段校对、成本、比较快照和供应商决定；Agent Harness 继续拥有 Run、Checkpoint、Approval、Artifact、事件和受治理工具执行。
 
 ```mermaid
 flowchart LR
-    B["Browser"] --> API["Web control plane"]
-    API --> SUP["Run supervisor + approval broker"]
-    SUP --> H["Harness"]
-    H --> E["RunEngine"]
-    E --> C["ContextPlanner"]
-    E --> V["VerificationLoop"]
-    E --> P["OpenAI adapter"]
-    E --> T["Governed tools"]
-    T --> S["Security policies"]
-    E --> DB["SQLite + artifacts"]
-    DB --> SSE["Events / SSE"]
-    SSE --> B
+    B["采购工作台"] --> API["Procurement API"]
+    API --> PS["ProcurementService"]
+    PS --> PX["受限 XLSX / PDF 解析"]
+    PS --> COST["Decimal 成本与硬约束"]
+    PS --> PDB["采购 SQLite 仓储"]
+    PS --> H["Harness 审计执行层"]
+    H --> RUN["Run + Checkpoint + Events"]
+    H --> APPROVAL["一次性人工 Approval"]
+    H --> ART["内容寻址 Artifacts"]
+    PDB --> REPORT["可复现采购报告"]
+    RUN --> REPORT
+    APPROVAL --> REPORT
+    ART --> REPORT
 ```
 
-## Boundaries
+## 责任边界
 
-| Boundary | Responsibility |
+| 边界 | 责任 |
 |---|---|
-| `Harness` | Dependency composition, run/resume/cancel and stable read queries |
-| `RunEngine` | Agent state machine: model turns, budgets, OpenAI retry, verification orchestration and process control |
-| `RunContext` registry (`engine/run_state.py`) | All per-run in-memory state, created and torn down atomically |
-| `EventEmitter` (`engine/events.py`) | Event envelopes, persisted fan-out to observers, text-delta buffering |
-| `LeaseManager` (`engine/lease.py`) | Single-writer run lease acquire/heartbeat/release |
-| `RunLifecycle` (`engine/lifecycle.py`) | Checkpoints, resume invariants and terminal state |
-| `ToolInvocationExecutor` (`engine/tool_execution.py`) | Governed tool batches: validation, approvals, effect-aware scheduling, retry/reconcile recovery, result bounding |
-| `RunSpawner` | Narrow surface tools get via `ToolContext.harness`: storage + run + child_run_ids |
-| `ContextPlanner` | Authorized context sources, token budgeting, compaction and manifests |
-| Auto-compaction (`engine/compaction.py`) | Threshold-triggered selection of old message groups, bounded summarization call, rolling-summary state applied through the planner |
-| `VerificationLoop` | Deterministic output, file, governed command and independent-model checks |
-| OpenAI adapter | Normalized async `stream(ModelRequest)` contract for OpenAI and compatible gateways |
-| Tool | Backward-compatible `ToolSpec`/`run` plus schema, timeout, replay and concurrency policy |
-| `Storage` | Stable facade over per-domain repos (`storage/*.py`) sharing one `StorageCore` (writer lock + per-thread readers) |
-| `WebRunSupervisor` | Background task ownership, configured workspace roots and Web approval futures |
-| FastAPI | Narrow local control plane and SSE; no Agent logic |
+| Procurement Web | 需求创建、报价上传、证据校对、供应商比较、人工审批和报告；不提供通用聊天入口 |
+| `api/procurement.py` | 公共请求模型、大小限制、Base64 文件边界和采购端点错误映射 |
+| `procurement/parsing.py` | 不可信文件资源限制、XLSX/PDF 文本解析、字段类型、来源定位和置信度 |
+| `procurement/costing.py` | 唯一金额实现：单位、税率、汇率、运费、MOQ、交期、规格、发票、预算、有效期和排序 |
+| `procurement/service.py` | 业务状态机、快照失效、正式审批、业务审计和 Harness 关联 |
+| `storage/procurement.py` | 采购表的唯一 SQL 所有者，共用 `StorageCore` 的 WAL 与写锁 |
+| `Harness` | Agent Runtime 依赖组合、Run/Checkpoint/Approval/Artifact/事件和稳定读取接口 |
+| `RunEngine` | 保留的模型循环、预算、恢复、验证和受治理工具执行；不参与采购金额计算 |
 
-## Run lifecycle
+## 对话式采购生命周期
 
 ```mermaid
 sequenceDiagram
-    participant Browser
-    participant API
-    participant Supervisor
-    participant Engine
-    participant Provider
-    participant Tool
-    Browser->>API: POST /api/runs
-    API->>Supervisor: start(CreateRunBody)
-    Supervisor->>Engine: run(RunRequest, run_id)
-    API-->>Browser: 202 run_id/session_id
-    loop bounded model turns
-        Engine->>Provider: normalized stream
-        Provider-->>Engine: text / tool calls / usage
-        Engine-->>Browser: persisted SSE events
-        alt governed effect
-            Engine-->>Browser: approval_requested
-            Browser->>API: approval decision
-            API-->>Engine: resolve approval future
-        end
-        Engine->>Tool: governed execution
-        Tool-->>Engine: structured result
+    participant Buyer as 采购员
+    participant Web as Web 工作台
+    participant Agent as ProcurementAgent
+    participant Harness as Harness
+    participant Domain as ProcurementService
+    participant Store as SQLite + Artifacts
+
+    Buyer->>Web: 描述采购目标并批量上传报价
+    Web->>Domain: 原子创建 request、session 与暂存附件
+    Web->>Agent: 启动采购 Run
+    Agent->>Harness: Harness.run(RunRequest)
+    Harness->>Domain: capture_requirement
+    Domain->>Domain: execute_analysis_pipeline
+    Domain->>Store: 解析 / 匹配 / 历史 / 比价 / 复算的分步审计
+    alt 缺失、低置信度或跨文档冲突
+        Harness->>Store: require_human Checkpoint
+        Harness-->>Web: 指向具体报价字段的复核请求
+        Buyer->>Web: 在结构化面板提交字段和值
+        Web->>Domain: 人工 correction，记录 actor 与原始证据
+        Buyer->>Web: 重新开始比价
+        Web->>Agent: analyze 原 run_id
+        Agent->>Harness: Harness.resume(run_id)
+        Harness->>Domain: execute_analysis_pipeline
     end
-    Engine-->>Browser: terminal event
+    Domain->>Store: 不可变比价快照 + input_sha256
+    Harness-->>Web: 推荐解释并请求人工选择
+    Buyer->>Web: 基于当前快照确认供应商
+    Agent->>Harness: resume 并发起 destructive tool Approval
+    Web->>Harness: allow_once
+    Harness->>Domain: 写入正式供应商决定
+    Domain-->>Web: 可审计采购报告
 ```
 
-The API generates the run and session identities before scheduling work, so a browser receives a stable handle immediately. Shutdown interrupts owned runs before closing providers, tools and SQLite.
+每个任务稳定关联 `session_id`、`purchase_request_id` 和 `run_id`。模型只能调用 `procurement_read_request`、`procurement_capture_requirement`、`procurement_execute_analysis` 和 `procurement_approve_supplier`。报价事实只能经结构化人工校正 API 修改，不能从模型自由文本写入。金额、报价版本、快照及审批状态均从领域事实读取。
 
-## Context compaction
+`execute_analysis_pipeline` 在一次工具调用中依次执行解析、物料身份与规格匹配、供应商历史、确定性比价、独立复算和人工选择项生成，同时保留每个内部阶段的业务审计。任何报价修正或新增报价都会清除当前快照引用并使旧审批失效，但旧快照、Run 和事件仍保留供审计。正式批准后需求冻结，不能再修改报价或重算。
 
-Before each planning step the engine compares the not-yet-summarized history against `context_compact_ratio × max_context_tokens`. Above the threshold it summarizes the oldest complete groups with one bounded, tool-free provider call, replaces the previous rolling summary (prior summary text is chained into the new call), externalizes the originals as an artifact and stores covered message ids in the planner state. The planner renders the summary inside the stable prefix and excludes covered groups from later turns, marking them `summarized` in the manifest. The state travels with every checkpoint, so resume continues from the compacted view. Any summarization failure emits a skipped `context_compacted` event and the run continues; the planner's budget externalization remains the hard limit. Provider-reported prompt-cache reads are accumulated per turn into `usage.cached_input_tokens` / `cache_hit_rate`, and cost estimates price cached input at `cached_input_per_million_usd` when configured.
+## 确定性边界
 
-## Workspace model
+`canonical_analysis_input()` 只包含采购数量、规格、约束、固定汇率、报价原件 SHA-256 和当前人工确认值。其规范 JSON 产生 `input_sha256`。成本使用 `Decimal`，金额展示按明确精度量化；资格淘汰先于排序；最低总到货成本决定推荐，同成本时按交期、供应商名和报价 ID 稳定排序。
 
-Workspace roots are operator configuration supplied at process start. Web requests select a root by opaque id and may provide only a relative subdirectory. The server resolves the real path and rejects absolute paths, traversal, missing directories and symlink escapes.
+比较结果、输入哈希、规则版本和审批绑定哈希写入不可变快照。采购报告对持久化事实再次计算 `evidence_sha256`，所以刷新与进程重启不会改变报告。
 
-Inside a run, filesystem tools apply their own real-path sandbox again. The two checks defend different boundaries: the API prevents a browser from selecting arbitrary host directories; tools prevent model-produced arguments from leaving the authorized run roots.
+## 不可信文档
 
-## Persistence
+文件扩展名、大小、XLSX ZIP 结构、工作表数、行列数、PDF 页数、提取字符数和加密状态均在解析前或解析中受限。扫描件 OCR 当前明确拒绝。Artifact Store 保存原件内容与 SHA-256；结构化字段保存文档类型、页码/单元格、原文摘录、方法、置信度和人工修正。
 
-SQLite migrations are numbered, transactional and forward-only. A run lease is owned by one runtime and renewed by heartbeat. Only expired active leases are recovered as `interrupted(process_lost)`.
+## Runtime 兼容性与恢复
 
-Each tool invocation is persisted before execution and transitions through `received`, `validated`, approval, `running`, and a terminal state. A persisted terminal result is reused if message/checkpoint materialization was interrupted. Safe reads may retry after process loss, reconcilable writes inspect their target state, and non-replayable operations become `indeterminate` and require human review instead of being executed twice.
+原有 `WebRunSupervisor`、`RunEngine`、工具治理、进程丢失恢复、SSE 和嵌入式 `Harness.run/resume/cancel` 保持可用。`GET /api/runs/{id}/report` 仍从持久化 Run、事件、工具、审批和 Artifacts 投影证据，不引入第二份 Runtime 状态。
+
+审批工具成功后返回由受信任后端生成的 `final_output`。`RunEngine` 仍对其执行脱敏、输出预算和既有 Verification，再写终态 Checkpoint；已提交的确定性决定不需要额外模型回合来复述。
+
+进程重启时，SQLite 中的 Run、Checkpoint、消息、工具调用和采购事实共同恢复。`require_human` 从原 `run_id` 继续；运行中的进程丢失会由租约恢复为可解释的中断状态，副作用工具不会凭空重复执行。Provider 的 429、超时和重试均以事件及 `usage.provider_attempts` 记录，不依赖上游控制台是否展示同一状态码。

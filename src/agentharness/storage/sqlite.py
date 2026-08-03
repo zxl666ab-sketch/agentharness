@@ -32,6 +32,7 @@ from agentharness.storage.leases import LeaseRepo
 from agentharness.storage.maintenance import MaintenanceOps
 from agentharness.storage.memories import MemoryRepo
 from agentharness.storage.messages import MessageRepo
+from agentharness.storage.procurement import ProcurementRepo
 from agentharness.storage.runs import RunRepo
 from agentharness.storage.sessions import SessionRepo
 from agentharness.storage.tool_invocations import ToolInvocationRepo
@@ -60,6 +61,7 @@ class Storage:
         self.sessions = SessionRepo(self._core, self.redactor)
         self.runs = RunRepo(self._core, self.redactor, events=self.events)
         self.messages = MessageRepo(self._core, self.redactor)
+        self.procurement = ProcurementRepo(self._core, self.redactor)
         self.checkpoints = CheckpointRepo(self._core, self.redactor)
         self.tool_invocations = ToolInvocationRepo(self._core, self.redactor)
         self.approvals = ApprovalRepo(self._core, self.redactor)
@@ -77,6 +79,9 @@ class Storage:
 
     def schema_version(self) -> int:
         return self._core.schema_version()
+
+    def transaction(self):  # type: ignore[no-untyped-def]
+        return self._core.transaction()
 
     # -- run ownership / lifecycle ----------------------------------------
 

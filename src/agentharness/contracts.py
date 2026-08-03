@@ -269,6 +269,7 @@ class ToolResult(BaseModel):
     tool_call_id: str
     name: str
     content: str
+    final_output: str | None = None
     invocation_id: str | None = None
     is_error: bool = False
     artifact_id: str | None = None
@@ -332,6 +333,7 @@ class ModelStreamItem(BaseModel):
     usage: Usage | None = None
     error: str | None = None
     error_kind: str | None = None  # rate_limit | timeout | cancelled | provider | unknown
+    retry_after_s: float | None = Field(default=None, ge=0, le=86_400)
 
 
 class ModelTurn(BaseModel):
@@ -346,8 +348,10 @@ class ModelRequest(BaseModel):
     messages: list[Message]
     tools: list[ToolSpec] = Field(default_factory=list)
     model: str | None = None
+    reasoning_effort: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None
+    parallel_tool_calls: bool | None = None
     system: str | None = None
     stop: list[str] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -452,6 +456,7 @@ class VerificationCandidate(BaseModel):
     steps: int = 0
     latency_s: float = 0.0
     tools_ordered: list[str] = Field(default_factory=list)
+    tools_succeeded: list[str] = Field(default_factory=list)
     messages: list[Message] = Field(default_factory=list)
     output_assertions: dict[str, Any] | None = None
     executor_provider: str | None = None
@@ -519,6 +524,7 @@ class RunRequest(BaseModel):
     session_id: str | None = None
     system: str | None = None
     model: str | None = None
+    reasoning_effort: str | None = None
     provider: str = "openai"
     approval: ApprovalMode = ApprovalMode.ask
     budget: BudgetConfig = Field(default_factory=BudgetConfig)

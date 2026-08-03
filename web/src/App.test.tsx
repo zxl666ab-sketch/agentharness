@@ -3,22 +3,15 @@ import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import App, { eventLabel } from "./App";
-import { api, type EventRow, type RuntimeInfo } from "./api/client";
+import {
+  api,
+  type EventRow,
+  type RunReport as RunReportData,
+} from "./api/client";
 import { REQUIRED_API_SCHEMA_VERSION } from "./api/compatibility";
-import { MessageContent } from "./components/MessageContent";
-import { RunComposer } from "./components/RunComposer";
-import { ToolTimeline } from "./components/ToolTimeline";
+import { RunReport } from "./components/RunReport";
 import { AGENT_EVENT_TYPES } from "./useAgentStream";
-import { eventTone } from "./viewModel";
-
-const runtime: RuntimeInfo = {
-  execution_enabled: true,
-  default_provider: "openai",
-  providers: [{ name: "openai", configured: true, default_model: "gpt-4o-mini" }],
-  tools: [],
-  workspaces: [{ id: "default", name: "workspace" }],
-  defaults: { approval: "ask", allow_write: false },
-};
+import { eventTone, statusLabel } from "./viewModel";
 
 function event(type: string, payload: Record<string, unknown> = {}): EventRow {
   return {
@@ -33,7 +26,120 @@ function event(type: string, payload: Record<string, unknown> = {}): EventRow {
   };
 }
 
-describe("Web-first Agent workspace", () => {
+function report(
+  conclusion: RunReportData["conclusion"] = {
+    status: "passed",
+    label: "已完成",
+    verified: true,
+    reason: "所有验收规则均已通过。",
+  }
+): RunReportData {
+  return {
+    schema_version: 1,
+    run_id: "run",
+    session_id: "session",
+    as_of: "2026-07-25T00:00:04Z",
+    evidence_sha256: "a".repeat(64),
+    run: {
+      id: "run",
+      session_id: "session",
+      root_run_id: "run",
+      status: conclusion.status === "passed" ? "completed" : "failed",
+      steps: 2,
+      created_at: "2026-07-25T00:00:00Z",
+      updated_at: "2026-07-25T00:00:04Z",
+    },
+    conclusion,
+    verification: {
+      configured: true,
+      policy: {
+        validators: [
+          { kind: "output", assertions: { contains: ["DONE"] } },
+          { kind: "file", path: "result.txt", exists: true },
+        ],
+        max_retries: 0,
+        on_exhausted: "failed",
+      },
+      attempts: [{
+        attempt: 0,
+        step: 2,
+        validators: ["output", "file"],
+        max_retries: 0,
+        started_at: "2026-07-25T00:00:02Z",
+        finished_at: "2026-07-25T00:00:03Z",
+        action: conclusion.status === "passed" ? "pass" : "stop",
+        passed: conclusion.status === "passed",
+        failures: conclusion.status === "passed" ? [] : [{
+          validator: "output",
+          error_code: "assertion_failed",
+          message: "缺少 DONE",
+          recovery_hint: "补充输出标记",
+        }],
+        evidence: { "0:output": { passed: conclusion.status === "passed" } },
+        result_event_id: "verification-result",
+      }],
+      failure_reasons: conclusion.status === "passed" ? [] : ["缺少 DONE"],
+    },
+    workspace_changes: [{
+      invocation_id: "write",
+      tool: "write_file",
+      path: "result.txt",
+      status: "succeeded",
+      changed: true,
+      resulting_version: "b".repeat(64),
+      arguments_sha256: "c".repeat(64),
+    }],
+    tools: [{
+      id: "write",
+      run_id: "run",
+      step: 1,
+      ordinal: 0,
+      provider_call_id: "call",
+      tool_name: "write_file",
+      tool_version: "1",
+      status: "succeeded",
+      effect: "workspace_write",
+      replay_policy: "reconcile",
+      arguments: { path: "result.txt" },
+      arguments_sha256: "c".repeat(64),
+      attempt_count: 1,
+      created_at: "2026-07-25T00:00:01Z",
+      updated_at: "2026-07-25T00:00:02Z",
+    }],
+    approvals: [{
+      id: "approval",
+      run_id: "run",
+      tool_call_id: "tool",
+      tool_name: "write_file",
+      effect: "workspace_write",
+      requires_confirmation: false,
+      decision: "allow_once",
+      invocation_id: "write",
+      arguments_sha256: "c".repeat(64),
+      created_at: "2026-07-25T00:00:01Z",
+      resolved_at: "2026-07-25T00:00:02Z",
+    }],
+    artifacts: [{
+      id: "artifact",
+      sha256: "d".repeat(64),
+      content_type: "text/plain",
+      size_bytes: 128,
+      summary: "result evidence",
+      created_at: "2026-07-25T00:00:03Z",
+    }],
+    usage: { input_tokens: 100, output_tokens: 20, total_tokens: 120 },
+    events: [event("verification_result", { passed: conclusion.status === "passed" })],
+    source: {
+      max_global_seq: 10,
+      event_count: 10,
+      tool_count: 1,
+      approval_count: 1,
+      artifact_count: 1,
+    },
+  };
+}
+
+describe("Procurement sourcing workspace", () => {
   it("exposes the complete run control surface", () => {
     expect(typeof api.runtime).toBe("function");
     expect(typeof api.createRun).toBe("function");
@@ -42,6 +148,7 @@ describe("Web-first Agent workspace", () => {
     expect(typeof api.resolveToolRecovery).toBe("function");
     expect(typeof api.decideApproval).toBe("function");
     expect(typeof api.toolInvocations).toBe("function");
+    expect(typeof api.report).toBe("function");
     expect(AGENT_EVENT_TYPES).toEqual(
       expect.arrayContaining([
         "tool_call_validated",
@@ -59,7 +166,7 @@ describe("Web-first Agent workspace", () => {
     );
   });
 
-  it("renders the task workspace instead of the old evaluation inspector", () => {
+  it("renders the procurement conversation as the product entry", () => {
     Object.defineProperty(window, "matchMedia", {
       configurable: true,
       value: () => ({ matches: false }),
@@ -74,86 +181,25 @@ describe("Web-first Agent workspace", () => {
       data_dir: "/tmp/data",
       max_global_seq: 0,
     });
-    client.setQueryData(["runtime"], runtime);
     client.setQueryData(["sessions"], []);
     client.setQueryData(["runs"], []);
+    client.setQueryData(["procurement-requests"], []);
 
     const html = renderToString(
       <QueryClientProvider client={client}><App /></QueryClientProvider>
     );
 
-    expect(html).toContain("把目标交给 Agent");
-    expect(html).toContain('data-testid="run-composer"');
-    expect(html).toContain('aria-label="搜索任务"');
-    expect(html).toContain("允许写入");
-    expect(html).toContain("OpenAI");
-    expect(html).toContain("运行 Agent");
-    expect(html).not.toContain("模型服务");
-    expect(html).not.toContain('aria-label="打开任务列表"');
-    expect(html).not.toContain('aria-label="关闭任务列表"');
-    expect(html).not.toContain("sidebar-scrim");
-    expect(html).not.toContain("智能评测");
-    expect(html).not.toContain("检查器");
-  });
-
-  it("shows governed approval actions in the composer", () => {
-    const html = renderToString(
-      <RunComposer
-        runtime={runtime}
-        selectedSessionId="session"
-        selectedRun={null}
-        pendingApproval={{
-          id: "approval",
-          run_id: "run",
-          tool_call_id: "tool",
-          tool_name: "write_file",
-          effect: "workspace_write",
-          requires_confirmation: false,
-          arguments_summary: '{"path":"result.txt"}',
-          invocation_id: "invocation",
-          arguments_sha256: "a".repeat(64),
-          created_at: "2026-07-25T00:00:00Z",
-        }}
-        onCreate={async () => undefined}
-        onCancel={async () => undefined}
-        onResume={async () => undefined}
-        onDecision={async () => undefined}
-      />
-    );
-
-    expect(html).toContain("需要你的批准");
-    expect(html).toContain("允许一次");
-    expect(html).toContain("拒绝");
-    expect(html).toContain("本次运行允许");
-  });
-
-  it("does not offer run-wide approval for actions requiring confirmation", () => {
-    const html = renderToString(
-      <RunComposer
-        runtime={runtime}
-        selectedSessionId="session"
-        selectedRun={null}
-        pendingApproval={{
-          id: "approval",
-          run_id: "run",
-          tool_call_id: "tool",
-          tool_name: "memory_store",
-          effect: "external_write",
-          requires_confirmation: true,
-          arguments_summary: '{"content":"remember this"}',
-          invocation_id: "invocation",
-          arguments_sha256: "b".repeat(64),
-          created_at: "2026-07-25T00:00:00Z",
-        }}
-        onCreate={async () => undefined}
-        onCancel={async () => undefined}
-        onResume={async () => undefined}
-        onDecision={async () => undefined}
-      />
-    );
-
-    expect(html).toContain("允许一次");
-    expect(html).not.toContain("本次运行允许");
+    expect(html).toContain("采价台");
+    expect(html).toContain("采购询价与供应商比价");
+    expect(html).not.toContain("采购询价与供应商比价 Agent");
+    expect(html).toContain('aria-label="搜索采购任务"');
+    expect(html).toContain('aria-label="API / 模型配置"');
+    expect(html).toContain("新建采购决策");
+    expect(html).toContain('aria-label="采购目标"');
+    expect(html).toContain('data-testid="conversation-upload"');
+    expect(html).toContain("报价附件");
+    expect(html).not.toContain('data-testid="run-composer"');
+    expect(html).not.toContain("把目标交给 Agent");
   });
 
   it("labels operational activity without falling back to run status text", () => {
@@ -187,80 +233,72 @@ describe("Web-first Agent workspace", () => {
     expect(eventTone(event("verification_result", { passed: false }))).toBe(
       "danger"
     );
-  });
-
-  it("renders assistant markdown as structured content", () => {
-    const html = renderToString(
-      <MessageContent content={"- **文件读写**\n- `shell`"} />
+    expect(eventTone(event("verification_result", { action: "stop" }))).toBe(
+      "danger"
     );
-
-    expect(html).toContain("<ul>");
-    expect(html).toContain("<strong>文件读写</strong>");
-    expect(html).toContain("<code>shell</code>");
-    expect(html).not.toContain("**文件读写**");
   });
 
-  it("renders persisted tool execution state and recovery evidence", () => {
-    const html = renderToString(
-      <ToolTimeline
-        invocations={[{
-          id: "invocation",
-          run_id: "run",
-          step: 0,
-          ordinal: 0,
-          provider_call_id: "call",
-          tool_name: "read_file",
-          tool_version: "1",
-          status: "succeeded",
-          effect: "workspace_read",
-          replay_policy: "safe",
-          arguments: { path: "README.md" },
-          arguments_sha256: "1234567890abcdef",
-          attempt_count: 1,
-          result: {
-            content: "file contents",
-            is_error: false,
-            attempts: 1,
-            retryable: false,
-            duration_ms: 12,
-          },
-          created_at: "2026-07-25T00:00:00Z",
-          updated_at: "2026-07-25T00:00:01Z",
-        }]}
+  it("reserves the completed label for runs with persisted passing evidence", () => {
+    expect(statusLabel("completed")).toBe("运行结束");
+    const passed = renderToString(<RunReport report={report()} />);
+    const unverified = renderToString(
+      <RunReport
+        report={report({
+          status: "unverified",
+          label: "运行结束",
+          verified: false,
+          reason: "没有配置验收规则。",
+        })}
       />
     );
 
-    expect(html).toContain("read_file");
-    expect(html).toContain("path=README.md");
-    expect(html).toContain("workspace_read");
+    expect(passed).toContain("已完成");
+    expect(passed).toContain("结果与证据");
+    expect(unverified).not.toContain("已完成");
+    expect(unverified).toContain("运行结束");
   });
 
-  it("renders explicit actions for an indeterminate tool result", () => {
+  it("keeps recovered verification failures in history without a final failure alert", () => {
+    const recovered = report();
+    recovered.verification.failure_reasons = ["第一次验收尚未取得人工审批"];
+    recovered.verification.attempts.unshift({
+      ...recovered.verification.attempts[0],
+      passed: false,
+      action: "require_human",
+      failures: [{
+        validator: "output",
+        error_code: "assertion_failed",
+        message: "第一次验收尚未取得人工审批",
+        recovery_hint: "完成人工审批后继续",
+      }],
+    });
+
+    const html = renderToString(<RunReport report={recovered} />);
+
+    expect(html).not.toContain("失败原因");
+    expect(html).toContain("第一次验收尚未取得人工审批");
+  });
+
+  it("renders failure evidence, file changes, audits, artifacts, and usage", () => {
     const html = renderToString(
-      <ToolTimeline
-        onResolve={async () => undefined}
-        invocations={[{
-          id: "indeterminate-invocation",
-          run_id: "run",
-          step: 0,
-          ordinal: 0,
-          provider_call_id: "call",
-          tool_name: "shell",
-          tool_version: "1",
-          status: "indeterminate",
-          effect: "destructive",
-          replay_policy: "never",
-          arguments: { command: "deploy" },
-          arguments_sha256: "a".repeat(64),
-          attempt_count: 1,
-          created_at: "2026-07-25T00:00:00Z",
-          updated_at: "2026-07-25T00:00:01Z",
-        }]}
+      <RunReport
+        report={report({
+          status: "failed",
+          label: "失败",
+          verified: false,
+          reason: "缺少 DONE",
+        })}
       />
     );
 
-    expect(html).toContain("确认已完成");
-    expect(html).toContain("跳过");
-    expect(html).toContain("重新执行");
+    expect(html).toContain("失败原因");
+    expect(html).toContain("缺少 DONE");
+    expect(html).toContain("result.txt");
+    expect(html).toContain("工具与审批");
+    expect(html).toContain("allow_once");
+    expect(html).toContain("result evidence");
+    expect(html).toContain("120");
+    expect(html).toContain("事件追踪");
   });
+
 });

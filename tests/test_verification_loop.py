@@ -61,6 +61,25 @@ async def test_output_assertion_failure_returns_structured_retry_feedback(tmp_pa
     assert passed.action == "pass"
     assert not passed.failures
 
+    tool_policy = VerificationPolicy(
+        validators=[
+            VerificationCheck(
+                kind="output",
+                assertions={
+                    "contains": ["DONE"],
+                    "tools_succeeded": ["compare", "approve"],
+                },
+            )
+        ]
+    )
+    tool_candidate = _candidate(tmp_path, "DONE")
+    tool_candidate.tools_succeeded = ["compare"]
+    missing_tool = await loop.evaluate(tool_candidate, tool_policy, attempt=0)
+    assert missing_tool.action == "retry"
+    assert "approve" in missing_tool.failures[0].message
+    tool_candidate.tools_succeeded.append("approve")
+    assert (await loop.evaluate(tool_candidate, tool_policy, attempt=1)).action == "pass"
+
 
 @pytest.mark.asyncio
 async def test_file_checks_are_sandboxed_and_composable(tmp_path: Path) -> None:
@@ -325,6 +344,8 @@ async def test_command_verifier_flows_through_shell_approval_and_events(
     )
 
     assert result.status == RunStatus.completed
+    transcript = ask_harness.get_session_transcript(result.session_id)
+    assert "[verification command validator]" not in transcript[0].assistant_content
     approvals = ask_harness.list_approvals(result.run_id)
     assert len(approvals) == 1
     assert approvals[0]["tool_name"] == "shell"

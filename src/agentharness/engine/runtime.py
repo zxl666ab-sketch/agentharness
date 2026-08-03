@@ -91,6 +91,21 @@ def _retry_delay(config: ProviderRetryConfig, retry_number: int) -> float:
     return max(0.0, base * random.uniform(1 - config.jitter_ratio, 1 + config.jitter_ratio))
 
 
+def _exception_retry_after_s(exc: BaseException) -> float | None:
+    response = getattr(exc, "response", None)
+    for headers in (getattr(response, "headers", None), getattr(exc, "headers", None)):
+        if headers is None or not hasattr(headers, "get"):
+            continue
+        raw = headers.get("retry-after") or headers.get("Retry-After")
+        if raw is None:
+            continue
+        try:
+            return min(86_400.0, max(0.0, float(str(raw).strip())))
+        except ValueError:
+            return None
+    return None
+
+
 def _cost_usd(
     input_tokens: int,
     output_tokens: int,
@@ -416,6 +431,7 @@ class RunEngine:
                 "_agentharness_context_request": {
                     "original_goal": request.message,
                     "system": request.system,
+                    "reasoning_effort": request.reasoning_effort,
                     "extra_dirs": request.extra_dirs,
                     "skills_dirs": request.skills_dirs,
                     "tools": request.tools,
@@ -619,6 +635,7 @@ class RunEngine:
             session_id=run["session_id"],
             provider=provider_name,
             model=run.get("model"),
+            reasoning_effort=stored_context_request.get("reasoning_effort"),
             approval=ApprovalMode(run.get("approval") or "ask"),
             cwd=run.get("cwd"),
             parent_run_id=run.get("parent_run_id"),
@@ -1068,8 +1085,12 @@ class RunEngine:
                     messages=bundle.messages,
                     tools=bundle.tools,
                     model=request.model,
+                    reasoning_effort=request.reasoning_effort,
                     system=bundle.system,
                     max_tokens=max(1, min(attempt_remaining, output_token_limit)),
+                    parallel_tool_calls=(
+                        False if budget.max_tool_calls_per_turn == 1 else None
+                    ),
                 )
                 text_parts = []
                 tool_acc = {}
@@ -1079,6 +1100,7 @@ class RunEngine:
                 turn_usage_charged = False
                 error_msg = None
                 error_kind = None
+                retry_after_s: float | None = None
                 streamed_length = 0
                 had_provider_output = False
                 stream: Any = None
@@ -1222,6 +1244,7 @@ class RunEngine:
                         elif item.type == StreamItemType.error:
                             error_msg = item.error or "provider error"
                             error_kind = item.error_kind or "provider"
+                            retry_after_s = item.retry_after_s
                             break
                         elif item.type == StreamItemType.done:
                             break
@@ -1236,6 +1259,7 @@ class RunEngine:
                 except Exception as exc:  # noqa: BLE001
                     error_msg = str(exc)
                     error_kind = _provider_exception_kind(exc)
+                    retry_after_s = _exception_retry_after_s(exc)
                 finally:
                     owner_ctx = self._runs.get(run_id)
                     if owner_ctx is not None and owner_ctx.provider_owner_task is provider_owner:
@@ -1291,7 +1315,10 @@ class RunEngine:
                     usage.estimated = usage.estimated or not turn_usage.total_tokens
                     _update_usage_cost(usage, request.pricing)
                     turn_usage_charged = True
-                    delay = _retry_delay(request.provider_retry, target_attempt)
+                    delay = max(
+                        _retry_delay(request.provider_retry, target_attempt),
+                        retry_after_s or 0.0,
+                    )
                     self.events.emit_and_update(
                         run_id,
                         events=[
@@ -1305,6 +1332,7 @@ class RunEngine:
                                     "next_attempt": target_attempt + 1,
                                     "error_kind": error_kind,
                                     "delay_s": round(delay, 3),
+                                    "retry_after_s": retry_after_s,
                                 },
                                 span_id=span_id,
                             )
@@ -1551,7 +1579,7 @@ class RunEngine:
                 )
 
             # Execute tools
-            await self.tool_executor.execute_batch(
+            tool_results = await self.tool_executor.execute_batch(
                 run_id=run_id,
                 session_id=session_id,
                 root_run_id=root_run_id,
@@ -1578,6 +1606,156 @@ class RunEngine:
                     messages=messages,
                 )
             step += 1
+
+            final_outputs = [
+                result.final_output
+                for result in tool_results
+                if not result.is_error and result.final_output
+            ]
+            if final_outputs and all(not result.is_error for result in tool_results):
+                if len(final_outputs) != 1:
+                    return self.lifecycle.finish(
+                        run_id,
+                        session_id,
+                        root_run_id,
+                        parent_run_id,
+                        RunStatus.failed,
+                        "".join(output_parts),
+                        usage,
+                        step,
+                        "multiple tools returned final output in one batch",
+                        messages=messages,
+                    )
+                final_output = self.redactor.redact_text(final_outputs[0])
+                available = budget.max_output_length - output_length
+                if len(final_output) > available:
+                    output_parts.append(final_output[: max(0, available)])
+                    return self.lifecycle.finish(
+                        run_id,
+                        session_id,
+                        root_run_id,
+                        parent_run_id,
+                        RunStatus.failed,
+                        "".join(output_parts),
+                        usage,
+                        step,
+                        "max_output_length exceeded",
+                        messages=messages,
+                    )
+                output_parts.append(final_output)
+                output_length += len(final_output)
+                policy = self._verification_policy(request)
+                if policy is not None:
+                    candidate_output = "".join(output_parts)
+                    decision = await self._evaluate_candidate(
+                        run_id=run_id,
+                        session_id=session_id,
+                        root_run_id=root_run_id,
+                        parent_run_id=parent_run_id,
+                        request=request,
+                        messages=messages,
+                        output=candidate_output,
+                        usage=usage,
+                        step=step,
+                        latency_s=time.monotonic() - started,
+                        cancel=cancel,
+                        model_span_id=span_id,
+                    )
+                    self._charge_verification_usage(usage, decision)
+                    _update_usage_cost(usage, request.pricing)
+                    if usage.total_tokens > budget.max_tokens:
+                        return self.lifecycle.finish(
+                            run_id,
+                            session_id,
+                            root_run_id,
+                            parent_run_id,
+                            RunStatus.failed,
+                            candidate_output,
+                            usage,
+                            step,
+                            "max_tokens exceeded during verification",
+                            messages=messages,
+                        )
+                    if (
+                        budget.max_cost_usd is not None
+                        and (
+                            usage.estimated_cost_usd is None
+                            or usage.estimated_cost_usd > budget.max_cost_usd
+                        )
+                    ):
+                        return self.lifecycle.finish(
+                            run_id,
+                            session_id,
+                            root_run_id,
+                            parent_run_id,
+                            RunStatus.failed,
+                            candidate_output,
+                            usage,
+                            step,
+                            "max_cost_usd exceeded during verification",
+                            messages=messages,
+                        )
+                    if decision.action == "retry" and decision.feedback_message is not None:
+                        feedback = decision.feedback_message
+                        messages.append(feedback)
+                        self.storage.save_message(
+                            run_id, session_id, feedback, seq=len(messages)
+                        )
+                        self._ctx(run_id).verification_attempt += 1
+                        output_parts = []
+                        output_length = 0
+                        self.lifecycle.checkpoint(
+                            run_id,
+                            phase="model_turn",
+                            step=step,
+                            messages=messages,
+                            pending=[],
+                            completed=completed_tool_ids,
+                            usage=usage,
+                        )
+                        continue
+                    if decision.action == "require_human":
+                        return self._pause_for_verification_human(
+                            run_id=run_id,
+                            session_id=session_id,
+                            root_run_id=root_run_id,
+                            parent_run_id=parent_run_id,
+                            output=candidate_output,
+                            usage=usage,
+                            steps=step,
+                            messages=messages,
+                            decision=decision,
+                        )
+                    if decision.action == "stop":
+                        error = "verification failed"
+                        if decision.failures:
+                            error += ": " + "; ".join(
+                                failure.message for failure in decision.failures
+                            )
+                        return self.lifecycle.finish(
+                            run_id,
+                            session_id,
+                            root_run_id,
+                            parent_run_id,
+                            RunStatus.failed,
+                            candidate_output,
+                            usage,
+                            step,
+                            error,
+                            messages=messages,
+                        )
+                return self.lifecycle.finish(
+                    run_id,
+                    session_id,
+                    root_run_id,
+                    parent_run_id,
+                    RunStatus.completed,
+                    "".join(output_parts),
+                    usage,
+                    step,
+                    None,
+                    messages=messages,
+                )
 
             if output_length > budget.max_output_length:
                 return self.lifecycle.finish(
@@ -1867,6 +2045,14 @@ class RunEngine:
             for call in (message.tool_calls or [])
             if message.content != "[verification command validator]"
         ]
+        tools_succeeded = [
+            str(message.name)
+            for message in messages
+            if message.role == MessageRole.tool
+            and message.name
+            and message.tool_result is not None
+            and not message.tool_result.is_error
+        ]
         candidate = VerificationCandidate(
             run_id=run_id,
             goal=str(
@@ -1879,6 +2065,7 @@ class RunEngine:
             steps=step,
             latency_s=latency_s,
             tools_ordered=tools_ordered,
+            tools_succeeded=tools_succeeded,
             messages=messages,
             output_assertions=(
                 request.metadata.get("verification_assertions")
@@ -1904,6 +2091,7 @@ class RunEngine:
                     "attempt": attempt,
                     "step": step,
                     "action": decision.action,
+                    "passed": decision.action == "pass",
                     "failures": safe_decision.get("failures", []),
                     "evidence": safe_decision.get("evidence", {}),
                 },
