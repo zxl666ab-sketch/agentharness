@@ -40,7 +40,10 @@ async def test_sweeper_recovers_a_run_whose_owner_vanished(data_dir):
         try:
             for _ in range(200):
                 await asyncio.sleep(0.01)
-                if harness.storage.get_run("ghost-run")["status"] != "running":
+                if (
+                    harness.storage.get_run("ghost-run")["status"] != "running"
+                    and "ghost-run" in harness.recovered_run_ids
+                ):
                     break
         finally:
             task.cancel()

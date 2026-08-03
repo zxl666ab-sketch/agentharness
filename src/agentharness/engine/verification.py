@@ -141,6 +141,7 @@ class VerificationLoop:
             required = string_list("contains")
             forbidden = string_list("not_contains")
             expected_tools = string_list("tools_ordered")
+            required_successful_tools = string_list("tools_succeeded")
         except ValueError as exc:
             return (
                 VerificationFailure(
@@ -164,6 +165,14 @@ class VerificationLoop:
             reasons.append(
                 f"expected tools {expected_tools!r}, actual {candidate.tools_ordered!r}"
             )
+        missing_successful_tools = [
+            name for name in required_successful_tools if name not in candidate.tools_succeeded
+        ]
+        if missing_successful_tools:
+            reasons.append(
+                "required successful tools are missing: "
+                f"{missing_successful_tools!r}; actual {candidate.tools_succeeded!r}"
+            )
         max_steps = raw.get("max_steps")
         if max_steps is not None:
             if not isinstance(max_steps, int) or max_steps < 0:
@@ -186,6 +195,7 @@ class VerificationLoop:
                 needle: needle not in present_forbidden for needle in forbidden
             },
             "tools_ordered": candidate.tools_ordered,
+            "tools_succeeded": candidate.tools_succeeded,
             "steps": candidate.steps,
         }
         if not reasons:

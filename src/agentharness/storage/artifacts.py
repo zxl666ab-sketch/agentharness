@@ -16,6 +16,28 @@ def _utcnow() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _is_text_content_type(content_type: str) -> bool:
+    media_type = content_type.partition(";")[0].strip().lower()
+    return media_type.startswith("text/") or media_type in {
+        "application/json",
+        "application/ld+json",
+        "application/x-ndjson",
+        "application/xml",
+        "application/yaml",
+        "application/x-yaml",
+        "application/javascript",
+    } or media_type.endswith(("+json", "+xml"))
+
+
+def _is_json_content_type(content_type: str) -> bool:
+    media_type = content_type.partition(";")[0].strip().lower()
+    return media_type in {
+        "application/json",
+        "application/ld+json",
+        "application/x-ndjson",
+    } or media_type.endswith("+json")
+
+
 class ArtifactStore:
     def __init__(self, root: Path | str, redactor: Redactor | None = None) -> None:
         self.root = Path(root)
@@ -29,15 +51,26 @@ class ArtifactStore:
         content_type: str = "text/plain",
         summary: str | None = None,
     ) -> dict[str, Any]:
-        if isinstance(data, str):
-            data = self.redactor.redact_text(data).encode("utf-8")
-        else:
-            # best-effort text redaction for binary-looking text
+        text: str | None = data if isinstance(data, str) else None
+        if text is None and _is_text_content_type(content_type):
             try:
                 text = data.decode("utf-8")
-                data = self.redactor.redact_text(text).encode("utf-8")
             except UnicodeDecodeError:
                 pass
+        if text is not None:
+            if _is_json_content_type(content_type):
+                try:
+                    parsed = json.loads(text)
+                    text = json.dumps(
+                        self.redactor.redact_obj(parsed),
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                except json.JSONDecodeError:
+                    text = self.redactor.redact_text(text)
+            else:
+                text = self.redactor.redact_text(text)
+            data = text.encode("utf-8")
 
         sha = hashlib.sha256(data).hexdigest()
         # shard by first 2 hex chars

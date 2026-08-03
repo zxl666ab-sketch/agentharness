@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -14,6 +15,7 @@ from agentharness.contracts import (
     ApprovalDecision,
     ApprovalMode,
     ApprovalRequest,
+    BudgetConfig,
     Checkpoint,
     EffectKind,
     Message,
@@ -31,6 +33,8 @@ from agentharness.contracts import (
     ToolRecoveryDecision,
     ToolResult,
     ToolSpec,
+    VerificationCheck,
+    VerificationPolicy,
 )
 from agentharness.engine.tool_execution import arguments_sha256, validate_tool_spec
 from agentharness.tools.http_tool import HttpTool
@@ -117,6 +121,28 @@ class _RetryTool:
                 retryable=True,
             )
         return ToolResult(tool_call_id="", name="retry_tool", content="ok")
+
+
+class _TerminalOutputTool:
+    def __init__(self, final_output: str = "DONE: deterministic work completed") -> None:
+        self.final_output = final_output
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="terminal_output_tool",
+            description="Return a trusted final response after deterministic work.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": False},
+            effect=EffectKind.pure,
+        )
+
+    async def run(self, _ctx: ToolContext, _arguments: dict[str, Any]) -> ToolResult:
+        return ToolResult(
+            tool_call_id="",
+            name="terminal_output_tool",
+            content="deterministic work completed",
+            final_output=self.final_output,
+        )
 
 
 class _ExceptionTool(_RetryTool):
@@ -492,6 +518,98 @@ async def test_unclassified_tool_exception_is_not_automatically_retried(
         assert invocation.result.retryable is False
     finally:
         await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_successful_tool_final_output_ends_run_without_another_model_turn(
+    harness,
+    workspace,
+) -> None:
+    tool = _TerminalOutputTool()
+    harness.register_tool(tool)
+
+    result = await harness.run(
+        RunRequest(
+            message="[fake:tools]terminal_output_tool\n{}",
+            provider="fake",
+            approval=ApprovalMode.auto,
+            cwd=str(workspace),
+            tools=[tool.spec.name],
+            verification=VerificationPolicy(
+                validators=[
+                    VerificationCheck(
+                        kind="output",
+                        assertions={
+                            "contains": ["DONE: deterministic work completed"],
+                            "tools_succeeded": [tool.spec.name],
+                        },
+                    )
+                ],
+                max_retries=0,
+                on_exhausted="failed",
+            ),
+        )
+    )
+
+    assert result.status == RunStatus.completed
+    assert result.output.endswith("DONE: deterministic work completed")
+    assert result.usage.model_turns == 1
+    assert len(harness.providers["fake"].calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_final_output_does_not_hide_another_tool_failure(
+    harness,
+    workspace,
+) -> None:
+    tool = _TerminalOutputTool()
+    harness.register_tool(tool)
+
+    result = await harness.run(
+        RunRequest(
+            message="[fake:tools]terminal_output_tool|missing_tool\n[{},{}]",
+            provider="fake",
+            approval=ApprovalMode.auto,
+            cwd=str(workspace),
+            tools=[tool.spec.name],
+        )
+    )
+
+    assert result.status == RunStatus.completed
+    assert result.usage.model_turns == 2
+    assert len(harness.providers["fake"].calls) == 2
+    assert "Unknown tool: missing_tool" in result.output
+
+
+@pytest.mark.asyncio
+async def test_tool_final_output_respects_total_result_budget(harness, workspace) -> None:
+    tool = _TerminalOutputTool("x" * 5_000)
+    harness.register_tool(tool)
+
+    result = await harness.run(
+        RunRequest(
+            message="[fake:tools]terminal_output_tool\n{}",
+            provider="fake",
+            approval=ApprovalMode.auto,
+            cwd=str(workspace),
+            tools=[tool.spec.name],
+            budget=BudgetConfig(
+                max_tool_result_bytes=1_024,
+                max_inline_tool_result_bytes=256,
+                max_output_length=5_000,
+            ),
+        )
+    )
+    invocation = harness.list_tool_invocations(result.run_id)[0]
+    assert invocation.result is not None
+    encoded = json.dumps(
+        invocation.result.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert result.status == RunStatus.completed
+    assert len(encoded) <= 1_024
 
 
 @pytest.mark.asyncio

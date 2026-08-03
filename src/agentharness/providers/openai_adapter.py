@@ -13,6 +13,8 @@ import json
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any, Literal
 
 from agentharness.contracts import (
@@ -211,6 +213,42 @@ def _classify_error(exc: BaseException) -> tuple[str, str]:
     return msg, kind
 
 
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    response = getattr(exc, "response", None)
+    header_sources = (getattr(response, "headers", None), getattr(exc, "headers", None))
+    for headers in header_sources:
+        if headers is None or not hasattr(headers, "get"):
+            continue
+        raw = headers.get("retry-after") or headers.get("Retry-After")
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        try:
+            return min(86_400.0, max(0.0, float(value)))
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=UTC)
+            return min(
+                86_400.0,
+                max(0.0, (retry_at - datetime.now(UTC)).total_seconds()),
+            )
+    return None
+
+
+def _error_item(exc: BaseException) -> ModelStreamItem:
+    msg, kind = _classify_error(exc)
+    return ModelStreamItem(
+        type=StreamItemType.error,
+        error=msg,
+        error_kind=kind,
+        retry_after_s=_retry_after_seconds(exc),
+    )
+
+
 def _is_not_found(exc: BaseException) -> bool:
     status = getattr(exc, "status_code", None)
     if status is None:
@@ -318,12 +356,19 @@ class OpenAIResponsesAdapter:
         base_url: str | None = None,
         default_model: str | None = None,
         api_mode: str | None = None,
+        use_env: bool = True,
     ) -> None:
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
-        self.base_url = base_url or os.environ.get("OPENAI_BASE_URL")
+        self.api_key = (
+            (api_key or os.environ.get("OPENAI_API_KEY")) if use_env else api_key
+        )
+        self.base_url = (
+            (base_url or os.environ.get("OPENAI_BASE_URL")) if use_env else base_url
+        )
         # Prefer explicit arg, then env, then hard default (arg must be None to allow env)
         self.default_model = (
-            default_model or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
+            (default_model or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini")
+            if use_env
+            else (default_model or "gpt-4o-mini")
         )
         self.api_mode: Literal["chat", "responses"] = resolve_openai_api_mode(
             self.base_url, explicit=api_mode
@@ -364,8 +409,7 @@ class OpenAIResponsesAdapter:
                 async for item in self._stream_chat(request):
                     yield item
                 return
-            msg, kind = _classify_error(exc)
-            yield ModelStreamItem(type=StreamItemType.error, error=msg, error_kind=kind)
+            yield _error_item(exc)
 
     # ------------------------------------------------------------------
     # Responses API (official OpenAI)
@@ -385,6 +429,10 @@ class OpenAIResponsesAdapter:
         }
         if tools:
             kwargs["tools"] = tools
+            if request.parallel_tool_calls is not None:
+                kwargs["parallel_tool_calls"] = request.parallel_tool_calls
+        if request.reasoning_effort:
+            kwargs["reasoning"] = {"effort": request.reasoning_effort}
         if request.max_tokens:
             kwargs["max_output_tokens"] = request.max_tokens
         try:
@@ -395,8 +443,7 @@ class OpenAIResponsesAdapter:
             if _is_not_found(exc):
                 # Only endpoint discovery may switch the adapter to Chat mode.
                 raise
-            msg, kind = _classify_error(exc)
-            yield ModelStreamItem(type=StreamItemType.error, error=msg, error_kind=kind)
+            yield _error_item(exc)
             return
 
         calls = _ToolCallAccumulator()
@@ -523,8 +570,7 @@ class OpenAIResponsesAdapter:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            msg, kind = _classify_error(exc)
-            yield ModelStreamItem(type=StreamItemType.error, error=msg, error_kind=kind)
+            yield _error_item(exc)
         finally:
             await _close_provider_stream(stream)
 
@@ -546,6 +592,8 @@ class OpenAIResponsesAdapter:
         }
         if tools:
             kwargs["tools"] = tools
+            if request.parallel_tool_calls is not None:
+                kwargs["parallel_tool_calls"] = request.parallel_tool_calls
         if request.max_tokens:
             kwargs["max_tokens"] = request.max_tokens
         # Best-effort usage on stream; retry without it only when the gateway
@@ -557,10 +605,7 @@ class OpenAIResponsesAdapter:
             raise
         except Exception as exc:  # noqa: BLE001
             if not _stream_options_unsupported(exc):
-                msg, kind = _classify_error(exc)
-                yield ModelStreamItem(
-                    type=StreamItemType.error, error=msg, error_kind=kind
-                )
+                yield _error_item(exc)
                 return
             kwargs.pop("stream_options", None)
             try:
@@ -568,10 +613,7 @@ class OpenAIResponsesAdapter:
             except asyncio.CancelledError:
                 raise
             except Exception as retry_exc:  # noqa: BLE001
-                msg, kind = _classify_error(retry_exc)
-                yield ModelStreamItem(
-                    type=StreamItemType.error, error=msg, error_kind=kind
-                )
+                yield _error_item(retry_exc)
                 return
 
         calls = _ToolCallAccumulator()
@@ -646,8 +688,7 @@ class OpenAIResponsesAdapter:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            msg, kind = _classify_error(exc)
-            yield ModelStreamItem(type=StreamItemType.error, error=msg, error_kind=kind)
+            yield _error_item(exc)
         finally:
             await _close_provider_stream(stream)
 

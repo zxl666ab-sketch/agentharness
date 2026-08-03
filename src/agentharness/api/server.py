@@ -24,7 +24,11 @@ from agentharness.api.execution import (
     ToolRecoveryDecisionBody,
     WebRunSupervisor,
 )
+from agentharness.api.procurement import procurement_router
+from agentharness.api.reporting import build_run_report
 from agentharness.harness import Harness
+from agentharness.procurement import ProcurementService
+from agentharness.procurement.agent import ProcurementAgent
 
 LEASE_SWEEP_INTERVAL_S = 30.0
 
@@ -106,6 +110,12 @@ def create_app(
         workspace_roots=workspace_roots,
         execution_enabled=execution_enabled,
     )
+    procurement = ProcurementService(runtime)
+    procurement_agent = ProcurementAgent(
+        runtime,
+        procurement,
+        approval_broker=supervisor.approvals,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -116,13 +126,20 @@ def create_app(
             sweeper.cancel()
             with suppress(asyncio.CancelledError):
                 await sweeper
+            await procurement_agent.aclose()
             await supervisor.aclose()
             if owns_harness:
                 await runtime.aclose()
 
-    app = FastAPI(title="Agent Harness Web API", version=__version__, lifespan=lifespan)
+    app = FastAPI(
+        title="采价台采购询价 API",
+        version=__version__,
+        lifespan=lifespan,
+    )
     app.state.harness = runtime
     app.state.run_supervisor = supervisor
+    app.state.procurement_service = procurement
+    app.state.procurement_agent = procurement_agent
     redactor = runtime.redactor
     public_redact = redactor.redact_public_obj
     dist = _resolve_web_dist(web_dist)
@@ -142,6 +159,12 @@ def create_app(
         if request.method != "POST":
             return False
         path = request.url.path
+        if path == "/api/procurement/conversations":
+            return True
+        if path == "/api/procurement/config":
+            return True
+        if path == "/api/procurement/requests" or path.startswith("/api/procurement/requests/"):
+            return True
         if path == "/api/runs":
             return True
         if path.startswith("/api/runs/"):
@@ -157,6 +180,16 @@ def create_app(
 
     @app.middleware("http")
     async def restrict_writes(request: Request, call_next):  # type: ignore[no-untyped-def]
+        if (
+            request.method == "POST"
+            and request.url.path.startswith("/api/procurement/")
+            and request.url.path != "/api/procurement/config"
+            and not supervisor.execution_enabled
+        ):
+            return JSONResponse(
+                {"detail": "Web execution is disabled for this server"},
+                status_code=403,
+            )
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} and not allowed_write(request):
             return JSONResponse(
                 {"detail": "Write method is not allowed for this resource"},
@@ -164,6 +197,8 @@ def create_app(
                 headers={"Allow": "GET, HEAD, OPTIONS"},
             )
         return await call_next(request)
+
+    app.include_router(procurement_router(procurement, procurement_agent))
 
     @app.get("/api/health")
     async def health(response: Response) -> dict[str, Any]:
@@ -276,6 +311,13 @@ def create_app(
             raise HTTPException(404, "run not found")
         return public_redact(row)
 
+    @app.get("/api/runs/{run_id}/report")
+    async def run_report(run_id: str) -> dict[str, Any]:
+        report = build_run_report(runtime, run_id)
+        if report is None:
+            raise HTTPException(404, "run not found")
+        return public_redact(report)
+
     @app.get("/api/runs/{run_id}/messages")
     async def messages(run_id: str) -> list[dict[str, Any]]:
         if runtime.get_run(run_id) is None:
@@ -351,6 +393,32 @@ def create_app(
         if text is not None:
             payload["content"] = redactor.redact_public_text(text[:100_000])
         return public_redact(payload)
+
+    @app.get("/api/artifacts/{artifact_id}/raw")
+    async def raw_artifact(artifact_id: str) -> Response:
+        value = runtime.get_artifact(artifact_id)
+        if value is None:
+            raise HTTPException(404, "artifact not found")
+        content = runtime.storage.artifacts.get_bytes(value["sha256"])
+        if content is None:
+            raise HTTPException(404, "artifact content not found")
+        content_type = str(value.get("content_type") or "application/octet-stream")
+        extension = {
+            "application/pdf": ".pdf",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+            "application/json": ".json",
+            "text/plain": ".txt",
+        }.get(content_type, ".bin")
+        disposition = "inline" if content_type in {"application/pdf", "application/json", "text/plain"} else "attachment"
+        return Response(
+            content=content,
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f'{disposition}; filename="artifact-{artifact_id[:12]}{extension}"',
+                "Content-Security-Policy": "sandbox",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @app.get("/api/stream")
     async def stream(

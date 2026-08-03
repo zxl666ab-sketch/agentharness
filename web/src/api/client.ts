@@ -44,6 +44,7 @@ export type MessageRow = {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
   name?: string | null;
+  tool_calls?: Array<Record<string, unknown>> | null;
   created_at: string;
 };
 
@@ -151,6 +152,24 @@ export type RuntimeInfo = {
   defaults: { approval: "ask"; allow_write: false };
 };
 
+export type VerificationInput = {
+  output?: {
+    contains?: string[];
+    not_contains?: string[];
+  };
+  files?: Array<{
+    path: string;
+    exists?: boolean;
+    contains?: string[];
+  }>;
+  commands?: Array<{
+    command: string;
+    contains?: string[];
+  }>;
+  max_retries?: number;
+  on_failure?: "failed" | "require_human";
+};
+
 export type CreateRunInput = {
   message: string;
   session_id?: string;
@@ -160,6 +179,7 @@ export type CreateRunInput = {
   workspace_id?: string;
   cwd?: string;
   allow_write?: boolean;
+  verification?: VerificationInput;
 };
 
 export type RunAccepted = {
@@ -170,6 +190,85 @@ export type RunAccepted = {
 };
 
 export type ToolRecoveryDecision = "mark_succeeded" | "skip" | "retry";
+
+export type VerificationAttempt = {
+  attempt: number;
+  step: number;
+  validators: string[];
+  max_retries: number;
+  started_at?: string | null;
+  finished_at?: string | null;
+  action: string;
+  passed: boolean;
+  failures: Array<{
+    validator?: string;
+    error_code?: string;
+    message?: string;
+    evidence?: Record<string, unknown>;
+    retryable?: boolean;
+    recovery_hint?: string | null;
+  }>;
+  evidence: Record<string, unknown>;
+  started_event_id?: string | null;
+  result_event_id?: string | null;
+};
+
+export type RunReport = {
+  schema_version: number;
+  run_id: string;
+  session_id: string;
+  as_of?: string | null;
+  evidence_sha256: string;
+  run: RunRow;
+  conclusion: {
+    status: "passed" | "failed" | "needs_review" | "pending" | "unverified" | "cancelled" | "interrupted";
+    label: string;
+    verified: boolean;
+    reason: string;
+  };
+  verification: {
+    configured: boolean;
+    policy?: {
+      validators?: Array<Record<string, unknown>>;
+      max_retries?: number;
+      on_exhausted?: string;
+    } | null;
+    attempts: VerificationAttempt[];
+    failure_reasons: string[];
+  };
+  workspace_changes: Array<{
+    invocation_id: string;
+    tool: string;
+    path?: string | null;
+    status: string;
+    changed: boolean;
+    expected_version?: string | null;
+    resulting_version?: string | null;
+    arguments_sha256: string;
+    artifact_id?: string | null;
+    finished_at?: string | null;
+  }>;
+  tools: ToolInvocationRow[];
+  approvals: ApprovalRow[];
+  artifacts: Array<{
+    id: string;
+    sha256: string;
+    content_type?: string | null;
+    size_bytes?: number | null;
+    summary?: string | null;
+    created_at: string;
+  }>;
+  usage: Record<string, unknown>;
+  events: EventRow[];
+  source: {
+    run_updated_at?: string | null;
+    max_global_seq: number;
+    event_count: number;
+    tool_count: number;
+    approval_count: number;
+    artifact_count: number;
+  };
+};
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
@@ -206,6 +305,7 @@ export const api = {
     return requestJson<RunRow[]>(`/api/runs?${query}`);
   },
   run: (runId: string) => requestJson<RunRow>(`/api/runs/${runId}`),
+  report: (runId: string) => requestJson<RunReport>(`/api/runs/${runId}/report`),
   messages: (runId: string) =>
     requestJson<MessageRow[]>(`/api/runs/${runId}/messages`),
   events: (runId: string) =>

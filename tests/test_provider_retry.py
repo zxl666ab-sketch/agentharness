@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 
 import pytest
@@ -30,12 +31,13 @@ class _SequenceProvider:
             yield item
 
 
-def _error(kind: str) -> list[ModelStreamItem]:
+def _error(kind: str, *, retry_after_s: float | None = None) -> list[ModelStreamItem]:
     return [
         ModelStreamItem(
             type=StreamItemType.error,
             error=f"injected {kind}",
             error_kind=kind,
+            retry_after_s=retry_after_s,
         )
     ]
 
@@ -102,6 +104,35 @@ async def test_retry_is_bounded_to_three_retries(data_dir, workspace) -> None:
     assert result.status == RunStatus.failed
     assert provider.calls == 4
     assert len(result.usage.provider_attempts) == 4
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_honors_provider_retry_after(data_dir, workspace) -> None:
+    provider = _SequenceProvider(
+        "rate-limited",
+        [_error("rate_limit", retry_after_s=0.03), _success("OK")],
+    )
+    harness = Harness(data_dir=data_dir, providers={provider.name: provider})
+    started = time.monotonic()
+    try:
+        result = await harness.run(
+            RunRequest(
+                message="respect retry-after",
+                provider=provider.name,
+                cwd=str(workspace),
+                provider_retry=ProviderRetryConfig(base_delay_s=0, jitter_ratio=0),
+            )
+        )
+        events = harness.get_events(run_id=result.run_id, limit=1000)
+    finally:
+        await harness.aclose()
+
+    elapsed = time.monotonic() - started
+    retry = next(event for event in events if str(event.type) == "provider_retry")
+    assert result.status == RunStatus.completed
+    assert elapsed >= 0.025
+    assert retry.payload["retry_after_s"] == 0.03
+    assert retry.payload["delay_s"] == 0.03
 
 
 @pytest.mark.asyncio

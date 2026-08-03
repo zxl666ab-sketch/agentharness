@@ -90,11 +90,12 @@ async def test_openai_stream_text_usage_done():
     client.responses.create = AsyncMock(return_value=_AsyncIter(events))
     ad = OpenAIResponsesAdapter(api_key="test-key")
     with patch.object(ad, "_get_client", return_value=client):
-        items = await _collect(ad, _req())
+        items = await _collect(ad, _req().model_copy(update={"reasoning_effort": "max"}))
     text = "".join(i.text or "" for i in items if i.type == StreamItemType.text_delta)
     assert text == "Hello"
     assert any(i.type == StreamItemType.usage for i in items)
     assert any(i.type == StreamItemType.done for i in items)
+    assert client.responses.create.await_args.kwargs["reasoning"] == {"effort": "max"}
     for i in items:
         assert "choices" not in i.model_dump()
 
@@ -219,6 +220,26 @@ async def test_openai_error_rate_limit_timeout_cancel():
         assert errs[0].error_kind == kind
 
 
+@pytest.mark.asyncio
+async def test_openai_rate_limit_preserves_retry_after_header():
+    error = Exception("Rate limit exceeded")
+    error.status_code = 429  # type: ignore[attr-defined]
+    error.response = SimpleNamespace(  # type: ignore[attr-defined]
+        headers={"Retry-After": "2.5"}
+    )
+    client = MagicMock()
+    client.responses.create = AsyncMock(side_effect=error)
+    adapter = OpenAIResponsesAdapter(api_key="test-key", api_mode="responses")
+
+    with patch.object(adapter, "_get_client", return_value=client):
+        items = await _collect(adapter, _req())
+
+    errors = [item for item in items if item.type == StreamItemType.error]
+    assert len(errors) == 1
+    assert errors[0].error_kind == "rate_limit"
+    assert errors[0].retry_after_s == 2.5
+
+
 def test_resolve_api_mode_prefers_chat_for_custom_base_url():
     from agentharness.providers.openai_adapter import resolve_openai_api_mode
 
@@ -308,7 +329,8 @@ async def test_chat_mode_streams_text_and_tools():
     )
     assert ad.api_mode == "chat"
     with patch.object(ad, "_get_client", return_value=client):
-        items = await _collect(ad, _req(tools=True))
+        request = _req(tools=True).model_copy(update={"parallel_tool_calls": False})
+        items = await _collect(ad, request)
     text = "".join(i.text or "" for i in items if i.type == StreamItemType.text_delta)
     assert text == "Hi"
     assert any(i.type == StreamItemType.tool_call_start for i in items)
@@ -322,6 +344,7 @@ async def test_chat_mode_streams_text_and_tools():
     kwargs = client.chat.completions.create.await_args.kwargs
     assert "messages" in kwargs
     assert kwargs["stream"] is True
+    assert kwargs["parallel_tool_calls"] is False
 
 
 @pytest.mark.asyncio

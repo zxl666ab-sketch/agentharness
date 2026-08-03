@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -237,6 +237,102 @@ MIGRATIONS: dict[int, str] = {
     );
     CREATE INDEX IF NOT EXISTS idx_tool_attempts_invocation
         ON tool_attempts(invocation_id, attempt);
+    """,
+    9: """
+    CREATE TABLE IF NOT EXISTS procurement_requests (
+        id TEXT PRIMARY KEY,
+        reference TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        category TEXT NOT NULL,
+        item_name TEXT NOT NULL,
+        quantity INTEGER NOT NULL,
+        unit TEXT NOT NULL,
+        specifications_json TEXT NOT NULL DEFAULT '{}',
+        constraints_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        analysis_run_id TEXT,
+        current_snapshot_id TEXT,
+        approved_quote_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id),
+        FOREIGN KEY (analysis_run_id) REFERENCES runs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_procurement_requests_updated
+        ON procurement_requests(updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS procurement_quotes (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        supplier_name TEXT NOT NULL,
+        source_filename TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        source_artifact_id TEXT NOT NULL,
+        source_sha256 TEXT NOT NULL,
+        extracted_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        review_count INTEGER NOT NULL DEFAULT 0,
+        parser_version TEXT NOT NULL,
+        processing_ms REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (request_id) REFERENCES procurement_requests(id),
+        FOREIGN KEY (source_artifact_id) REFERENCES artifacts(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_procurement_quotes_request
+        ON procurement_quotes(request_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS procurement_comparison_snapshots (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        input_sha256 TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        artifact_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(request_id, version),
+        FOREIGN KEY (request_id) REFERENCES procurement_requests(id),
+        FOREIGN KEY (run_id) REFERENCES runs(id),
+        FOREIGN KEY (artifact_id) REFERENCES artifacts(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_procurement_snapshots_request
+        ON procurement_comparison_snapshots(request_id, version DESC);
+
+    CREATE TABLE IF NOT EXISTS procurement_decisions (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        snapshot_id TEXT NOT NULL,
+        quote_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        note TEXT,
+        actor TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(request_id),
+        FOREIGN KEY (request_id) REFERENCES procurement_requests(id),
+        FOREIGN KEY (snapshot_id) REFERENCES procurement_comparison_snapshots(id),
+        FOREIGN KEY (quote_id) REFERENCES procurement_quotes(id),
+        FOREIGN KEY (run_id) REFERENCES runs(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS procurement_audit_events (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        quote_id TEXT,
+        run_id TEXT,
+        type TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (request_id) REFERENCES procurement_requests(id),
+        FOREIGN KEY (quote_id) REFERENCES procurement_quotes(id),
+        FOREIGN KEY (run_id) REFERENCES runs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_procurement_audit_request
+        ON procurement_audit_events(request_id, created_at);
     """,
 }
 

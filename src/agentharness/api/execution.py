@@ -14,7 +14,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from agentharness.contracts import (
     ApprovalDecision,
@@ -23,11 +23,151 @@ from agentharness.contracts import (
     BudgetConfig,
     RunRequest,
     ToolRecoveryDecision,
+    VerificationCheck,
+    VerificationPolicy,
     new_id,
 )
 from agentharness.harness import Harness
+from agentharness.security.sandbox import SandboxError, assert_in_workspace
 
 logger = logging.getLogger(__name__)
+
+
+def _bounded_strings(value: Any, *, field: str, max_items: int = 20) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be a list")
+    if len(value) > max_items:
+        raise ValueError(f"{field} accepts at most {max_items} values")
+    cleaned: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{field} values must be non-blank strings")
+        text = item.strip()
+        if len(text) > 2_000:
+            raise ValueError(f"{field} values may not exceed 2000 characters")
+        cleaned.append(text)
+    return cleaned
+
+
+class WebOutputVerification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contains: list[str] = Field(default_factory=list, max_length=20)
+    not_contains: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("contains", "not_contains", mode="before")
+    @classmethod
+    def validate_strings(cls, value: Any, info: Any) -> list[str]:
+        return _bounded_strings(value, field=info.field_name)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.contains or self.not_contains)
+
+
+class WebFileVerification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=2_000)
+    exists: bool = True
+    contains: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("path")
+    @classmethod
+    def path_must_be_workspace_relative(cls, value: str) -> str:
+        cleaned = value.strip()
+        candidate = Path(cleaned)
+        if not cleaned:
+            raise ValueError("path must not be blank")
+        if candidate.is_absolute() or candidate.drive or candidate.root:
+            raise ValueError("path must be relative to the selected workspace")
+        if ".." in candidate.parts:
+            raise ValueError("path may not traverse outside the selected workspace")
+        return cleaned
+
+    @field_validator("contains", mode="before")
+    @classmethod
+    def validate_contains(cls, value: Any) -> list[str]:
+        return _bounded_strings(value, field="contains")
+
+    @model_validator(mode="after")
+    def absent_file_cannot_have_content_assertions(self) -> WebFileVerification:
+        if not self.exists and self.contains:
+            raise ValueError("contains cannot be used when exists is false")
+        return self
+
+
+class WebCommandVerification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    command: str = Field(min_length=1, max_length=20_000)
+    contains: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("command")
+    @classmethod
+    def command_must_not_be_blank(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("command must not be blank")
+        return cleaned
+
+    @field_validator("contains", mode="before")
+    @classmethod
+    def validate_contains(cls, value: Any) -> list[str]:
+        return _bounded_strings(value, field="contains")
+
+
+class WebVerificationRules(BaseModel):
+    """Web-owned acceptance shape mapped once to the runtime policy contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    output: WebOutputVerification | None = None
+    files: list[WebFileVerification] = Field(default_factory=list, max_length=20)
+    commands: list[WebCommandVerification] = Field(default_factory=list, max_length=10)
+    max_retries: int = Field(default=0, ge=0, le=3)
+    on_failure: Literal["failed", "require_human"] = "failed"
+
+    @model_validator(mode="after")
+    def at_least_one_rule(self) -> WebVerificationRules:
+        if not ((self.output and self.output.configured) or self.files or self.commands):
+            raise ValueError("verification requires at least one configured rule")
+        return self
+
+    def to_policy(self) -> VerificationPolicy:
+        validators: list[VerificationCheck] = []
+        if self.output and self.output.configured:
+            validators.append(
+                VerificationCheck(
+                    kind="output",
+                    assertions={
+                        "contains": self.output.contains,
+                        "not_contains": self.output.not_contains,
+                    },
+                )
+            )
+        validators.extend(
+            VerificationCheck(
+                kind="file",
+                path=rule.path,
+                exists=rule.exists,
+                contains=rule.contains,
+            )
+            for rule in self.files
+        )
+        validators.extend(
+            VerificationCheck(
+                kind="command",
+                command=rule.command,
+                contains=rule.contains,
+            )
+            for rule in self.commands
+        )
+        return VerificationPolicy(
+            validators=validators,
+            max_retries=self.max_retries,
+            on_exhausted=self.on_failure,
+        )
 
 
 class CreateRunBody(BaseModel):
@@ -51,6 +191,7 @@ class CreateRunBody(BaseModel):
         description="Relative subdirectory inside the selected configured workspace.",
     )
     allow_write: bool = False
+    verification: WebVerificationRules | None = None
 
     @field_validator("message")
     @classmethod
@@ -219,6 +360,21 @@ class WebRunSupervisor:
         if "openai" not in self.harness.providers:
             raise RuntimeError("OpenAI provider is unavailable")
         cwd = self._resolve_cwd(body.workspace_id, body.cwd)
+        verification = body.verification.to_policy() if body.verification else None
+        if verification is not None:
+            for check in verification.validators:
+                if check.kind == "file" and check.path:
+                    try:
+                        assert_in_workspace(check.path, cwd=cwd, must_exist=False)
+                    except (SandboxError, OSError) as exc:
+                        raise ValueError(f"invalid verification file path: {exc}") from exc
+            if any(check.kind == "command" for check in verification.validators):
+                if not body.allow_write:
+                    raise ValueError(
+                        "verification commands require allow_write=true because Shell is destructive"
+                    )
+                if "shell" not in self.harness.tools:
+                    raise ValueError("verification commands require the governed shell tool")
         session_id = body.session_id or new_id()
         run_id = new_id()
         request = RunRequest(
@@ -239,6 +395,7 @@ class WebRunSupervisor:
             ),
             cwd=str(cwd),
             allow_write=body.allow_write,
+            verification=verification,
             metadata={"source": "web"},
         )
         task = asyncio.create_task(
@@ -376,5 +533,9 @@ __all__ = [
     "CreateRunBody",
     "ResumeRunBody",
     "ToolRecoveryDecisionBody",
+    "WebCommandVerification",
+    "WebFileVerification",
+    "WebOutputVerification",
     "WebRunSupervisor",
+    "WebVerificationRules",
 ]

@@ -192,6 +192,63 @@ def _serialized_tool_result(result: ToolResult) -> bytes:
     ).encode("utf-8")
 
 
+def _json_string_payload_bytes(text: str) -> int:
+    encoded = json.dumps(text, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return max(0, len(encoded) - 2)
+
+
+def _truncate_json_string_payload(text: str, max_bytes: int, suffix: str) -> str:
+    if _json_string_payload_bytes(text) <= max_bytes:
+        return text
+    bounded_suffix = suffix if _json_string_payload_bytes(suffix) <= max_bytes else ""
+    low = 0
+    high = len(text)
+    best = bounded_suffix
+    while low <= high:
+        midpoint = (low + high) // 2
+        candidate = text[:midpoint] + bounded_suffix
+        if _json_string_payload_bytes(candidate) <= max_bytes:
+            best = candidate
+            low = midpoint + 1
+        else:
+            high = midpoint - 1
+    return best
+
+
+def _fit_serialized_tool_result(result: ToolResult, max_bytes: int) -> ToolResult:
+    if len(_serialized_tool_result(result)) <= max_bytes:
+        return result
+    final_output = result.final_output
+    base = result.model_copy(
+        update={
+            "content": "",
+            "final_output": "" if final_output is not None else None,
+            "parts": [],
+        }
+    )
+    available = max(0, max_bytes - len(_serialized_tool_result(base)))
+    bounded_final = None
+    if final_output is not None:
+        bounded_final = _truncate_json_string_payload(
+            final_output,
+            available,
+            "\n...[final output limit reached]",
+        )
+        available -= _json_string_payload_bytes(bounded_final)
+    bounded_content = _truncate_json_string_payload(
+        result.content,
+        available,
+        "\n...[structured tool result limit reached]",
+    )
+    return result.model_copy(
+        update={
+            "content": bounded_content,
+            "final_output": bounded_final,
+            "parts": [],
+        }
+    )
+
+
 class ToolInvocationExecutor:
     """Governed execution of one batch of model tool calls.
 
@@ -1313,11 +1370,21 @@ class ToolInvocationExecutor:
         content = result.content
         if len(content.encode("utf-8")) > content_limit:
             content = _truncate_utf8(content, content_limit, content_marker)
+        final_output = result.final_output
+        if final_output is not None:
+            final_limit = min(content_limit, request.budget.max_output_length)
+            if len(final_output.encode("utf-8")) > final_limit:
+                final_output = _truncate_utf8(
+                    final_output,
+                    final_limit,
+                    "\n...[final output limit reached]",
+                )
 
         parts = result.parts or [ToolContentPart(type="text", text=content)]
         result = result.model_copy(
             update={
                 "content": content,
+                "final_output": final_output,
                 "parts": parts,
                 "error_code": (
                     _truncate_utf8(result.error_code, 128) if result.error_code else None
@@ -1336,30 +1403,8 @@ class ToolInvocationExecutor:
         )
 
         total_limit = request.budget.max_tool_result_bytes
+        result = _fit_serialized_tool_result(result, total_limit)
         serialized = _serialized_tool_result(result)
-        if len(serialized) > total_limit:
-            structured_marker = "\n...[structured tool result limit reached]"
-            result = result.model_copy(
-                update={
-                    "content": _truncate_utf8(
-                        result.content,
-                        max(0, total_limit - 768),
-                        structured_marker,
-                    ),
-                    "parts": [],
-                }
-            )
-            serialized = _serialized_tool_result(result)
-            if len(serialized) > total_limit:
-                result = result.model_copy(
-                    update={
-                        "content": _truncate_utf8(
-                            result.content, max(0, total_limit - 512)
-                        ),
-                        "recovery_hint": None,
-                    }
-                )
-                serialized = _serialized_tool_result(result)
 
         inline_limit = request.budget.max_inline_tool_result_bytes
         if len(serialized) > inline_limit:
@@ -1384,6 +1429,7 @@ class ToolInvocationExecutor:
                     ],
                 }
             )
+            result = _fit_serialized_tool_result(result, total_limit)
         return result
 
     def _effect_for(self, tool: Any, tc: ToolCall) -> EffectKind:

@@ -7,6 +7,7 @@ import pytest
 
 # Keep offline tests isolated from any project-level .env credentials.
 os.environ.setdefault("AGENTHARNESS_NO_DOTENV", "1")
+os.environ.setdefault("AGENTHARNESS_PROCUREMENT_PROVIDER", "procurement_fake")
 
 from agentharness.contracts import ApprovalDecision, ApprovalRequest
 from agentharness.harness import Harness

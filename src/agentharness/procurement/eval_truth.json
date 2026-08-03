@@ -1,0 +1,490 @@
+{
+  "schema_version": 3,
+  "name": "ecommerce-packaging-rfq-v3",
+  "analysis_as_of": "2026-07-27",
+  "layouts": [
+    {"id": "xlsx_vertical", "kind": "xlsx", "label": "纵向键值报价单"},
+    {"id": "xlsx_horizontal", "kind": "xlsx", "label": "横向明细报价表"},
+    {"id": "xlsx_sections", "kind": "xlsx", "label": "多工作表分区报价"},
+    {"id": "pdf_vertical", "kind": "pdf", "label": "纵向表单 PDF"},
+    {"id": "pdf_columns", "kind": "pdf", "label": "双栏商务 PDF"},
+    {"id": "pdf_table", "kind": "pdf", "label": "分组表格 PDF"}
+  ],
+  "anomalies": [
+    "per_thousand_unit_price",
+    "per_hundred_unit_price",
+    "per_piece_unit_price",
+    "tax_excluded",
+    "zero_tax_rate",
+    "shipping_separate",
+    "foreign_currency",
+    "moq_violation",
+    "moq_boundary",
+    "lead_time_violation",
+    "lead_time_boundary",
+    "specification_mismatch",
+    "tolerance_boundary",
+    "missing_supplier_low_confidence",
+    "missing_shipping_fee",
+    "missing_optional_field",
+    "invoice_unavailable",
+    "expired_quote",
+    "validity_boundary",
+    "budget_violation",
+    "combined_constraints",
+    "identity_mismatch"
+  ],
+  "request": {
+    "id": "eval-request-v2",
+    "item_name": "快递袋",
+    "quantity": 10000,
+    "unit": "piece",
+    "created_at": "2026-07-27T00:00:00+00:00",
+    "specifications": {
+      "width_mm": "250",
+      "length_mm": "350",
+      "thickness_um": "60",
+      "material": "PE",
+      "color": "白色",
+      "print_colors": 1
+    },
+    "constraints": {
+      "base_currency": "CNY",
+      "fx_rates": {"CNY": "1", "USD": "7.2", "EUR": "7.8"},
+      "max_lead_days": 15,
+      "invoice_required": true,
+      "max_landed_unit_cost": "0.70",
+      "size_tolerance_mm": "2",
+      "thickness_tolerance_um": "3"
+    }
+  },
+  "quote_defaults": {
+    "anomalies": [],
+    "omit_fields": [],
+    "fields": {
+      "supplier_name": "Default Supplier",
+      "item_description": "PE mailer 250x350mm 60um",
+      "material": "PE",
+      "color": "white",
+      "print_colors": 1,
+      "currency": "CNY",
+      "unit_price": "570",
+      "price_basis": 1000,
+      "tax_rate": "0.13",
+      "tax_included": true,
+      "shipping_fee": "0",
+      "shipping_included": true,
+      "moq": 3000,
+      "lead_time_days": 7,
+      "supports_invoice": true,
+      "width_mm": "250",
+      "length_mm": "350",
+      "thickness_um": "60",
+      "payment_terms": "Net 30 days",
+      "valid_until": "2026-12-31"
+    },
+    "expected_landed_total_base": "5700.00",
+    "expected_exclusions": [],
+    "expected_match": true
+  },
+  "quotes": [
+    {
+      "id": "q-alpha",
+      "filename": "Alpha Packaging.xlsx",
+      "demo_supplier_name": "华东优包",
+      "kind": "xlsx",
+      "layout": "xlsx_vertical",
+      "anomalies": ["per_thousand_unit_price"],
+      "fields": {"supplier_name": "Alpha Packaging", "unit_price": "520", "moq": 5000},
+      "expected_landed_total_base": "5200.00"
+    },
+    {
+      "id": "q-beta",
+      "filename": "Beta Pack.pdf",
+      "demo_supplier_name": "沪上包装",
+      "kind": "pdf",
+      "layout": "pdf_vertical",
+      "anomalies": ["per_piece_unit_price", "tax_excluded", "shipping_separate"],
+      "fields": {
+        "supplier_name": "Beta Pack",
+        "unit_price": "0.48",
+        "price_basis": 1,
+        "tax_included": false,
+        "shipping_fee": "600",
+        "shipping_included": false,
+        "lead_time_days": 9
+      },
+      "expected_landed_total_base": "6024.00"
+    },
+    {
+      "id": "q-gamma",
+      "filename": "Gamma Global.xlsx",
+      "demo_supplier_name": "海岳国际",
+      "kind": "xlsx",
+      "layout": "xlsx_horizontal",
+      "anomalies": ["per_piece_unit_price", "foreign_currency"],
+      "fields": {
+        "supplier_name": "Gamma Global",
+        "currency": "USD",
+        "unit_price": "0.075",
+        "price_basis": 1,
+        "tax_rate": "0",
+        "moq": 1000,
+        "lead_time_days": 10
+      },
+      "expected_landed_total_base": "5400.00"
+    },
+    {
+      "id": "q-delta",
+      "filename": "Delta Factory.xlsx",
+      "demo_supplier_name": "江南塑业",
+      "kind": "xlsx",
+      "layout": "xlsx_vertical",
+      "anomalies": ["moq_violation"],
+      "fields": {"supplier_name": "Delta Factory", "unit_price": "490", "moq": 20000},
+      "expected_landed_total_base": "4900.00",
+      "expected_exclusions": ["moq"]
+    },
+    {
+      "id": "q-epsilon",
+      "filename": "Epsilon Supply.xlsx",
+      "demo_supplier_name": "联采供应",
+      "kind": "xlsx",
+      "layout": "xlsx_horizontal",
+      "anomalies": ["lead_time_violation"],
+      "fields": {"supplier_name": "Epsilon Supply", "unit_price": "500", "lead_time_days": 25},
+      "expected_landed_total_base": "5000.00",
+      "expected_exclusions": ["lead_time"]
+    },
+    {
+      "id": "q-zeta",
+      "filename": "Zeta Materials.pdf",
+      "demo_supplier_name": "中泽材料",
+      "kind": "pdf",
+      "layout": "pdf_vertical",
+      "anomalies": ["specification_mismatch"],
+      "fields": {
+        "supplier_name": "Zeta Materials",
+        "item_description": "PE mailer 260x350mm 60um",
+        "unit_price": "480",
+        "width_mm": "260"
+      },
+      "expected_landed_total_base": "4800.00",
+      "expected_exclusions": ["spec_width_mm"],
+      "expected_match": false
+    },
+    {
+      "id": "q-eta",
+      "filename": "Eta Industrial.xlsx",
+      "demo_supplier_name": "安达实业",
+      "kind": "xlsx",
+      "layout": "xlsx_vertical",
+      "anomalies": ["invoice_unavailable"],
+      "fields": {"supplier_name": "Eta Industrial", "unit_price": "510", "supports_invoice": false},
+      "expected_landed_total_base": "5100.00",
+      "expected_exclusions": ["invoice"]
+    },
+    {
+      "id": "q-theta",
+      "filename": "Theta Packaging.pdf",
+      "demo_supplier_name": "星河包装",
+      "kind": "pdf",
+      "layout": "pdf_vertical",
+      "anomalies": ["missing_supplier_low_confidence"],
+      "omit_fields": ["supplier_name"],
+      "fields": {"supplier_name": "Theta Packaging", "unit_price": "530"},
+      "expected_landed_total_base": "5300.00"
+    },
+    {
+      "id": "q-iota",
+      "filename": "Iota Commerce.xlsx",
+      "demo_supplier_name": "易达商贸",
+      "kind": "xlsx",
+      "layout": "xlsx_horizontal",
+      "anomalies": ["expired_quote"],
+      "fields": {"supplier_name": "Iota Commerce", "unit_price": "515", "valid_until": "2025-12-31"},
+      "expected_landed_total_base": "5150.00",
+      "expected_exclusions": ["expired"]
+    },
+    {
+      "id": "q-kappa",
+      "filename": "Kappa Packaging.xlsx",
+      "demo_supplier_name": "北辰包装",
+      "kind": "xlsx",
+      "layout": "xlsx_vertical",
+      "anomalies": ["per_piece_unit_price"],
+      "fields": {"supplier_name": "Kappa Packaging", "unit_price": "0.56", "price_basis": 1},
+      "expected_landed_total_base": "5600.00"
+    },
+    {
+      "id": "q-lambda",
+      "filename": "Lambda Plastics.xlsx",
+      "demo_supplier_name": "嘉禾塑业",
+      "kind": "xlsx",
+      "layout": "xlsx_horizontal",
+      "anomalies": ["per_piece_unit_price", "tax_excluded"],
+      "fields": {"supplier_name": "Lambda Plastics", "unit_price": "0.50", "price_basis": 1, "tax_included": false},
+      "expected_landed_total_base": "5650.00"
+    },
+    {
+      "id": "q-mu",
+      "filename": "Mu Supply.xlsx",
+      "demo_supplier_name": "云帆供应",
+      "kind": "xlsx",
+      "layout": "xlsx_sections",
+      "anomalies": ["shipping_separate"],
+      "fields": {"supplier_name": "Mu Supply", "unit_price": "510", "shipping_fee": "450", "shipping_included": false},
+      "expected_landed_total_base": "5550.00"
+    },
+    {
+      "id": "q-nu",
+      "filename": "Nu Trading.xlsx",
+      "demo_supplier_name": "欧陆商贸",
+      "kind": "xlsx",
+      "layout": "xlsx_sections",
+      "anomalies": ["per_piece_unit_price", "foreign_currency"],
+      "fields": {"supplier_name": "Nu Trading", "currency": "EUR", "unit_price": "0.07", "price_basis": 1, "tax_rate": "0"},
+      "expected_landed_total_base": "5460.00"
+    },
+    {
+      "id": "q-xi",
+      "filename": "Xi Packaging.pdf",
+      "demo_supplier_name": "瑞丰包装",
+      "kind": "pdf",
+      "layout": "pdf_vertical",
+      "anomalies": ["moq_boundary"],
+      "fields": {"supplier_name": "Xi Packaging", "unit_price": "540", "moq": 10000},
+      "expected_landed_total_base": "5400.00"
+    },
+    {
+      "id": "q-omicron",
+      "filename": "Omicron Industrial.pdf",
+      "demo_supplier_name": "东港实业",
+      "kind": "pdf",
+      "layout": "pdf_columns",
+      "anomalies": ["lead_time_boundary"],
+      "fields": {"supplier_name": "Omicron Industrial", "unit_price": "545", "lead_time_days": 15},
+      "expected_landed_total_base": "5450.00"
+    },
+    {
+      "id": "q-pi",
+      "filename": "Pi Materials.xlsx",
+      "demo_supplier_name": "宏远材料",
+      "kind": "xlsx",
+      "layout": "xlsx_vertical",
+      "anomalies": ["specification_mismatch"],
+      "fields": {
+        "supplier_name": "Pi Materials",
+        "item_description": "PE mailer 250x365mm 60um",
+        "unit_price": "470",
+        "length_mm": "365"
+      },
+      "expected_landed_total_base": "4700.00",
+      "expected_exclusions": ["spec_length_mm"],
+      "expected_match": false
+    },
+    {
+      "id": "q-rho",
+      "filename": "Rho Packaging.xlsx",
+      "demo_supplier_name": "金桥包装",
+      "kind": "xlsx",
+      "layout": "xlsx_horizontal",
+      "anomalies": ["specification_mismatch"],
+      "fields": {
+        "supplier_name": "Rho Packaging",
+        "item_description": "PE mailer 250x350mm 68um",
+        "unit_price": "460",
+        "thickness_um": "68"
+      },
+      "expected_landed_total_base": "4600.00",
+      "expected_exclusions": ["spec_thickness_um"],
+      "expected_match": false
+    },
+    {
+      "id": "q-sigma",
+      "filename": "Sigma Supply.xlsx",
+      "demo_supplier_name": "德润供应",
+      "kind": "xlsx",
+      "layout": "xlsx_sections",
+      "anomalies": ["zero_tax_rate"],
+      "fields": {"supplier_name": "Sigma Supply", "unit_price": "550", "tax_rate": "0"},
+      "expected_landed_total_base": "5500.00"
+    },
+    {
+      "id": "q-tau",
+      "filename": "Tau Plastics.pdf",
+      "demo_supplier_name": "新城塑业",
+      "kind": "pdf",
+      "layout": "pdf_vertical",
+      "anomalies": ["per_piece_unit_price", "tax_excluded"],
+      "fields": {"supplier_name": "Tau Plastics", "unit_price": "0.47", "price_basis": 1, "tax_included": false},
+      "expected_landed_total_base": "5311.00"
+    },
+    {
+      "id": "q-upsilon",
+      "filename": "Upsilon Packaging.pdf",
+      "demo_supplier_name": "海川包装",
+      "kind": "pdf",
+      "layout": "pdf_columns",
+      "anomalies": ["validity_boundary"],
+      "fields": {"supplier_name": "Upsilon Packaging", "unit_price": "535", "valid_until": "2026-07-27"},
+      "expected_landed_total_base": "5350.00"
+    },
+    {
+      "id": "q-phi",
+      "filename": "Phi Global.xlsx",
+      "demo_supplier_name": "联环球",
+      "kind": "xlsx",
+      "layout": "xlsx_sections",
+      "anomalies": ["per_piece_unit_price", "foreign_currency", "shipping_separate"],
+      "fields": {"supplier_name": "Phi Global", "currency": "USD", "unit_price": "0.073", "price_basis": 1, "shipping_fee": "25", "shipping_included": false},
+      "expected_landed_total_base": "5436.00"
+    },
+    {
+      "id": "q-chi",
+      "filename": "Chi Materials.pdf",
+      "demo_supplier_name": "鼎盛材料",
+      "kind": "pdf",
+      "layout": "pdf_columns",
+      "anomalies": ["budget_violation"],
+      "fields": {"supplier_name": "Chi Materials", "unit_price": "750"},
+      "expected_landed_total_base": "7500.00",
+      "expected_exclusions": ["budget"]
+    },
+    {
+      "id": "q-psi",
+      "filename": "Psi Packaging.pdf",
+      "demo_supplier_name": "顺达包装",
+      "kind": "pdf",
+      "layout": "pdf_table",
+      "anomalies": ["shipping_separate", "missing_shipping_fee"],
+      "omit_fields": ["shipping_fee"],
+      "fields": {"supplier_name": "Psi Packaging", "unit_price": "500", "shipping_fee": "650", "shipping_included": false},
+      "expected_landed_total_base": "5650.00"
+    },
+    {
+      "id": "q-omega",
+      "filename": "Omega Trading.pdf",
+      "demo_supplier_name": "远航商贸",
+      "kind": "pdf",
+      "layout": "pdf_table",
+      "anomalies": ["missing_optional_field"],
+      "omit_fields": ["payment_terms"],
+      "fields": {"supplier_name": "Omega Trading", "unit_price": "575"},
+      "expected_landed_total_base": "5750.00"
+    },
+    {
+      "id": "q-25",
+      "filename": "Anxin Packaging.xlsx",
+      "demo_supplier_name": "安信包装",
+      "kind": "xlsx",
+      "layout": "xlsx_sections",
+      "anomalies": ["combined_constraints", "moq_violation", "lead_time_violation"],
+      "fields": {"supplier_name": "Anxin Packaging", "unit_price": "450", "moq": 15000, "lead_time_days": 30},
+      "expected_landed_total_base": "4500.00",
+      "expected_exclusions": ["moq", "lead_time"]
+    },
+    {
+      "id": "q-26",
+      "filename": "Changlong Industrial.pdf",
+      "demo_supplier_name": "昌隆实业",
+      "kind": "pdf",
+      "layout": "pdf_columns",
+      "anomalies": ["combined_constraints", "specification_mismatch", "invoice_unavailable"],
+      "fields": {
+        "supplier_name": "Changlong Industrial",
+        "item_description": "PE mailer 260x350mm 60um",
+        "unit_price": "440",
+        "supports_invoice": false,
+        "width_mm": "260"
+      },
+      "expected_landed_total_base": "4400.00",
+      "expected_exclusions": ["invoice", "spec_width_mm"],
+      "expected_match": false
+    },
+    {
+      "id": "q-27",
+      "filename": "Tiancheng Materials.pdf",
+      "demo_supplier_name": "天成材料",
+      "kind": "pdf",
+      "layout": "pdf_table",
+      "anomalies": ["per_hundred_unit_price", "tax_excluded", "shipping_separate"],
+      "fields": {
+        "supplier_name": "Tiancheng Materials",
+        "unit_price": "52",
+        "price_basis": 100,
+        "tax_rate": "0.06",
+        "tax_included": false,
+        "shipping_fee": "288",
+        "shipping_included": false
+      },
+      "expected_landed_total_base": "5800.00"
+    },
+    {
+      "id": "q-28",
+      "filename": "Yongsheng Packaging.pdf",
+      "demo_supplier_name": "永盛包装",
+      "kind": "pdf",
+      "layout": "pdf_columns",
+      "anomalies": ["tolerance_boundary"],
+      "fields": {
+        "supplier_name": "Yongsheng Packaging",
+        "item_description": "PE mailer 252x348mm 63um",
+        "unit_price": "590",
+        "width_mm": "252",
+        "length_mm": "348",
+        "thickness_um": "63"
+      },
+      "expected_landed_total_base": "5900.00"
+    },
+    {
+      "id": "q-29",
+      "filename": "Huaxin Supply.pdf",
+      "demo_supplier_name": "华信供应",
+      "kind": "pdf",
+      "layout": "pdf_table",
+      "anomalies": ["expired_quote"],
+      "fields": {"supplier_name": "Huaxin Supply", "unit_price": "480", "valid_until": "2026-07-26"},
+      "expected_landed_total_base": "4800.00",
+      "expected_exclusions": ["expired"]
+    },
+    {
+      "id": "q-30",
+      "filename": "Chengda Plastics.pdf",
+      "demo_supplier_name": "诚达塑业",
+      "kind": "pdf",
+      "layout": "pdf_table",
+      "anomalies": ["per_piece_unit_price", "tax_excluded", "shipping_separate", "foreign_currency"],
+      "fields": {
+        "supplier_name": "Chengda Plastics",
+        "currency": "USD",
+        "unit_price": "0.065",
+        "price_basis": 1,
+        "tax_included": false,
+        "shipping_fee": "20",
+        "shipping_included": false
+      },
+      "expected_landed_total_base": "5432.40"
+    },
+    {
+      "id": "q-31",
+      "filename": "Wrong Identity Plastics.xlsx",
+      "demo_supplier_name": "错误物料低价样本",
+      "kind": "xlsx",
+      "layout": "xlsx_vertical",
+      "anomalies": ["identity_mismatch"],
+      "fields": {
+        "supplier_name": "Wrong Identity Plastics",
+        "item_description": "PVC black trash bag 250x350mm 60um unprinted",
+        "material": "PVC",
+        "color": "black",
+        "print_colors": 0,
+        "unit_price": "100"
+      },
+      "expected_landed_total_base": "1000.00",
+      "expected_exclusions": ["item_identity", "spec_material", "spec_color", "spec_print_colors"],
+      "expected_match": false
+    }
+  ],
+  "expected_recommended_quote_id": "q-alpha"
+}
