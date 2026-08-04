@@ -202,6 +202,43 @@ describe("Procurement sourcing workspace", () => {
     expect(html).not.toContain("把目标交给 Agent");
   });
 
+  it("exposes a delete action for each procurement task", () => {
+    const client = new QueryClient();
+    client.setQueryData(["health"], {
+      service: "agentharness",
+      status: "ok",
+      backend_version: "0.3.0",
+      api_schema_version: REQUIRED_API_SCHEMA_VERSION,
+      api_capabilities: ["run_execution_v1", "interactive_approval_v1"],
+      data_dir: "/tmp/data",
+      max_global_seq: 0,
+    });
+    client.setQueryData(["procurement-requests"], [{
+      id: "request-delete",
+      reference: "RFQ-DELETE-001",
+      title: "待删除采购任务",
+      category: "general",
+      item_name: "纸箱",
+      quantity: 10,
+      unit: "个",
+      specifications: {},
+      constraints: {},
+      status: "draft",
+      session_id: "session-delete",
+      quote_count: 0,
+      unresolved_field_count: 0,
+      created_at: "2026-07-25T00:00:00Z",
+      updated_at: "2026-07-25T00:00:00Z",
+    }]);
+
+    const html = renderToString(
+      <QueryClientProvider client={client}><App /></QueryClientProvider>
+    );
+
+    expect(html).toContain('aria-label="删除任务 RFQ-DELETE-001"');
+    expect(html).toContain('title="删除任务"');
+  });
+
   it("labels operational activity without falling back to run status text", () => {
     expect(eventLabel(event("run_started"))).toBe("开始运行");
     expect(eventLabel(event("tool_call_start", { name: "write_file" }))).toBe(

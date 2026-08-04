@@ -15,6 +15,7 @@ import {
   Settings,
   ShieldCheck,
   Sun,
+  Trash2,
   Wifi,
   X,
 } from "lucide-react";
@@ -30,10 +31,12 @@ import {
 } from "./ProcurementConversation";
 import { QuoteWorkspace } from "./QuoteWorkspace";
 import { ReportView } from "./ReportView";
+import { RequirementReview } from "./RequirementReview";
 import type {
   ProcurementModelConfig,
   ProcurementModelConfigUpdate,
   ProcurementRequest,
+  ProcurementRequestSummary,
   ProcurementStatus,
 } from "./types";
 
@@ -52,6 +55,7 @@ const STATUS: Record<ProcurementStatus, { label: string; tone: string; step: num
   ready: { label: "待比价", tone: "info", step: 3 },
   analyzed: { label: "待审批", tone: "warning", step: 4 },
   approved: { label: "已批准", tone: "success", step: 5 },
+  no_award: { label: "本轮流标", tone: "neutral", step: 5 },
 };
 
 const STEPS = ["创建需求", "上传报价", "字段复核", "供应商比价", "人工审批"];
@@ -62,6 +66,21 @@ function errorText(error: unknown) {
 
 function requestDate(value: string) {
   return new Date(value).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
+}
+
+function quantityText(value: number | string) {
+  return typeof value === "number" ? value.toLocaleString("zh-CN") : String(value);
+}
+
+function specificationText(specifications: ProcurementRequest["specifications"]) {
+  const values = Object.entries(specifications || {}).slice(0, 3).map(([key, value]) => {
+    if (value && typeof value === "object" && "value" in value) {
+      const spec = value as { label?: string; value?: unknown; unit?: string };
+      return `${spec.label || key} ${String(spec.value ?? "-")}${spec.unit ? ` ${spec.unit}` : ""}`;
+    }
+    return `${key} ${String(value ?? "-")}`;
+  });
+  return values.join(" · ") || "未填写规格";
 }
 
 const DEFAULT_CONFIG_FORM: ProcurementModelConfigUpdate = {
@@ -104,6 +123,9 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   const [configBusy, setConfigBusy] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
   const [configNotice, setConfigNotice] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ProcurementRequestSummary | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const metaQuery = useQuery({ queryKey: ["procurement-meta"], queryFn: procurementApi.meta });
   const configQuery = useQuery({ queryKey: ["procurement-config"], queryFn: procurementApi.config });
@@ -219,6 +241,22 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     }
   }
 
+  async function correctRequirement(
+    payload: Parameters<typeof procurementApi.correctRequirement>[1],
+  ) {
+    if (!selectedId) return;
+    setBusy("requirement");
+    setActionError(null);
+    try {
+      await commit(await procurementApi.correctRequirement(selectedId, payload));
+    } catch (error) {
+      setActionError(errorText(error));
+      throw error;
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function analyze() {
     if (!selectedId) return;
     setBusy("analyze");
@@ -262,6 +300,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     setActionError(null);
     try {
       const updated = await procurementApi.approve(selectedId, {
+        decision: "approved",
         snapshot_id: detail.comparison.id,
         input_sha256: detail.comparison.input_sha256,
         quote_id: quoteId,
@@ -274,6 +313,73 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
       setActionError(errorText(error));
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function noAward(note: string) {
+    const detail = detailQuery.data;
+    if (!selectedId || !detail?.comparison) return;
+    setBusy("no_award");
+    setActionError(null);
+    try {
+      const updated = await procurementApi.approve(selectedId, {
+        decision: "no_award",
+        snapshot_id: detail.comparison.id,
+        input_sha256: detail.comparison.input_sha256,
+        quote_id: null,
+        confirmed: true,
+        note,
+      });
+      await commit(updated);
+      setActiveTab("report");
+    } catch (error) {
+      setActionError(errorText(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function reopen(copyQuotes: boolean) {
+    if (!selectedId) return;
+    setBusy(copyQuotes ? "reopen_quotes" : "reopen");
+    setActionError(null);
+    try {
+      const updated = await procurementApi.reopen(selectedId, copyQuotes);
+      await commit(updated);
+      setSelectedId(updated.id);
+      setActiveTab("quotes");
+    } catch (error) {
+      setActionError(errorText(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function openDelete(request: ProcurementRequestSummary) {
+    setDeleteTarget(request);
+    setDeleteError(null);
+  }
+
+  async function deleteRequest() {
+    if (!deleteTarget) return;
+    const requestId = deleteTarget.id;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      await procurementApi.deleteRequest(requestId);
+      await queryClient.cancelQueries({ queryKey: ["procurement-request", requestId] });
+      queryClient.removeQueries({ queryKey: ["procurement-request", requestId] });
+      setDeleteTarget(null);
+      if (selectedId === requestId) {
+        setSelectedId(null);
+        setShowCreate(true);
+        setActiveTab("quotes");
+      }
+      await queryClient.invalidateQueries({ queryKey: ["procurement-requests"] });
+    } catch (error) {
+      setDeleteError(errorText(error));
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
@@ -352,16 +458,29 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
             {filtered.map((request) => {
               const itemStatus = STATUS[request.status];
               return (
-                <button
-                  type="button"
+                <div
                   className={`proc-request-item ${selectedId === request.id ? "selected" : ""}`}
                   key={request.id}
-                  onClick={() => { setSelectedId(request.id); setShowCreate(false); setActiveTab("quotes"); setActionError(null); }}
                 >
-                  <span className="proc-request-row"><code>{request.reference}</code><small>{requestDate(request.updated_at)}</small></span>
-                  <strong>{request.title}</strong>
-                  <span className="proc-request-row"><small>{request.quote_count} 家报价 · {request.quantity.toLocaleString("zh-CN")} 个</small><i className={itemStatus.tone}>{itemStatus.label}</i></span>
-                </button>
+                  <button
+                    type="button"
+                    className="proc-request-item-main"
+                    onClick={() => { setSelectedId(request.id); setShowCreate(false); setActiveTab("quotes"); setActionError(null); }}
+                  >
+                    <span className="proc-request-row"><code>{request.reference}</code><small>{requestDate(request.updated_at)}</small></span>
+                    <strong>{request.title}</strong>
+                    <span className="proc-request-row"><small>{request.quote_count} 家报价 · {quantityText(request.quantity)} {request.unit}</small><i className={itemStatus.tone}>{itemStatus.label}</i></span>
+                  </button>
+                  <button
+                    className="proc-request-delete proc-icon-button"
+                    type="button"
+                    title="删除任务"
+                    aria-label={`删除任务 ${request.reference}`}
+                    onClick={() => openDelete(request)}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
               );
             })}
             {!requestsQuery.isPending && !requestsQuery.isError && !filtered.length ? (
@@ -389,9 +508,9 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                 </div>
                 <div className="proc-request-facts">
                   <span><small>物料</small><strong>{detail.item_name}</strong></span>
-                  <span><small>采购量</small><strong>{detail.quantity.toLocaleString("zh-CN")} 个</strong></span>
-                  <span><small>规格</small><strong>{String(detail.specifications.width_mm)} × {String(detail.specifications.length_mm)} mm · {String(detail.specifications.thickness_um)} µm</strong></span>
-                  <span><small>最长交期</small><strong>{String(detail.constraints.max_lead_days)} 天</strong></span>
+                  <span><small>采购量</small><strong>{quantityText(detail.quantity)} {detail.unit}</strong></span>
+                  <span><small>规格</small><strong>{specificationText(detail.specifications)}</strong></span>
+                  <span><small>最长交期</small><strong>{String(detail.constraints.max_lead_days ?? "-")} 天</strong></span>
                 </div>
                 <ol className="proc-progress" aria-label="采购进度">
                   {STEPS.map((step, index) => (
@@ -421,7 +540,10 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
 
                   <div className="proc-tab-content">
                     {activeTab === "quotes" && metaQuery.data ? (
-                      <QuoteWorkspace request={detail} meta={metaQuery.data} busy={busy} error={actionError} onUpload={uploadQuotes} onCorrect={correctField} onAnalyze={analyze} />
+                      <>
+                        <RequirementReview request={detail} busy={busy === "requirement"} error={actionError} onSave={correctRequirement} />
+                        <QuoteWorkspace request={detail} meta={metaQuery.data} busy={busy} error={actionError} onUpload={uploadQuotes} onCorrect={correctField} onAnalyze={analyze} />
+                      </>
                     ) : null}
                     {activeTab === "quotes" && metaQuery.isPending ? (
                       <div className="proc-loading-state">正在加载报价字段配置…</div>
@@ -435,10 +557,25 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                       </section>
                     ) : null}
                     {activeTab === "compare" ? (
-                      <ComparisonView request={detail} busy={busy} error={actionError} onAnalyze={analyze} onApprove={approve} />
+                      <ComparisonView
+                        request={detail}
+                        busy={busy}
+                        error={actionError}
+                        onAnalyze={analyze}
+                        onApprove={approve}
+                        onNoAward={noAward}
+                        onOpenRequirement={() => setActiveTab("quotes")}
+                        onOpenQuotes={() => setActiveTab("quotes")}
+                      />
                     ) : null}
                     {activeTab === "report" ? (
-                      <ReportView request={detail} report={reportQuery.data || null} loading={reportQuery.isPending} error={reportQuery.isError ? errorText(reportQuery.error) : null} />
+                      <ReportView
+                        request={detail}
+                        report={reportQuery.data || null}
+                        loading={reportQuery.isPending}
+                        error={reportQuery.isError ? errorText(reportQuery.error) : null}
+                        onReopen={reopen}
+                      />
                     ) : null}
                     {activeTab === "audit" ? <AuditView request={detail} /> : null}
                   </div>
@@ -457,6 +594,37 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
           ) : null}
         </section>
       </main>
+
+      {deleteTarget ? (
+        <div
+          className="proc-drawer-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !deleteBusy) setDeleteTarget(null);
+          }}
+        >
+          <section className="proc-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-request-title">
+            <header>
+              <div><Trash2 size={17} /><h2 id="delete-request-title">删除采购任务</h2></div>
+              <button className="proc-icon-button compact" type="button" title="关闭" aria-label="关闭" onClick={() => setDeleteTarget(null)} disabled={deleteBusy}>
+                <X size={16} />
+              </button>
+            </header>
+            <div className="proc-delete-target">
+              <strong>{deleteTarget.reference}</strong>
+              <span>{deleteTarget.title}</span>
+            </div>
+            <p className="proc-confirm-warning">删除后将移除任务列表中的采购需求、报价、比价快照和审批记录，不能恢复。</p>
+            {deleteError ? <p className="proc-form-error" role="alert">{deleteError}</p> : null}
+            <footer>
+              <button className="proc-button secondary" type="button" onClick={() => setDeleteTarget(null)} disabled={deleteBusy}>取消</button>
+              <button className="proc-button danger" type="button" onClick={() => void deleteRequest()} disabled={deleteBusy}>
+                {deleteBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}删除任务
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
 
       {showConfig ? (
         <div

@@ -84,7 +84,11 @@ class BrowserTool:
                     "url": {"type": "string", "minLength": 1, "maxLength": 8_192},
                     "selector": {"type": "string", "minLength": 1, "maxLength": 16_384},
                     "text": {"type": "string", "maxLength": 262_144},
-                    "headless": {"type": "boolean", "default": True},
+                    "headless": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Compatibility field; visible browser mode is disabled.",
+                    },
                     "timeout_s": {
                         "type": "number",
                         "minimum": 0.01,
@@ -144,7 +148,6 @@ class BrowserTool:
                     key,
                     context_id,
                     profile,
-                    bool(arguments.get("headless", True)),
                 )
             if action == "goto":
                 return await self._goto(
@@ -206,7 +209,6 @@ class BrowserTool:
         key: tuple[str, str],
         context_id: str,
         profile: Path,
-        headless: bool,
     ) -> ToolResult:
         if key in self._browsers:
             return ToolResult(
@@ -219,7 +221,9 @@ class BrowserTool:
         # Isolated user data dir — never the real user Chrome profile
         browser = await pw.chromium.launch_persistent_context(
             user_data_dir=str(profile),
-            headless=headless,
+            # Keep the project browser tool invisible even if an old caller
+            # still sends the compatibility-only ``headless`` argument.
+            headless=True,
             viewport={"width": 1280, "height": 720},
         )
         page = browser.pages[0] if browser.pages else await browser.new_page()

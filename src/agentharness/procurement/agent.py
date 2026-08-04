@@ -371,55 +371,66 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
         )
         if approval is None:
             raise ProcurementError("没有找到已由采购员确认的 Harness Approval")
+        decision = str(arguments.get("decision") or "approved")
+        raw_quote_id = arguments.get("quote_id")
+        quote_id = str(raw_quote_id) if raw_quote_id is not None else None
         detail = service.approve_supplier_from_agent(
             str(arguments["request_id"]),
             snapshot_id=str(arguments["snapshot_id"]),
             input_sha256=str(arguments["input_sha256"]),
-            quote_id=str(arguments["quote_id"]),
+            quote_id=quote_id,
+            decision=decision,
             run_id=ctx.run_id,
             approval_id=str(approval["id"]),
             note=arguments.get("note"),
             actor=str(arguments["actor"]),
         )
         selected = next(
-            quote for quote in detail["quotes"] if quote["id"] == arguments["quote_id"]
+            (quote for quote in detail["quotes"] if quote["id"] == quote_id),
+            None,
         )
         return {
             "ok": True,
-            "stage": "supplier_approved",
+            "stage": "supplier_approved" if decision == "approved" else "no_award",
             "decision_id": detail["decision"]["id"],
             "approval_id": approval["id"],
-            "quote_id": selected["id"],
-            "supplier_name": selected["supplier_name"],
+            "decision": decision,
+            "quote_id": selected["id"] if selected else None,
+            "supplier_name": selected["supplier_name"] if selected else None,
         }
 
     capture_schema = {
         "type": "object",
         "properties": {
             "request_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+            "schema_version": {"type": "integer", "enum": [1, 2]},
             "title": {"type": "string", "minLength": 1, "maxLength": 200},
             "item_name": {"type": "string", "minLength": 1, "maxLength": 200},
-            "quantity": {"type": "integer", "minimum": 1, "maximum": 100000000},
-            "unit": {"const": "piece"},
+            "category": {"type": "string", "minLength": 1, "maxLength": 100},
+            "quantity": {"type": ["string", "number"], "exclusiveMinimum": 0},
+            "unit": {"type": "string", "minLength": 1, "maxLength": 50},
             "specifications": {
                 "type": "object",
-                "properties": {
-                    "width_mm": {"type": ["string", "number"]},
-                    "length_mm": {"type": ["string", "number"]},
-                    "thickness_um": {"type": ["string", "number"]},
-                    "material": {"type": "string"},
-                    "color": {"type": "string"},
-                    "print_colors": {"type": "integer", "minimum": 0, "maximum": 12},
+                "additionalProperties": {
+                    "anyOf": [
+                        {"type": ["string", "number", "boolean", "null"]},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string", "maxLength": 120},
+                                "type": {"type": "string", "enum": ["number", "text", "boolean"]},
+                                "value": {"type": ["string", "number", "boolean", "null"]},
+                                "unit": {"type": "string", "maxLength": 40},
+                                "match": {"type": "string", "enum": ["exact", "tolerance", "range", "gte", "lte"]},
+                                "priority": {"type": "string", "enum": ["hard", "preference"]},
+                                "tolerance": {"type": ["string", "number"]},
+                                "min": {"type": ["string", "number"]},
+                                "max": {"type": ["string", "number"]},
+                            },
+                            "additionalProperties": False,
+                        },
+                    ]
                 },
-                "required": [
-                    "width_mm",
-                    "length_mm",
-                    "thickness_um",
-                    "material",
-                    "color",
-                    "print_colors",
-                ],
-                "additionalProperties": False,
             },
             "constraints": {
                 "type": "object",
@@ -429,7 +440,9 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
                         "type": "object",
                         "description": (
                             "Keys must be ISO 3-letter currency codes relative to "
-                            "base_currency, such as USD. Do not use pair strings like USD/CNY."
+                            "base_currency, such as USD. Always include the base currency "
+                            "with numeric rate 1. Do not use pair strings like USD/CNY. "
+                            "If no foreign currency is mentioned, use {base_currency: 1}."
                         ),
                         "additionalProperties": {"type": ["string", "number"]},
                     },
@@ -439,8 +452,14 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
                         "exclusiveMinimum": 0,
                     },
                     "invoice_required": {"type": "boolean"},
-                    "size_tolerance_mm": {"type": ["string", "number"]},
-                    "thickness_tolerance_um": {"type": ["string", "number"]},
+                    "size_tolerance_mm": {
+                        "type": ["string", "number"],
+                        "description": "Numeric tolerance in mm; if omitted by the user, use 2.",
+                    },
+                    "thickness_tolerance_um": {
+                        "type": ["string", "number"],
+                        "description": "Numeric tolerance in microns; if omitted by the user, use 3.",
+                    },
                     "destination": {"type": "string", "maxLength": 300},
                 },
                 "required": [
@@ -448,8 +467,6 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
                     "fx_rates",
                     "max_lead_days",
                     "invoice_required",
-                    "size_tolerance_mm",
-                    "thickness_tolerance_um",
                 ],
                 "additionalProperties": False,
             },
@@ -471,7 +488,13 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
             "request_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
             "snapshot_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
             "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            "quote_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+            "decision": {"type": "string", "enum": ["approved", "no_award"]},
+            "quote_id": {
+                "anyOf": [
+                    {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+                    {"type": "null"},
+                ]
+            },
             "actor": {"type": "string", "minLength": 1, "maxLength": 100},
             "note": {"type": ["string", "null"], "maxLength": 2000},
         },
@@ -479,6 +502,7 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
             "request_id",
             "snapshot_id",
             "input_sha256",
+            "decision",
             "quote_id",
             "actor",
             "note",
@@ -512,12 +536,17 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
         ),
         _ProcurementTool(
             name="procurement_approve_supplier",
-            description="按采购员选择和当前有效快照正式确认供应商；每次都需要人工允许一次。",
+            description=(
+                "按采购员选择和当前有效快照完成供应商批准或本轮流标；"
+                "每次都需要人工允许一次。"
+            ),
             parameters=approval_schema,
             effect=EffectKind.destructive,
             handler=approve_supplier,
             final_output=lambda payload: (
-                f"【采购决策已验证】已由采购员确认选择 {payload.get('supplier_name')}，"
+                "【采购决策已验证】本轮流标，流标原因和快照证据已写入审计报告。"
+                if payload.get("decision") == "no_award"
+                else f"【采购决策已验证】已由采购员确认选择 {payload.get('supplier_name')}，"
                 "审批、快照和复算证据已写入审计报告。"
             ),
         ),
@@ -574,14 +603,7 @@ class ProcurementFakeProvider:
                 ):
                     yield item
                 return
-            arguments = {
-                "request_id": request_id,
-                **self._extract_requirement(request.messages),
-            }
-            async for item in self._tool_call(
-                "procurement_capture_requirement",
-                arguments,
-            ):
+            async for item in self._capture_requirement(request_id, request.messages):
                 yield item
             return
 
@@ -591,11 +613,11 @@ class ProcurementFakeProvider:
         if stage == "request_read":
             state = payload.get("state") or {}
             current_request = state.get("request") or {}
-            if current_request.get("status") == "draft":
-                arguments = {"request_id": request_id, **self._extract_requirement(request.messages)}
-                async for item in self._tool_call(
-                    "procurement_capture_requirement", arguments
-                ):
+            if (
+                current_request.get("status") == "draft"
+                or current_request.get("item_name") == "待识别"
+            ):
+                async for item in self._capture_requirement(request_id, request.messages):
                     yield item
                 return
             async for item in self._tool_call(
@@ -628,6 +650,12 @@ class ProcurementFakeProvider:
             async for item in self._text(
                 f"【采购决策已验证】已由采购员确认选择 {payload.get('supplier_name')}，"
                 "审批、快照和复算证据已写入审计报告。"
+            ):
+                yield item
+            return
+        if stage == "no_award":
+            async for item in self._text(
+                "【采购决策已验证】本轮流标，流标原因和快照证据已写入审计报告。"
             ):
                 yield item
             return
@@ -668,26 +696,197 @@ class ProcurementFakeProvider:
             return {}
         return payload if isinstance(payload, dict) else {}
 
+    async def _capture_requirement(
+        self,
+        request_id: str,
+        messages: list[Message],
+    ) -> AsyncIterator[ModelStreamItem]:
+        try:
+            arguments = {
+                "request_id": request_id,
+                **self._extract_requirement(messages),
+            }
+        except ValueError as exc:
+            async for item in self._text(
+                f"无法确认采购需求中的关键字段：{exc}。请补充数量、单位和可比较的规格后再继续。"
+            ):
+                yield item
+            return
+        async for item in self._tool_call("procurement_capture_requirement", arguments):
+            yield item
+
     @staticmethod
     def _extract_requirement(messages: list[Message]) -> dict[str, Any]:
         text = "\n".join(
             message.content for message in messages if message.role == MessageRole.user
         )
 
-        def number(pattern: str, default: str) -> str:
+        def number(pattern: str, default: str | None = None) -> str | None:
             match = re.search(pattern, text, re.IGNORECASE)
-            return match.group(1) if match else default
+            return match.group(1).replace(",", "") if match else default
+
+        def first_number(patterns: tuple[str, ...], default: str | None = None) -> str | None:
+            for pattern in patterns:
+                value = number(pattern)
+                if value is not None:
+                    return value
+            return default
 
         size = re.search(
             r"(\d+(?:\.\d+)?)\s*[xX×*]\s*(\d+(?:\.\d+)?)\s*(?:mm|毫米)?",
             text,
         )
-        quantity = int(number(r"采购\s*(\d+)\s*个", "1"))
+        quantity_text = first_number(
+            (
+                r"(?:采购|计划采购|需要|数量)\s*[:：]?\s*([\d,]+(?:\.\d+)?)\s*(?:个|只|件|套|份|包)?",
+                r"([\d,]+(?:\.\d+)?)\s*(?:个|只|件|套|份|包)",
+            )
+        )
+        size_values = size.groups() if size else ()
+        thickness = first_number(
+            (
+                r"(?:厚度|厚|膜厚)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(?:微米|μm|µm|um)?",
+                r"(\d+(?:\.\d+)?)\s*(?:微米|μm|µm|um)",
+            )
+        )
+        is_legacy_packaging = bool(
+            re.search(r"快递袋|包装袋", text)
+            and size_values
+            and thickness is not None
+        )
+        if not is_legacy_packaging:
+            if quantity_text is None:
+                raise ValueError("采购数量无法从采购描述中识别")
+            quantity_unit_match = re.search(
+                r"(?:采购|计划采购|需要|数量)\s*[:：]?\s*[\d,]+(?:\.\d+)?\s*([\u4e00-\u9fffA-Za-z]+)",
+                text,
+            )
+            unit = quantity_unit_match.group(1) if quantity_unit_match else "件"
+            first_clause = re.split(r"[，,；;。.!！?？\n]", text, maxsplit=1)[0]
+            item_name = re.sub(r"^(?:请|计划)?\s*(?:采购|购买|需要)\s*", "", first_clause).strip()
+            item_name = re.sub(r"^[\d,.]+\s*[\u4e00-\u9fffA-Za-z]+", "", item_name).strip()
+            item_name = item_name or "采购物品"
+            dynamic_specs: dict[str, dict[str, Any]] = {}
+            length_match = re.search(
+                r"(?:长度|长)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(mm|毫米|cm|厘米|m|米)",
+                text,
+                re.IGNORECASE,
+            )
+            if length_match:
+                dynamic_specs["length"] = {
+                    "label": "长度",
+                    "type": "number",
+                    "value": length_match.group(1),
+                    "unit": length_match.group(2),
+                    "match": "exact",
+                    "priority": "hard",
+                }
+            thickness_match = re.search(
+                r"(?:厚度|厚|膜厚)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(微米|μm|µm|um|mm|毫米)",
+                text,
+                re.IGNORECASE,
+            )
+            if thickness_match:
+                dynamic_specs["thickness"] = {
+                    "label": "厚度",
+                    "type": "number",
+                    "value": thickness_match.group(1),
+                    "unit": thickness_match.group(2),
+                    "match": "exact",
+                    "priority": "hard",
+                }
+            for key, label, pattern in (
+                ("material", "材质", r"材质\s*[:：]?\s*([^，,；;。\n]+)"),
+                ("color", "颜色", r"颜色\s*[:：]?\s*([^，,；;。\n]+)"),
+            ):
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    dynamic_specs[key] = {
+                        "label": label,
+                        "type": "text",
+                        "value": match.group(1).strip(),
+                        "match": "exact",
+                        "priority": "hard",
+                    }
+            lead_days = int(
+                first_number(
+                    (
+                        r"最长交期\s*[:：]?\s*(\d+)\s*天",
+                        r"交期\s*[:：]?\s*(\d+)\s*天",
+                        r"(\d+)\s*天内",
+                    ),
+                    "15",
+                )
+            )
+            usd_rate = first_number(
+                (
+                    r"USD\s*/\s*CNY[^0-9]*(\d+(?:\.\d+)?)",
+                    r"美元[^，；。\n]{0,20}?[^0-9]*(\d+(?:\.\d+)?)",
+                )
+            )
+            fx_rates = {"CNY": "1"}
+            if usd_rate is not None:
+                fx_rates["USD"] = usd_rate
+            max_unit_cost = re.search(
+                r"(?:到货单价|单价上限|预算单价|单价预算)[^0-9]*(\d+(?:\.\d+)?)",
+                text,
+            )
+            constraints: dict[str, Any] = {
+                "base_currency": "CNY",
+                "fx_rates": fx_rates,
+                "max_lead_days": lead_days,
+                "invoice_required": "无需开票" not in text and "不开票" not in text,
+                "destination": "",
+            }
+            destination_match = re.search(
+                r"(?:送货|配送|交付|送达)\s*(?:到|至)?\s*([^，,；;。.!！?\n]+)",
+                text,
+            )
+            if destination_match:
+                constraints["destination"] = destination_match.group(1).strip()
+            if max_unit_cost:
+                constraints["max_landed_unit_cost"] = max_unit_cost.group(1)
+            return {
+                "schema_version": 2,
+                "title": f"{item_name}采购询价",
+                "category": "general",
+                "item_name": item_name,
+                "quantity": quantity_text,
+                "unit": unit,
+                "specifications": dynamic_specs,
+                "constraints": constraints,
+            }
+        missing = []
+        if quantity_text is None:
+            missing.append("采购数量")
+        if not size_values:
+            missing.append("包装尺寸")
+        if thickness is None:
+            missing.append("厚度")
+        if missing:
+            raise ValueError("、".join(missing) + "无法从采购描述中识别")
+        quantity_decimal = float(quantity_text)
+        if not quantity_decimal.is_integer():
+            raise ValueError("采购数量必须是整数")
+        quantity = int(quantity_decimal)
         width = size.group(1) if size else "0"
         length = size.group(2) if size else "0"
-        thickness = number(r"厚(?:度)?\s*(\d+(?:\.\d+)?)", "0")
-        lead_days = int(number(r"(\d+)\s*天内", "15"))
-        usd_rate = number(r"(?:USD\s*/\s*CNY|美元[^，；。]{0,10})[^0-9]*(\d+(?:\.\d+)?)", "7.2")
+        lead_days = int(
+            first_number(
+                (
+                    r"最长交期\s*[:：]?\s*(\d+)\s*天",
+                    r"交期\s*[:：]?\s*(\d+)\s*天",
+                    r"(\d+)\s*天内",
+                ),
+                "15",
+            )
+        )
+        usd_rate = first_number(
+            (
+                r"USD\s*/\s*CNY[^0-9]*(\d+(?:\.\d+)?)",
+                r"美元[^，；。\n]{0,20}?[^0-9]*(\d+(?:\.\d+)?)",
+            )
+        )
         eur_rate = re.search(
             r"(?:EUR\s*/\s*CNY|欧元(?:兑人民币|汇率)?)[^0-9]*(\d+(?:\.\d+)?)",
             text,
@@ -697,11 +896,18 @@ class ProcurementFakeProvider:
             r"(?:到货单价|单价上限|预算单价|单价预算)[^0-9]*(\d+(?:\.\d+)?)",
             text,
         )
-        size_tolerance = number(r"尺寸公差\s*(\d+(?:\.\d+)?)", "2")
-        thickness_tolerance = number(r"厚度公差\s*(\d+(?:\.\d+)?)", "3")
-        destination_match = re.search(r"交付([^，；。]+)", text)
+        size_tolerance = number(r"尺寸公差\s*[:：]?\s*(\d+(?:\.\d+)?)", "2")
+        thickness_tolerance = number(r"厚度公差\s*[:：]?\s*(\d+(?:\.\d+)?)", "3")
+        destination_match = re.search(
+            r"(?:送货|配送|交付|送达)\s*(?:到|至)?\s*([^，,；;。.!！?\n]+)",
+            text,
+        )
         destination = destination_match.group(1).strip() if destination_match else ""
-        fx_rates = {"CNY": "1", "USD": usd_rate}
+        fx_rates = {"CNY": "1"}
+        if usd_rate is not None or re.search(r"USD|美元", text, re.IGNORECASE):
+            if usd_rate is None:
+                raise ValueError("USD/CNY 汇率无法识别")
+            fx_rates["USD"] = usd_rate
         if eur_rate:
             fx_rates["EUR"] = eur_rate.group(1)
         constraints: dict[str, Any] = {
@@ -946,15 +1152,29 @@ class ProcurementAgent:
         """Analyze a request created through the structured compatibility API."""
 
         request = self.service.get_request(request_id)
-        if request.get("approved_quote_id"):
+        if request.get("approved_quote_id") or request.get("status") in {
+            "approved",
+            "no_award",
+        } or request.get("decision") is not None:
             raise ProcurementError("该采购需求已经完成供应商审批")
+        needs_requirement_capture = (
+            request.get("status") == "draft" or request.get("item_name") == "待识别"
+        )
+        existing_run_id = str(request.get("analysis_run_id") or "")
+        existing_run = self.harness.get_run(existing_run_id) if existing_run_id else None
         if request["quote_count"] < 2:
-            raise ProcurementError("至少上传 2 家供应商报价后才能比价")
+            if len(request.get("attachments") or []) < 2:
+                raise ProcurementError("至少上传 2 家供应商报价后才能比价")
+            self.service.parse_staged_quotes(
+                request_id,
+                run_id=existing_run_id or f"procurement-recovery-{new_id()}",
+            )
+            request = self.service.get_request(request_id)
+        if request["quote_count"] < 2:
+            raise ProcurementError("已暂存的报价中至少需要 2 份可解析文件")
         if request["unresolved_field_count"]:
             raise ProcurementError("仍有低置信度或缺失字段待复核")
 
-        existing_run_id = str(request.get("analysis_run_id") or "")
-        existing_run = self.harness.get_run(existing_run_id) if existing_run_id else None
         if request.get("comparison") is not None and existing_run is not None:
             return self._accepted(request, existing_run_id)
         if existing_run is not None:
@@ -967,11 +1187,34 @@ class ProcurementAgent:
                     message="已在结构化报价面板完成人工复核，请继续执行确定性比价。",
                 )
 
+        if needs_requirement_capture:
+            message = self._original_user_message(existing_run_id) or str(
+                request.get("title") or ""
+            ).strip()
+            if not message:
+                raise ProcurementError("原始采购消息不可恢复，请新建采购任务")
+            return await self._launch(
+                request_id,
+                message=message,
+                source="procurement_conversation",
+            )
+
         return await self._launch(
             request_id,
             message="请读取当前结构化采购需求和已校对报价，执行确定性比价并请求人工选择供应商。",
             source="procurement_structured",
         )
+
+    def _original_user_message(self, run_id: str) -> str | None:
+        if not run_id:
+            return None
+        for message in self.harness.storage.get_messages(run_id):
+            if message.role != MessageRole.user:
+                continue
+            content = str(message.content or "").strip()
+            if content:
+                return content
+        return None
 
     async def _launch(
         self,
@@ -1012,6 +1255,11 @@ class ProcurementAgent:
         *,
         message: str,
     ) -> dict[str, str]:
+        if request.get("approved_quote_id") or request.get("status") in {
+            "approved",
+            "no_award",
+        } or request.get("decision") is not None:
+            raise ProcurementError("该采购需求已经完成供应商审批")
         run_id = str(request.get("analysis_run_id") or "")
         if not run_id:
             raise ValueError("采购任务还没有可恢复的 Agent 运行")
@@ -1211,7 +1459,11 @@ class ProcurementAgent:
                 "发现缺失、低置信度或跨文档冲突时必须停止；报价事实只能由采购员通过结构化复核接口修正，"
                 "Agent 禁止代写、计算或改写金额，也不得把后端确定性步骤拆成额外模型回合。"
                 "fx_rates 的键必须是相对本位币的三位 ISO 货币代码（例如 USD），不要写 USD/CNY；"
-                "必须忠实保留用户明确说出的颜色、印刷色数和开票要求。"
+                "fx_rates 必须始终包含本位币且本位币汇率为数字 1；如果用户没有提到外币，只传 CNY: 1。"
+                "数量必须是正数，规格必须使用 schema_version=2 的动态规格对象；"
+                "每项规格明确 type、match 和 priority，数值规格同时带单位，不能传‘未指定’或空对象。"
+                "schema_version=1 仅用于兼容已有包装任务；新物品不要强行套用宽、长、厚度字段。"
+                "必须忠实保留用户明确说出的规格、单位、颜色、印刷色数和开票要求。"
                 "只有收到 [procurement_supplier_selection] JSON 后才能调用审批工具；审批成功后最终回复"
                 "必须包含【采购决策已验证】。审批工具成功前严禁输出、引用、解释或复述该验证标记。"
             ),
@@ -1252,7 +1504,8 @@ class ProcurementAgent:
         *,
         snapshot_id: str,
         input_sha256: str,
-        quote_id: str,
+        quote_id: str | None,
+        decision: str = "approved",
         note: str | None,
         actor: str,
     ) -> dict[str, Any]:
@@ -1265,6 +1518,8 @@ class ProcurementAgent:
             raise ValueError("采购任务还没有可审批的比价结果")
         if comparison["id"] != snapshot_id or comparison["input_sha256"] != input_sha256:
             raise ValueError("比价快照已变化，请刷新后重新确认")
+        if decision not in {"approved", "no_award"}:
+            raise ValueError("不支持的采购决策")
         selected = next(
             (
                 item
@@ -1273,14 +1528,20 @@ class ProcurementAgent:
             ),
             None,
         )
-        if selected is None:
+        if decision == "approved" and selected is None:
             raise ValueError("只能选择通过全部硬性条件的供应商")
+        if decision == "no_award":
+            if quote_id is not None or comparison["result"].get("eligible_count") != 0:
+                raise ValueError("当前仍有合格报价，不能流标")
+            if not note or not note.strip():
+                raise ValueError("流标必须填写原因")
         active = self._tasks.get(run_id)
         if active is not None and not active.done():
             raise RuntimeError("采购 Agent 正在运行，请稍后再试")
         selection = {
             "snapshot_id": snapshot_id,
             "input_sha256": input_sha256,
+            "decision": decision,
             "quote_id": quote_id,
             "actor": actor,
             "note": (note or "").strip() or None,
@@ -1351,7 +1612,7 @@ class ProcurementAgent:
                     arguments = json.loads(pending.arguments_summary)
                 except json.JSONDecodeError as exc:
                     raise RuntimeError("采购审批参数不可验证") from exc
-                for key in ("snapshot_id", "input_sha256", "quote_id", "actor"):
+                for key in ("snapshot_id", "input_sha256", "decision", "quote_id", "actor"):
                     if arguments.get(key) != selection.get(key):
                         raise RuntimeError("采购审批参数与用户选择不一致")
                 return pending

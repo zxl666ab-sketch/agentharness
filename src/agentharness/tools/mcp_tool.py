@@ -19,6 +19,8 @@ import re
 from contextlib import suppress
 from typing import Any
 
+import httpx
+
 from agentharness.contracts import (
     EffectKind,
     ReplayPolicy,
@@ -62,6 +64,30 @@ _MCP_ENV_WHITELIST = {
 def mcp_env_whitelist() -> dict[str, str]:
     """Explicit safe environment for MCP stdio children (no implicit SDK default)."""
     return {k: v for k, v in os.environ.items() if k.upper() in _MCP_ENV_WHITELIST}
+
+
+def _mcp_http_client_factory(
+    *,
+    headers: dict[str, Any] | None = None,
+    timeout: httpx.Timeout | None = None,
+    auth: httpx.Auth | None = None,
+) -> httpx.AsyncClient:
+    """Create an MCP client that never follows redirects automatically.
+
+    The MCP SDK defaults to ``follow_redirects=True``.  Redirect targets are not
+    revalidated by the harness egress policy, so a redirect could move a request
+    from a validated public endpoint to a private network address.  MCP endpoints
+    are expected to be stable URLs; fail closed on any redirect instead.
+    """
+
+    kwargs: dict[str, Any] = {"follow_redirects": False}
+    if headers is not None:
+        kwargs["headers"] = headers
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    if auth is not None:
+        kwargs["auth"] = auth
+    return httpx.AsyncClient(**kwargs)
 
 
 class MCPBridge:
@@ -172,10 +198,13 @@ class MCPBridge:
             except ImportError:
                 from mcp.client.sse import sse_client
 
-                cm = sse_client(url)
+                cm = sse_client(url, httpx_client_factory=_mcp_http_client_factory)
                 read, write = await cm.__aenter__()
             else:
-                cm = streamablehttp_client(url)
+                cm = streamablehttp_client(
+                    url,
+                    httpx_client_factory=_mcp_http_client_factory,
+                )
                 read, write, _ = await cm.__aenter__()
             session = ClientSession(read, write)
             await session.__aenter__()

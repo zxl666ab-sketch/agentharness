@@ -1,14 +1,18 @@
 import {
   AlertTriangle,
+  Ban,
   BadgeCheck,
   Calculator,
   CheckCircle2,
+  ClipboardEdit,
   ExternalLink,
   Fingerprint,
   LoaderCircle,
   Play,
+  RefreshCw,
   ShieldAlert,
   ShieldCheck,
+  Upload,
   X,
   XCircle,
 } from "lucide-react";
@@ -22,6 +26,9 @@ type Props = {
   error?: string | null;
   onAnalyze: () => Promise<void>;
   onApprove: (quoteId: string, note: string) => Promise<void>;
+  onOpenRequirement?: () => void;
+  onOpenQuotes?: () => void;
+  onNoAward?: (note: string) => Promise<void>;
 };
 
 function money(value: string, currency: string) {
@@ -45,7 +52,16 @@ function QuoteStatus({ quote }: { quote: ComparisonQuote }) {
   );
 }
 
-export function ComparisonView({ request, busy, error, onAnalyze, onApprove }: Props) {
+export function ComparisonView({
+  request,
+  busy,
+  error,
+  onAnalyze,
+  onApprove,
+  onOpenRequirement,
+  onOpenQuotes,
+  onNoAward,
+}: Props) {
   const snapshot = request.comparison;
   const result = snapshot?.result;
   const [selectedId, setSelectedId] = useState<string | null>(
@@ -54,10 +70,16 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove }: P
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [note, setNote] = useState("");
+  const [noAwardOpen, setNoAwardOpen] = useState(false);
+  const [noAwardConfirmed, setNoAwardConfirmed] = useState(false);
+  const [noAwardNote, setNoAwardNote] = useState("");
   useEffect(() => {
     setSelectedId(result?.recommended_quote_id || null);
     setConfirmOpen(false);
     setConfirmed(false);
+    setNoAwardOpen(false);
+    setNoAwardConfirmed(false);
+    setNoAwardNote("");
   }, [request.status, snapshot?.id, result?.recommended_quote_id]);
   const rows = useMemo(
     () =>
@@ -69,6 +91,7 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove }: P
     [result?.quotes]
   );
   const selected = rows.find((quote) => quote.quote_id === selectedId) || null;
+  const allExcluded = Boolean(result && rows.length > 0 && result.eligible_count === 0);
 
   if (!snapshot || !result) {
     return (
@@ -193,10 +216,40 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove }: P
         </div>
       </section>
 
+      {allExcluded && request.status !== "approved" && request.status !== "no_award" ? (
+        <section className="proc-no-eligible-panel" aria-label="没有合格报价的恢复操作">
+          <div className="proc-no-eligible-copy">
+            <span className="proc-section-icon"><Ban size={18} /></span>
+            <div>
+              <strong>本轮没有合格供应商</strong>
+              <p>不能审批被淘汰的报价。请调整需求、补充报价或结束本轮询价。</p>
+            </div>
+          </div>
+          <div className="proc-no-eligible-actions">
+            <button className="proc-button secondary" type="button" onClick={onOpenRequirement}>
+              <ClipboardEdit size={15} />调整需求
+            </button>
+            <button className="proc-button secondary" type="button" onClick={onOpenQuotes}>
+              <Upload size={15} />补充报价
+            </button>
+            <button className="proc-button secondary" type="button" disabled={busy === "analyze"} onClick={() => void onAnalyze()}>
+              <RefreshCw size={15} />重新比价
+            </button>
+            <button className="proc-button danger" type="button" onClick={() => setNoAwardOpen(true)}>
+              <Ban size={15} />本轮流标
+            </button>
+          </div>
+        </section>
+      ) : null}
+
       <footer className="proc-comparison-actions">
         {error ? <p className="proc-inline-error" role="alert">{error}</p> : <span />}
         {request.status === "approved" ? (
           <span className="proc-approved-banner"><CheckCircle2 size={16} />供应商已人工批准</span>
+        ) : request.status === "no_award" ? (
+          <span className="proc-no-award-banner"><Ban size={16} />本轮已流标</span>
+        ) : allExcluded ? (
+          <span className="proc-action-hint">请选择上方恢复操作</span>
         ) : (
           <button
             className="proc-button primary"
@@ -237,6 +290,36 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove }: P
               >
                 {busy === "approve" ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}
                 确认选定
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
+      {noAwardOpen ? (
+        <div className="proc-modal-backdrop" role="presentation">
+          <section className="proc-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="no-award-title">
+            <header>
+              <div><Ban size={18} /><h2 id="no-award-title">确认本轮流标</h2></div>
+              <button className="proc-icon-button" type="button" title="关闭" aria-label="关闭" onClick={() => setNoAwardOpen(false)}><X size={18} /></button>
+            </header>
+            <p className="proc-confirm-warning">当前快照中没有任何合格报价。流标后本任务不可编辑，只能复制为新任务重新询价。</p>
+            <label className="proc-field"><span>流标原因</span><textarea value={noAwardNote} onChange={(event) => setNoAwardNote(event.target.value)} maxLength={2000} placeholder="请说明未满足的条件或下一步安排" /></label>
+            <label className="proc-check approval-confirm">
+              <input type="checkbox" checked={noAwardConfirmed} onChange={(event) => setNoAwardConfirmed(event.target.checked)} />
+              <span><strong>我确认本轮没有合格报价，并结束本轮询价</strong><small>该操作会写入不可编辑的采购决策和审计记录</small></span>
+            </label>
+            {error ? <p className="proc-form-error" role="alert"><AlertTriangle size={14} />{error}</p> : null}
+            <footer>
+              <button type="button" className="proc-button secondary" onClick={() => setNoAwardOpen(false)}>取消</button>
+              <button
+                type="button"
+                className="proc-button danger"
+                disabled={!noAwardConfirmed || !noAwardNote.trim() || busy === "no_award" || !onNoAward}
+                onClick={() => onNoAward && void onNoAward(noAwardNote.trim())}
+              >
+                {busy === "no_award" ? <LoaderCircle className="spin" size={16} /> : <Ban size={16} />}
+                确认流标
               </button>
             </footer>
           </section>

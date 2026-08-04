@@ -31,9 +31,11 @@ class _FakeBrowserContext:
 class _FakeChromium:
     def __init__(self) -> None:
         self.launches: list[str] = []
+        self.launch_options: list[dict[str, Any]] = []
 
-    async def launch_persistent_context(self, *, user_data_dir: str, **_: Any):
+    async def launch_persistent_context(self, *, user_data_dir: str, **kwargs: Any):
         self.launches.append(user_data_dir)
+        self.launch_options.append(kwargs)
         return _FakeBrowserContext()
 
 
@@ -93,6 +95,23 @@ async def test_browser_rejects_absolute_context_id_without_creating_profile(
     assert result.is_error
     assert fake.chromium.launches == []
     assert not outside.exists()
+
+
+@pytest.mark.asyncio
+async def test_browser_forces_headless_mode_even_for_legacy_false_argument(
+    data_dir: Path, workspace: Path
+):
+    tool = BrowserTool()
+    fake = _FakePlaywright()
+    tool._playwright = fake
+
+    result = await tool.run(
+        _context(data_dir, workspace),
+        {"action": "launch", "headless": False},
+    )
+
+    assert not result.is_error
+    assert fake.chromium.launch_options == [{"headless": True, "viewport": {"width": 1280, "height": 720}}]
 
 
 class _ClosableContext(_FakeBrowserContext):

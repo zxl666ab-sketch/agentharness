@@ -4,7 +4,20 @@ export type ProcurementStatus =
   | "review"
   | "ready"
   | "analyzed"
-  | "approved";
+  | "approved"
+  | "no_award";
+
+export type RequirementSpecification = {
+  label: string;
+  type: "number" | "text" | "boolean";
+  value?: string | number | boolean;
+  unit?: string;
+  match: "exact" | "tolerance" | "range" | "gte" | "lte";
+  priority: "hard" | "preference";
+  tolerance?: string | number;
+  min?: string | number;
+  max?: string | number;
+};
 
 export type FieldMeta = {
   label: string;
@@ -49,6 +62,7 @@ export type ProcurementQuote = {
     parser_version: string;
     document_kind: string;
     fields: Record<string, QuoteField>;
+    specifications?: Record<string, QuoteField & { label?: string; unit?: string }>;
     processing_ms: number;
   };
   status: "needs_review" | "ready";
@@ -72,9 +86,12 @@ export type ComparisonQuote = {
     passed: boolean;
     spec_checks: Array<{
       field: string;
+      label?: string;
       expected: string;
       actual: string;
       tolerance: string;
+      match?: string;
+      priority?: string;
       passed: boolean;
     }>;
   };
@@ -140,10 +157,10 @@ export type ProcurementDecision = {
   id: string;
   request_id: string;
   snapshot_id: string;
-  quote_id: string;
+  quote_id: string | null;
   run_id: string;
   approval_id: string;
-  decision: "approved";
+  decision: "approved" | "no_award";
   note?: string | null;
   actor: string;
   created_at: string;
@@ -153,11 +170,12 @@ export type ProcurementRequestSummary = {
   id: string;
   reference: string;
   title: string;
-  category: "ecommerce_packaging";
+  schema_version?: 1 | 2;
+  category: string;
   item_name: string;
-  quantity: number;
-  unit: "piece";
-  specifications: Record<string, string | number>;
+  quantity: number | string;
+  unit: string;
+  specifications: Record<string, string | number | boolean | RequirementSpecification>;
   constraints: Record<string, unknown>;
   status: ProcurementStatus;
   session_id: string;
@@ -193,8 +211,11 @@ export type ProcurementRunAccepted = {
 
 export type ProcurementMeta = {
   category: string;
+  categories?: string[];
+  requirement_schema_versions?: number[];
   parser_version: string;
   ruleset_version: string;
+  ruleset_versions?: string[];
   max_file_bytes: number;
   max_conversation_upload_bytes: number;
   max_quotes_per_request: number;
@@ -230,26 +251,20 @@ export type ProcurementModelConfigUpdate = {
 };
 
 export type CreateProcurementRequest = {
+  schema_version?: 1 | 2;
   title: string;
-  category: "ecommerce_packaging";
+  category: string;
   item_name: string;
-  quantity: number;
-  unit: "piece";
-  specifications: {
-    width_mm: number;
-    length_mm: number;
-    thickness_um: number;
-    material: string;
-    color: string;
-    print_colors: number;
-  };
+  quantity: number | string;
+  unit: string;
+  specifications: Record<string, string | number | boolean | RequirementSpecification>;
   constraints: {
     base_currency: string;
     fx_rates: Record<string, number>;
     max_lead_days: number;
     invoice_required: boolean;
-    size_tolerance_mm: number;
-    thickness_tolerance_um: number;
+    size_tolerance_mm?: number;
+    thickness_tolerance_um?: number;
     max_landed_unit_cost?: number;
     destination: string;
     required_delivery_date?: string;
@@ -263,6 +278,28 @@ export type ProcurementAuditReport = {
   quotes: ProcurementQuote[];
   comparison: ComparisonSnapshot | null;
   decision: ProcurementDecision | null;
+  execution_artifacts?: Array<{
+    kind: "purchase_order_draft" | "supplier_confirmation_email" | string;
+    artifact_id: string;
+    sha256: string;
+    filename: string;
+    content_type: string;
+    summary: string;
+  }>;
+  supplier_history?: {
+    request_id: string;
+    suppliers: Array<{
+      quote_id: string;
+      supplier_name: string;
+      approved_purchase_count: number;
+      records: Array<{
+        request_reference: string;
+        decision_at: string;
+        decision: string;
+      }>;
+      evidence: string;
+    }>;
+  };
   audit_events: Array<{
     id: string;
     request_id: string;

@@ -179,6 +179,161 @@ def test_v8_gains_procurement_workflow_tables(tmp_path: Path) -> None:
         storage.close()
 
 
+def test_v10_procurement_decisions_preserve_v1_rows_and_allow_no_award(
+    tmp_path: Path,
+) -> None:
+    created_at = "2026-01-02T03:04:05+00:00"
+    conn = _database_at_version(tmp_path / "agentharness.db", 9)
+    conn.execute(
+        "INSERT INTO sessions(id, title, created_at, updated_at) VALUES(?,?,?,?)",
+        ("proc-session", "历史采购", created_at, created_at),
+    )
+    conn.execute(
+        """INSERT INTO runs(
+               id, session_id, root_run_id, status, created_at, updated_at
+           ) VALUES(?,?,?,?,?,?)""",
+        ("proc-run", "proc-session", "proc-run", "completed", created_at, created_at),
+    )
+    conn.execute(
+        """INSERT INTO artifacts(
+               id, sha256, content_type, size_bytes, summary, path, created_at
+           ) VALUES(?,?,?,?,?,?,?)""",
+        ("proc-artifact", "a" * 64, "application/json", 2, "snapshot", "snapshot.json", created_at),
+    )
+    conn.execute(
+        """INSERT INTO procurement_requests(
+               id, reference, title, category, item_name, quantity, unit,
+               specifications_json, constraints_json, status, session_id,
+               analysis_run_id, current_snapshot_id, approved_quote_id,
+               created_at, updated_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "proc-request",
+            "RFQ-LEGACY-001",
+            "历史采购",
+            "ecommerce_packaging",
+            "快递袋",
+            10,
+            "piece",
+            "{}",
+            "{}",
+            "approved",
+            "proc-session",
+            "proc-run",
+            "proc-snapshot",
+            "proc-quote",
+            created_at,
+            created_at,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO procurement_quotes(
+               id, request_id, supplier_name, source_filename, source_kind,
+               source_artifact_id, source_sha256, extracted_json, status,
+               review_count, parser_version, processing_ms, created_at, updated_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "proc-quote",
+            "proc-request",
+            "历史供应商",
+            "legacy.xlsx",
+            "xlsx",
+            "proc-artifact",
+            "b" * 64,
+            "{}",
+            "ready",
+            0,
+            "legacy-parser",
+            0,
+            created_at,
+            created_at,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO procurement_comparison_snapshots(
+               id, request_id, run_id, version, input_sha256, result_json,
+               artifact_id, created_at
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        (
+            "proc-snapshot",
+            "proc-request",
+            "proc-run",
+            1,
+            "c" * 64,
+            '{"schema_version":1,"quotes":[]}',
+            "proc-artifact",
+            created_at,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO procurement_decisions(
+               id, request_id, snapshot_id, quote_id, run_id, approval_id,
+               decision, note, actor, created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "proc-decision",
+            "proc-request",
+            "proc-snapshot",
+            "proc-quote",
+            "proc-run",
+            "legacy-approval",
+            "approved",
+            "历史决策",
+            "采购员",
+            created_at,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    storage = Storage(tmp_path)
+    try:
+        decision_columns = {
+            row[1]: row[3]
+            for row in storage._conn.execute(  # noqa: SLF001 - migration evidence
+                "PRAGMA table_info(procurement_decisions)"
+            ).fetchall()
+        }
+        assert storage.schema_version() == SCHEMA_VERSION
+        assert decision_columns["quote_id"] == 0
+        legacy = storage.procurement.get_decision("proc-request")
+        assert legacy is not None
+        assert legacy["decision"] == "approved"
+        assert legacy["quote_id"] == "proc-quote"
+        snapshot = storage.procurement.get_snapshot("proc-snapshot")
+        assert snapshot is not None
+        assert snapshot["result"]["schema_version"] == 1
+
+        # The v10 table accepts a final no-award decision without a quote.
+        storage._conn.execute("PRAGMA foreign_keys=OFF")  # noqa: SLF001
+        storage._conn.execute(
+            """INSERT INTO procurement_decisions(
+                   id, request_id, snapshot_id, quote_id, run_id, approval_id,
+                   decision, note, actor, created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "proc-no-award",
+                "proc-request-no-award",
+                "proc-snapshot",
+                None,
+                "proc-run",
+                "no-award-approval",
+                "no_award",
+                "本轮无合格报价",
+                "采购员",
+                created_at,
+            ),
+        )
+        no_award = storage._conn.execute(  # noqa: SLF001
+            "SELECT quote_id, decision FROM procurement_decisions WHERE id = ?",
+            ("proc-no-award",),
+        ).fetchone()
+        assert no_award[0] is None
+        assert no_award[1] == "no_award"
+    finally:
+        storage.close()
+
+
 def test_legacy_checkpoint_invocation_id_is_stable_across_loads(tmp_path: Path) -> None:
     storage = Storage(tmp_path)
     try:

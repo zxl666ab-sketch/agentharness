@@ -384,6 +384,9 @@ class OpenAIResponsesAdapter:
                 kwargs["api_key"] = self.api_key
             if self.base_url:
                 kwargs["base_url"] = self.base_url
+            # Some OpenAI-compatible gateways block openai-python's default
+            # User-Agent at the edge before the API request is authenticated.
+            kwargs["default_headers"] = {"User-Agent": "agentharness"}
             self._client = AsyncOpenAI(**kwargs)
         return self._client
 
@@ -619,6 +622,8 @@ class OpenAIResponsesAdapter:
         calls = _ToolCallAccumulator()
         finish_reason: str | None = None
         latest_usage: Usage | None = None
+        saw_payload = False
+        custom_gateway = bool(self.base_url) and "api.openai.com" not in self.base_url.lower()
         try:
             async for chunk in stream:
                 usage = _usage_item(getattr(chunk, "usage", None))
@@ -627,6 +632,7 @@ class OpenAIResponsesAdapter:
                 choices = getattr(chunk, "choices", None) or []
                 if not choices:
                     continue
+                saw_payload = True
                 choice = choices[0]
                 chunk_finish = getattr(choice, "finish_reason", None)
                 if chunk_finish:
@@ -658,7 +664,10 @@ class OpenAIResponsesAdapter:
                     ):
                         yield normalized
 
-            if finish_reason is None:
+            # Some explicitly configured OpenAI-compatible gateways close a
+            # complete stream without emitting finish_reason. Keep strict EOF
+            # detection for the official/unknown endpoint contract.
+            if finish_reason is None and (not saw_payload or not custom_gateway):
                 yield ModelStreamItem(
                     type=StreamItemType.error,
                     error="OpenAI Chat stream ended before finish_reason",

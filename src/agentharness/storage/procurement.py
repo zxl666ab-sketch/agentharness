@@ -22,6 +22,18 @@ def _decode_row(row: Any, *json_columns: str) -> dict[str, Any] | None:
     return result
 
 
+def _decode_request_row(row: Any) -> dict[str, Any] | None:
+    result = _decode_row(row, "specifications_json", "constraints_json")
+    if result is None:
+        return None
+    schema_version = int(result.get("schema_version") or 1)
+    if schema_version >= 2 and result.get("quantity_decimal") not in (None, ""):
+        result["quantity"] = str(result["quantity_decimal"])
+    result.pop("quantity_decimal", None)
+    result["schema_version"] = schema_version
+    return result
+
+
 class ProcurementRepo:
     def __init__(self, core: StorageCore, redactor: Redactor) -> None:
         self._core = core
@@ -33,20 +45,23 @@ class ProcurementRepo:
     def create_request(self, request: dict[str, Any]) -> None:
         safe = self.redactor.redact_obj(request)
         now = safe.get("created_at") or _utcnow()
+        schema_version = int(safe.get("schema_version") or 1)
+        quantity_decimal = str(safe.get("quantity_decimal") or safe.get("quantity"))
+        legacy_quantity = 0 if schema_version >= 2 else int(safe["quantity"])
         with self._lock:
             self._conn.execute(
                 """INSERT INTO procurement_requests(
                     id, reference, title, category, item_name, quantity, unit,
                     specifications_json, constraints_json, status, session_id,
-                    created_at, updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    created_at, updated_at, schema_version, quantity_decimal
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     safe["id"],
                     safe["reference"],
                     safe["title"],
                     safe["category"],
                     safe["item_name"],
-                    safe["quantity"],
+                    legacy_quantity,
                     safe["unit"],
                     _dumps(safe.get("specifications", {})),
                     _dumps(safe.get("constraints", {})),
@@ -54,6 +69,8 @@ class ProcurementRepo:
                     safe["session_id"],
                     now,
                     now,
+                    schema_version,
+                    quantity_decimal,
                 ),
             )
 
@@ -61,7 +78,7 @@ class ProcurementRepo:
         row = self._reader().execute(
             "SELECT * FROM procurement_requests WHERE id = ?", (request_id,)
         ).fetchone()
-        return _decode_row(row, "specifications_json", "constraints_json")
+        return _decode_request_row(row)
 
     def list_requests(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = self._reader().execute(
@@ -72,9 +89,45 @@ class ProcurementRepo:
         return [
             item
             for row in rows
-            if (item := _decode_row(row, "specifications_json", "constraints_json"))
+            if (item := _decode_request_row(row))
             is not None
         ]
+
+    def delete_request(self, request_id: str) -> bool:
+        """Remove one procurement projection while preserving global run history."""
+
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                exists = self._conn.execute(
+                    "SELECT 1 FROM procurement_requests WHERE id = ?",
+                    (request_id,),
+                ).fetchone()
+                if exists is None:
+                    self._conn.execute("COMMIT")
+                    return False
+
+                # Delete children first because the procurement tables use
+                # foreign keys without cascade actions.
+                for table in (
+                    "procurement_decisions",
+                    "procurement_audit_events",
+                    "procurement_comparison_snapshots",
+                    "procurement_quotes",
+                ):
+                    self._conn.execute(
+                        f"DELETE FROM {table} WHERE request_id = ?",
+                        (request_id,),
+                    )
+                self._conn.execute(
+                    "DELETE FROM procurement_requests WHERE id = ?",
+                    (request_id,),
+                )
+                self._conn.execute("COMMIT")
+                return True
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
 
     def update_request(self, request_id: str, **changes: Any) -> bool:
         allowed = {
@@ -82,6 +135,7 @@ class ProcurementRepo:
             "analysis_run_id",
             "current_snapshot_id",
             "approved_quote_id",
+            "schema_version",
             "title",
             "item_name",
             "quantity",
@@ -91,13 +145,25 @@ class ProcurementRepo:
         }
         assignments: list[str] = []
         values: list[Any] = []
+        schema_row = self._conn.execute(
+            "SELECT schema_version FROM procurement_requests WHERE id = ?",
+            (request_id,),
+        ).fetchone()
+        schema_version = int(changes.get("schema_version") or (schema_row[0] if schema_row else 1))
         for key, value in changes.items():
             if key not in allowed:
                 raise ValueError(f"unsupported procurement request field: {key}")
-            column = f"{key}_json" if key in {"specifications", "constraints"} else key
-            assignments.append(f"{column} = ?")
             safe_value = self.redactor.redact_obj(value)
-            values.append(_dumps(safe_value) if column.endswith("_json") else safe_value)
+            if key == "quantity":
+                assignments.extend(["quantity = ?", "quantity_decimal = ?"])
+                values.extend([
+                    0 if schema_version >= 2 else int(value),
+                    str(value),
+                ])
+            else:
+                column = f"{key}_json" if key in {"specifications", "constraints"} else key
+                assignments.append(f"{column} = ?")
+                values.append(_dumps(safe_value) if column.endswith("_json") else safe_value)
         if not assignments:
             return False
         assignments.append("updated_at = ?")
@@ -244,16 +310,26 @@ class ProcurementRepo:
     ) -> None:
         safe_decision = self.redactor.redact_obj(decision)
         safe_event = self.redactor.redact_obj(audit_event)
+        decision_kind = str(safe_decision.get("decision") or "")
+        if decision_kind not in {"approved", "no_award"}:
+            raise ValueError("unsupported procurement decision")
+        quote_id = safe_decision.get("quote_id")
+        if decision_kind == "approved" and not quote_id:
+            raise ValueError("approved procurement decision requires quote_id")
+        if decision_kind == "no_award" and quote_id:
+            raise ValueError("no_award procurement decision cannot contain quote_id")
+        status = "approved" if decision_kind == "approved" else "no_award"
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 self._insert_decision(safe_decision)
                 cursor = self._conn.execute(
                     """UPDATE procurement_requests
-                       SET status = 'approved', approved_quote_id = ?, updated_at = ?
-                       WHERE id = ? AND approved_quote_id IS NULL""",
+                       SET status = ?, approved_quote_id = ?, updated_at = ?
+                       WHERE id = ? AND status NOT IN ('approved', 'no_award')""",
                     (
-                        safe_decision["quote_id"],
+                        status,
+                        quote_id,
                         _utcnow(),
                         safe_decision["request_id"],
                     ),
@@ -276,7 +352,7 @@ class ProcurementRepo:
                 safe["id"],
                 safe["request_id"],
                 safe["snapshot_id"],
-                safe["quote_id"],
+                safe.get("quote_id"),
                 safe["run_id"],
                 safe["approval_id"],
                 safe["decision"],

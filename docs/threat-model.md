@@ -20,7 +20,6 @@ flowchart LR
     API --> R["Agent Runtime"]
     R --> DB["SQLite / artifacts"]
     R --> HOST["Governed host tools"]
-    R --> D["Optional Docker shell"]
     R --> EXT["Providers / approved network / MCP"]
 ```
 
@@ -37,7 +36,7 @@ flowchart LR
 | Token or cost runaway | step/time/token/output caps, Provider attempt accounting and strict configured cost budgets |
 | SSRF or private-network access | per-hop DNS/IP validation, private target denial, peer validation and browser request interception |
 | Secret disclosure | structured redaction before persistence/public API, credential-header stripping and artifact redaction |
-| Remote unauthenticated execution | loopback default; non-loopback bind disables execution unless explicitly overridden |
+| Remote unauthenticated execution or data access | loopback default; non-loopback bind disables all API access except health checks unless explicitly overridden |
 | Shutdown leaves live work | supervisor interrupts and cancels owned tasks before Harness closes resources |
 
 ## Residual risks
@@ -47,7 +46,7 @@ flowchart LR
 - Prompt injection can still persuade a user to approve a harmful action.
 - Redaction cannot prove arbitrary natural-language content is non-sensitive.
 - Provider retention and billing follow provider policy.
-- Docker, browser engines and MCP implementations are external dependencies.
+- Browser engines and MCP implementations are external dependencies.
 - `--allow-remote-execution` does not add authentication; an authenticating proxy is mandatory.
 
 Fix priority is safety, correctness, interruption recovery, tool reliability, cost/latency, then usability. A known path/approval escape or repeatable side effect blocks release.

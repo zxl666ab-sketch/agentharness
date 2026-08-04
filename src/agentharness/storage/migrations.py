@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -333,6 +333,42 @@ MIGRATIONS: dict[int, str] = {
     );
     CREATE INDEX IF NOT EXISTS idx_procurement_audit_request
         ON procurement_audit_events(request_id, created_at);
+    """,
+    10: """
+    -- A procurement task may finish without selecting a supplier.  Rebuild
+    -- the decision table because SQLite cannot relax the existing NOT NULL
+    -- quote_id constraint in place.
+    CREATE TABLE procurement_decisions_v10 (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        snapshot_id TEXT NOT NULL,
+        quote_id TEXT,
+        run_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL,
+        decision TEXT NOT NULL CHECK (decision IN ('approved', 'no_award')),
+        note TEXT,
+        actor TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(request_id),
+        FOREIGN KEY (request_id) REFERENCES procurement_requests(id),
+        FOREIGN KEY (snapshot_id) REFERENCES procurement_comparison_snapshots(id),
+        FOREIGN KEY (quote_id) REFERENCES procurement_quotes(id),
+        FOREIGN KEY (run_id) REFERENCES runs(id)
+    );
+    INSERT INTO procurement_decisions_v10(
+        id, request_id, snapshot_id, quote_id, run_id, approval_id,
+        decision, note, actor, created_at
+    )
+    SELECT id, request_id, snapshot_id, quote_id, run_id, approval_id,
+           decision, note, actor, created_at
+    FROM procurement_decisions;
+    DROP TABLE procurement_decisions;
+    ALTER TABLE procurement_decisions_v10 RENAME TO procurement_decisions;
+
+    ALTER TABLE procurement_requests
+        ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE procurement_requests
+        ADD COLUMN quantity_decimal TEXT;
     """,
 }
 

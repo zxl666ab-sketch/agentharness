@@ -29,7 +29,7 @@ const RUN_LABELS: Record<string, string> = {
   pending: "等待运行",
   running: "Agent 分析中",
   waiting_approval: "等待操作批准",
-  require_human: "需要人工处理",
+  require_human: "等待人工复核",
   completed: "采购决策已完成",
   failed: "运行失败",
   cancelled: "运行已取消",
@@ -57,6 +57,23 @@ function toolTone(status: string) {
   if (status === "failed" || status === "cancelled") return "danger";
   if (status === "indeterminate") return "warning";
   return "active";
+}
+
+function staleAssistantMessage(content: string) {
+  return content.includes("暂不能进行")
+    || content.includes("暂无法完成")
+    || content.includes("检测到报价信息缺失")
+    || (content.includes("报价解析阶段") && content.includes("需要人工复核"));
+}
+
+function userFacingRunError(error: string | null | undefined, request: ProcurementRequest) {
+  if (!error) return null;
+  if (!error.startsWith("verification requires human review")) return error;
+  if (request.comparison || request.decision) return null;
+  if (request.unresolved_field_count > 0 || request.status === "collecting" || request.status === "review") {
+    return "报价字段尚未全部确认，请在右侧复核后继续。";
+  }
+  return "采购 Agent 已暂停，请点击恢复后继续。";
 }
 
 function ToolState({ invocation }: { invocation: ToolInvocationRow }) {
@@ -242,18 +259,33 @@ export function ProcurementConversation({
     enabled: !!runId,
     refetchInterval: active ? 750 : false,
   });
+  const tools = toolsQuery.data || [];
+  const finalized = !!request.comparison;
   const messages = useMemo(
     () => (messagesQuery.data || []).filter((item) =>
       (item.role === "user" || item.role === "assistant")
       && item.content.trim().length > 0
       && !item.content.includes("[procurement_supplier_selection]")
+      && (!finalized || item.role !== "assistant" || !staleAssistantMessage(item.content))
     ),
-    [messagesQuery.data]
+    [finalized, messagesQuery.data]
   );
-  const tools = toolsQuery.data || [];
   const status = runQuery.data?.status || (runId ? "pending" : "");
-  const needsClarification = status === "require_human" && !request.comparison && request.unresolved_field_count > 0;
-  const canRecover = status === "failed" || status === "cancelled" || status === "interrupted";
+  // A failed requirement capture can leave unresolved_field_count at zero even
+  // though the Agent has asked the buyer to confirm or correct an input.
+  const needsClarification = status === "require_human" && !request.comparison && !request.decision;
+  const canRecover = status === "failed"
+    || status === "cancelled"
+    || status === "interrupted"
+    || (status === "require_human" && !request.comparison && !request.decision);
+  const visibleTools = finalized
+    ? tools.filter((item) => item.status !== "failed" && item.status !== "cancelled" && item.status !== "indeterminate")
+    : tools;
+  const foldedToolCount = tools.length - visibleTools.length;
+  const visibleRunError = userFacingRunError(runQuery.data?.error, request);
+  const runLabel = status === "require_human" && !needsClarification
+    ? "等待恢复"
+    : RUN_LABELS[status] || "准备中";
 
   async function submitReply(event: FormEvent) {
     event.preventDefault();
@@ -273,7 +305,7 @@ export function ProcurementConversation({
     <aside className="proc-conversation" aria-label="采购 Agent 对话">
       <header className="proc-conversation-head">
         <div><Bot size={17} /><strong>采购 Agent</strong></div>
-        <span className={`proc-run-state ${status}`}>{active ? <LoaderCircle className="spin" size={13} /> : <Circle size={10} fill="currentColor" />}{RUN_LABELS[status] || "准备中"}</span>
+        <span className={`proc-run-state ${status}`}>{active ? <LoaderCircle className="spin" size={13} /> : <Circle size={10} fill="currentColor" />}{runLabel}</span>
       </header>
       <div className="proc-conversation-ids">
         <span><small>SESSION</small><code title={request.session_id}>{request.session_id.slice(0, 10)}</code></span>
@@ -300,14 +332,15 @@ export function ProcurementConversation({
         {active && !messages.some((item) => item.role === "assistant") ? (
           <div className="proc-agent-working"><LoaderCircle className="spin" size={15} />Agent 正在分析报价</div>
         ) : null}
-        {tools.length ? (
+        {visibleTools.length ? (
           <section className="proc-conversation-tools">
-            <header><span>工具进度</span><strong>{tools.filter((item) => item.status === "succeeded").length}/{tools.length}</strong></header>
-            <ol>{tools.map((item) => <ToolState invocation={item} key={item.id} />)}</ol>
+            <header><span>工具进度</span><strong>{visibleTools.filter((item) => item.status === "succeeded").length}/{visibleTools.length}</strong></header>
+            <ol>{visibleTools.map((item) => <ToolState invocation={item} key={item.id} />)}</ol>
+            {foldedToolCount ? <small className="proc-conversation-history-note">已折叠 {foldedToolCount} 次失败尝试，完整记录见运行审计</small> : null}
           </section>
         ) : null}
         {runQuery.isError ? <p className="proc-conversation-error" role="alert">运行状态读取失败</p> : null}
-        {canRecover && runQuery.data?.error ? <p className="proc-conversation-error" role="alert">{runQuery.data.error}</p> : null}
+        {canRecover && visibleRunError ? <p className="proc-conversation-error" role="alert">{visibleRunError}</p> : null}
         {actionError ? <p className="proc-conversation-error" role="alert">{actionError}</p> : null}
       </div>
       {needsClarification ? (
@@ -320,7 +353,7 @@ export function ProcurementConversation({
         <button className="proc-conversation-next" type="button" onClick={onOpenComparison}><CheckCircle2 size={15} />查看比价并选择供应商</button>
       ) : null}
       {canRecover ? (
-        <button className="proc-conversation-next warning" type="button" onClick={() => void onRecover()}><RefreshCw size={15} />从持久化状态重新分析</button>
+        <button className="proc-conversation-next warning" type="button" onClick={() => void onRecover()}><RefreshCw size={15} />{status === "require_human" ? "恢复采购 Agent" : "从持久化状态重新分析"}</button>
       ) : null}
     </aside>
   );

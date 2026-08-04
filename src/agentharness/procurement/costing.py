@@ -9,7 +9,10 @@ from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
+from agentharness.procurement.parsing import requirement_quote_field_candidates
+
 RULESET_VERSION = "landed-cost-v1"
+DYNAMIC_RULESET_VERSION = "landed-cost-v2"
 MONEY = Decimal("0.01")
 UNIT_MONEY = Decimal("0.0001")
 
@@ -97,6 +100,354 @@ def _field_values(quote: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _request_schema_version(request: dict[str, Any]) -> int:
+    try:
+        version = int(request.get("schema_version") or 1)
+    except (TypeError, ValueError):
+        version = 1
+    if version >= 2:
+        return 2
+    specs = request.get("specifications") or {}
+    return 2 if any(isinstance(value, dict) and "type" in value for value in specs.values()) else 1
+
+
+def _ruleset_version(request: dict[str, Any]) -> str:
+    return DYNAMIC_RULESET_VERSION if _request_schema_version(request) == 2 else RULESET_VERSION
+
+
+_UNIT_ALIASES = {
+    "mm": ("length", Decimal("1")),
+    "毫米": ("length", Decimal("1")),
+    "cm": ("length", Decimal("10")),
+    "厘米": ("length", Decimal("10")),
+    "m": ("length", Decimal("1000")),
+    "米": ("length", Decimal("1000")),
+    "in": ("length", Decimal("25.4")),
+    "inch": ("length", Decimal("25.4")),
+    "英寸": ("length", Decimal("25.4")),
+    "g": ("mass", Decimal("1")),
+    "克": ("mass", Decimal("1")),
+    "kg": ("mass", Decimal("1000")),
+    "千克": ("mass", Decimal("1000")),
+    "t": ("mass", Decimal("1000000")),
+    "吨": ("mass", Decimal("1000000")),
+    "mm2": ("area", Decimal("1")),
+    "平方毫米": ("area", Decimal("1")),
+    "cm2": ("area", Decimal("100")),
+    "平方厘米": ("area", Decimal("100")),
+    "m2": ("area", Decimal("1000000")),
+    "平方米": ("area", Decimal("1000000")),
+    "ml": ("volume", Decimal("1")),
+    "毫升": ("volume", Decimal("1")),
+    "l": ("volume", Decimal("1000")),
+    "升": ("volume", Decimal("1000")),
+    "m3": ("volume", Decimal("1000000")),
+    "立方米": ("volume", Decimal("1000000")),
+}
+
+
+def _unit_token(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip().casefold())
+
+
+def _dimension_pair(value: Any) -> tuple[Decimal, Decimal] | None:
+    match = re.search(
+        r"([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*[xX×*]\s*"
+        r"([-+]?(?:\d+(?:\.\d*)?|\.\d+))",
+        str(value or ""),
+    )
+    if not match:
+        return None
+    try:
+        return Decimal(match.group(1)), Decimal(match.group(2))
+    except InvalidOperation:
+        return None
+
+
+def _text_values_equivalent(expected: Any, actual: Any) -> bool:
+    if str(actual or "").strip().casefold() == str(expected or "").strip().casefold():
+        return True
+    expected_dimensions = _dimension_pair(expected)
+    actual_dimensions = _dimension_pair(actual)
+    return expected_dimensions is not None and expected_dimensions == actual_dimensions
+
+
+def _convert_dynamic_number(
+    value: Any,
+    unit: Any,
+    expected_unit: str,
+) -> Decimal | None:
+    if unit in (None, "") and isinstance(value, str):
+        match = re.fullmatch(
+            r"\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*([^\d\s].*)?\s*",
+            value,
+        )
+        if match:
+            value = match.group(1)
+            unit = match.group(2) or expected_unit
+    actual_unit = _unit_token(unit)
+    wanted_unit = _unit_token(expected_unit)
+    try:
+        number = _decimal(value, "规格数值")
+    except CostingError:
+        return None
+    if actual_unit == wanted_unit:
+        return number
+    actual = _UNIT_ALIASES.get(actual_unit)
+    wanted = _UNIT_ALIASES.get(wanted_unit)
+    if actual is None or wanted is None or actual[0] != wanted[0]:
+        return None
+    return number * actual[1] / wanted[1]
+
+
+def _dynamic_quote_specs(quote: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    extracted = quote.get("extracted") or {}
+    raw = extracted.get("specifications") or extracted.get("custom_specifications") or {}
+    result: dict[str, dict[str, Any]] = {}
+    if isinstance(raw, dict):
+        for key, entry in raw.items():
+            if isinstance(entry, dict):
+                result[str(key)] = {
+                    "label": entry.get("label") or str(key),
+                    "value": entry.get("value"),
+                    "unit": entry.get("unit"),
+                }
+            else:
+                result[str(key)] = {"label": str(key), "value": entry, "unit": None}
+    fields = extracted.get("fields") if isinstance(extracted, dict) else None
+    if isinstance(fields, dict):
+        for key, entry in fields.items():
+            if key not in result and isinstance(entry, dict):
+                result[str(key)] = {
+                    "label": entry.get("label") or str(key),
+                    "value": entry.get("value"),
+                    "unit": entry.get("unit"),
+                }
+    return result
+
+
+def _dynamic_requirement_entry(
+    actual_specs: dict[str, dict[str, Any]],
+    key: Any,
+    expected: dict[str, Any],
+) -> dict[str, Any] | None:
+    actual_entry = actual_specs.get(str(key))
+    if actual_entry is None:
+        expected_label = _unit_token(expected.get("label") or key)
+        actual_entry = next(
+            (
+                entry
+                for entry in actual_specs.values()
+                if _unit_token(entry.get("label")) == expected_label
+            ),
+            None,
+        )
+    if actual_entry is not None:
+        return actual_entry
+
+    candidates = requirement_quote_field_candidates(key, expected.get("label") or key)
+    entries = [actual_specs.get(candidate) for candidate in candidates]
+    if not entries or any(entry is None or entry.get("value") is None for entry in entries):
+        return None
+    if len(entries) == 1:
+        return entries[0]
+    return {
+        "label": expected.get("label") or str(key),
+        "value": "×".join(str(entry["value"]) for entry in entries),
+        "unit": "mm",
+    }
+
+
+def _dynamic_spec_checks(
+    request: dict[str, Any], quote: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, str]], list[str]]:
+    checks: list[dict[str, Any]] = []
+    exclusions: list[dict[str, str]] = []
+    warnings: list[str] = []
+    actual_specs = _dynamic_quote_specs(quote)
+    for key, expected in (request.get("specifications") or {}).items():
+        if not isinstance(expected, dict):
+            continue
+        label = str(expected.get("label") or key)
+        kind = str(expected.get("type") or "text")
+        match = str(expected.get("match") or "exact")
+        priority = str(expected.get("priority") or "hard")
+        actual_entry = _dynamic_requirement_entry(actual_specs, key, expected)
+        actual_value = actual_entry.get("value") if actual_entry else None
+        actual_unit = actual_entry.get("unit") if actual_entry else None
+        passed = False
+        display_expected = ""
+        display_actual = str(actual_value if actual_value is not None else "未识别")
+        tolerance = ""
+        if kind == "number":
+            expected_unit = str(expected.get("unit") or "")
+            actual_number = _convert_dynamic_number(actual_value, actual_unit or expected_unit, expected_unit)
+            if match == "range":
+                minimum = _decimal(expected.get("min"), f"需求 {key} 最小值")
+                maximum = _decimal(expected.get("max"), f"需求 {key} 最大值")
+                display_expected = f"{minimum} 至 {maximum} {expected_unit}"
+                passed = actual_number is not None and Decimal(minimum) <= actual_number <= Decimal(maximum)
+            else:
+                expected_number = _decimal(expected.get("value"), f"需求 {key} 数值")
+                display_expected = f"{expected_number} {expected_unit}"
+                if match == "tolerance":
+                    tolerance_number = _decimal(expected.get("tolerance"), f"需求 {key} 公差")
+                    tolerance = format(tolerance_number, "f")
+                    passed = actual_number is not None and abs(actual_number - expected_number) <= tolerance_number
+                elif match == "gte":
+                    passed = actual_number is not None and actual_number >= expected_number
+                elif match == "lte":
+                    passed = actual_number is not None and actual_number <= expected_number
+                else:
+                    passed = actual_number is not None and actual_number == expected_number
+            if actual_number is not None and actual_unit and _unit_token(actual_unit) != _unit_token(expected_unit):
+                display_actual = f"{format(actual_number, 'f')} {expected_unit}（原单位 {actual_unit}）"
+        elif kind == "boolean":
+            expected_value = expected.get("value")
+            display_expected = "是" if expected_value else "否"
+            display_actual = "是" if actual_value is True else "否" if actual_value is False else "未识别"
+            passed = actual_value is expected_value
+        else:
+            expected_value = str(expected.get("value") or "").strip()
+            display_expected = expected_value
+            passed = actual_value is not None and _text_values_equivalent(
+                expected_value,
+                actual_value,
+            )
+        check = {
+            "field": str(key),
+            "label": label,
+            "expected": display_expected,
+            "actual": display_actual,
+            "tolerance": tolerance or match,
+            "match": match,
+            "priority": priority,
+            "passed": passed,
+        }
+        checks.append(check)
+        if not passed:
+            if priority == "hard":
+                exclusions.append(
+                    {
+                        "code": f"spec_{key}",
+                        "message": f"{label} {display_actual} 不符合需求 {display_expected}",
+                    }
+                )
+            else:
+                warnings.append(f"偏好规格 {label} 未满足：实际为 {display_actual}，需求为 {display_expected}")
+    return checks, exclusions, warnings
+
+
+def _legacy_spec_checks(
+    request: dict[str, Any],
+    fields: dict[str, Any],
+    constraints: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    specs = request.get("specifications", {})
+    tolerance_mm = _decimal(constraints.get("size_tolerance_mm", "0"), "尺寸公差")
+    tolerance_um = _decimal(constraints.get("thickness_tolerance_um", "0"), "厚度公差")
+    checks: list[dict[str, Any]] = []
+    exclusions: list[dict[str, str]] = []
+    exact_specs = (
+        (
+            "material",
+            _canonical_material(specs.get("material")),
+            _canonical_material(fields.get("material")),
+        ),
+        ("color", _canonical_color(specs.get("color")), _canonical_color(fields.get("color"))),
+        (
+            "print_colors",
+            str(specs.get("print_colors")) if specs.get("print_colors") is not None else None,
+            str(fields.get("print_colors")) if fields.get("print_colors") is not None else None,
+        ),
+    )
+    for field, expected, actual in exact_specs:
+        if expected is None:
+            continue
+        passed = actual == expected
+        checks.append(
+            {
+                "field": field,
+                "expected": expected,
+                "actual": actual or "未识别",
+                "tolerance": "exact",
+                "passed": passed,
+            }
+        )
+        if not passed:
+            exclusions.append(
+                {
+                    "code": f"spec_{field}",
+                    "message": f"{SPEC_LABELS[field]} {actual or '未识别'} 不符合需求 {expected}",
+                }
+            )
+
+    expected_width = _decimal(specs.get("width_mm"), "需求 width_mm")
+    expected_length = _decimal(specs.get("length_mm"), "需求 length_mm")
+    actual_width = _decimal(fields.get("width_mm"), "报价 width_mm")
+    actual_length = _decimal(fields.get("length_mm"), "报价 length_mm")
+    direct_dimensions_passed = (
+        abs(actual_width - expected_width) <= tolerance_mm
+        and abs(actual_length - expected_length) <= tolerance_mm
+    )
+    swapped_dimensions_passed = (
+        abs(actual_width - expected_length) <= tolerance_mm
+        and abs(actual_length - expected_width) <= tolerance_mm
+    )
+    dimension_orientation = (
+        "direct"
+        if direct_dimensions_passed
+        else "swapped"
+        if swapped_dimensions_passed
+        else None
+    )
+    dimensions_passed = direct_dimensions_passed or swapped_dimensions_passed
+    checks.append(
+        {
+            "field": "dimensions_mm",
+            "expected": f"{format(expected_width, 'f')} × {format(expected_length, 'f')}",
+            "actual": f"{format(actual_width, 'f')} × {format(actual_length, 'f')}",
+            "tolerance": format(tolerance_mm, "f"),
+            "passed": dimensions_passed,
+            "orientation": dimension_orientation or "unmatched",
+        }
+    )
+    if not dimensions_passed:
+        for field, expected, actual in (
+            ("width_mm", expected_width, actual_width),
+            ("length_mm", expected_length, actual_length),
+        ):
+            if abs(actual - expected) <= tolerance_mm:
+                continue
+            exclusions.append(
+                {
+                    "code": f"spec_{field}",
+                    "message": f"{SPEC_LABELS[field]} {format(actual, 'f')} 超出需求 {format(expected, 'f')}±{format(tolerance_mm, 'f')}",
+                }
+            )
+
+    expected = _decimal(specs.get("thickness_um"), "需求 thickness_um")
+    actual = _decimal(fields.get("thickness_um"), "报价 thickness_um")
+    passed = abs(actual - expected) <= tolerance_um
+    checks.append(
+        {
+            "field": "thickness_um",
+            "expected": format(expected, "f"),
+            "actual": format(actual, "f"),
+            "tolerance": format(tolerance_um, "f"),
+            "passed": passed,
+        }
+    )
+    if not passed:
+        exclusions.append(
+            {
+                "code": "spec_thickness_um",
+                "message": f"{SPEC_LABELS['thickness_um']} {format(actual, 'f')} 超出需求 {format(expected, 'f')}±{format(tolerance_um, 'f')}",
+            }
+        )
+    return checks, exclusions
+
+
 def _analysis_date(value: date | str) -> date:
     if isinstance(value, date):
         return value
@@ -113,26 +464,33 @@ def canonical_analysis_input(
     analysis_as_of: date | str,
 ) -> dict[str, Any]:
     as_of = _analysis_date(analysis_as_of)
+    request_input: dict[str, Any] = {
+        "id": request["id"],
+        "item_name": request["item_name"],
+        "quantity": request["quantity"],
+        "unit": request["unit"],
+        "specifications": request.get("specifications", {}),
+        "constraints": request.get("constraints", {}),
+        "created_at": request.get("created_at"),
+    }
+    if _request_schema_version(request) == 2:
+        request_input["schema_version"] = 2
+        request_input["category"] = request.get("category")
+    quote_inputs: list[dict[str, Any]] = []
+    for quote in sorted(quotes, key=lambda item: item["id"]):
+        quote_input: dict[str, Any] = {
+            "id": quote["id"],
+            "source_sha256": quote["source_sha256"],
+            "fields": _field_values(quote),
+        }
+        if _request_schema_version(request) == 2:
+            quote_input["specifications"] = _dynamic_quote_specs(quote)
+        quote_inputs.append(quote_input)
     return {
-        "ruleset_version": RULESET_VERSION,
+        "ruleset_version": _ruleset_version(request),
         "analysis_as_of": as_of.isoformat(),
-        "request": {
-            "id": request["id"],
-            "item_name": request["item_name"],
-            "quantity": request["quantity"],
-            "unit": request["unit"],
-            "specifications": request.get("specifications", {}),
-            "constraints": request.get("constraints", {}),
-            "created_at": request.get("created_at"),
-        },
-        "quotes": [
-            {
-                "id": quote["id"],
-                "source_sha256": quote["source_sha256"],
-                "fields": _field_values(quote),
-            }
-            for quote in sorted(quotes, key=lambda item: item["id"])
-        ],
+        "request": request_input,
+        "quotes": quote_inputs,
     }
 
 
@@ -160,7 +518,6 @@ def _normalized_quote(
 ) -> dict[str, Any]:
     fields = _field_values(quote)
     constraints = request.get("constraints", {})
-    specs = request.get("specifications", {})
     quantity = _decimal(request["quantity"], "采购数量")
     if quantity <= 0:
         raise CostingError("采购数量必须大于 0")
@@ -225,8 +582,6 @@ def _normalized_quote(
     if constraints.get("invoice_required", False) and fields.get("supports_invoice") is not True:
         exclusions.append({"code": "invoice", "message": "不能提供要求的发票"})
 
-    tolerance_mm = _decimal(constraints.get("size_tolerance_mm", "0"), "尺寸公差")
-    tolerance_um = _decimal(constraints.get("thickness_tolerance_um", "0"), "厚度公差")
     spec_checks: list[dict[str, Any]] = []
     description = str(fields.get("item_description") or "")
     expected_item = _canonical_item(request.get("item_name"))
@@ -250,64 +605,18 @@ def _normalized_quote(
                 }
             )
 
-    exact_specs = (
-        (
-            "material",
-            _canonical_material(specs.get("material")),
-            _canonical_material(fields.get("material")),
-        ),
-        ("color", _canonical_color(specs.get("color")), _canonical_color(fields.get("color"))),
-        (
-            "print_colors",
-            str(specs.get("print_colors")) if specs.get("print_colors") is not None else None,
-            str(fields.get("print_colors")) if fields.get("print_colors") is not None else None,
-        ),
-    )
-    for field, expected, actual in exact_specs:
-        if expected is None:
-            continue
-        passed = actual == expected
-        spec_checks.append(
-            {
-                "field": field,
-                "expected": expected,
-                "actual": actual or "未识别",
-                "tolerance": "exact",
-                "passed": passed,
-            }
+    dimension_orientation: str | None = None
+    if _request_schema_version(request) == 2:
+        dynamic_checks, dynamic_exclusions, dynamic_warnings = _dynamic_spec_checks(
+            request, quote
         )
-        if not passed:
-            exclusions.append(
-                {
-                    "code": f"spec_{field}",
-                    "message": f"{SPEC_LABELS[field]} {actual or '未识别'} 不符合需求 {expected}",
-                }
-            )
-
-    for field, tolerance in (
-        ("width_mm", tolerance_mm),
-        ("length_mm", tolerance_mm),
-        ("thickness_um", tolerance_um),
-    ):
-        expected = _decimal(specs.get(field), f"需求 {field}")
-        actual = _decimal(fields.get(field), f"报价 {field}")
-        passed = abs(actual - expected) <= tolerance
-        spec_checks.append(
-            {
-                "field": field,
-                "expected": format(expected, "f"),
-                "actual": format(actual, "f"),
-                "tolerance": format(tolerance, "f"),
-                "passed": passed,
-            }
-        )
-        if not passed:
-            exclusions.append(
-                {
-                    "code": f"spec_{field}",
-                    "message": f"{SPEC_LABELS[field]} {format(actual, 'f')} 超出需求 {format(expected, 'f')}±{format(tolerance, 'f')}",
-                }
-            )
+        spec_checks.extend(dynamic_checks)
+        exclusions.extend(dynamic_exclusions)
+        warnings.extend(dynamic_warnings)
+    else:
+        legacy_checks, legacy_exclusions = _legacy_spec_checks(request, fields, constraints)
+        spec_checks.extend(legacy_checks)
+        exclusions.extend(legacy_exclusions)
 
     max_unit_cost = constraints.get("max_landed_unit_cost")
     if max_unit_cost not in (None, "") and landed_unit_base > _decimal(max_unit_cost, "到货单价上限"):
@@ -351,8 +660,12 @@ def _normalized_quote(
         "match": {
             "item": request["item_name"],
             "quoted_description": description,
+            "dimension_orientation": dimension_orientation,
             "spec_checks": spec_checks,
-            "passed": all(item["passed"] for item in spec_checks),
+            "passed": all(
+                item["passed"] or item.get("priority") == "preference"
+                for item in spec_checks
+            ),
         },
         "commercial": {
             "moq": int(moq),
@@ -435,7 +748,7 @@ def compare_quotes(
 
     return {
         "schema_version": 1,
-        "ruleset_version": RULESET_VERSION,
+        "ruleset_version": _ruleset_version(request),
         "analysis_as_of": as_of.isoformat(),
         "request_id": request["id"],
         "base_currency": request.get("constraints", {}).get("base_currency", "CNY"),
@@ -450,6 +763,7 @@ def compare_quotes(
 
 __all__ = [
     "CostingError",
+    "DYNAMIC_RULESET_VERSION",
     "RULESET_VERSION",
     "analysis_input_sha256",
     "canonical_analysis_input",
