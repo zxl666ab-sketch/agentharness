@@ -108,6 +108,11 @@ export const procurementApi = {
   requests: () => requestJson<ProcurementRequestSummary[]>("/api/procurement/requests?limit=200"),
   request: (requestId: string) =>
     requestJson<ProcurementRequest>(`/api/procurement/requests/${requestId}`),
+  deleteRequest: (requestId: string) =>
+    requestJson<{ request_id: string; reference: string; deleted: boolean }>(
+      `/api/procurement/requests/${requestId}`,
+      { method: "DELETE" }
+    ),
   createRequest: (input: CreateProcurementRequest) =>
     postJson<ProcurementRequest>("/api/procurement/requests", input),
   async startConversation(message: string, files: File[]) {
@@ -144,14 +149,24 @@ export const procurementApi = {
       `/api/procurement/requests/${requestId}/quotes/${quoteId}/corrections`,
       { field, value, actor: "采购员" }
     ),
+  correctRequirement: (requestId: string, input: CreateProcurementRequest) =>
+    requestJson<ProcurementRequest>(
+      `/api/procurement/requests/${requestId}/requirement`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...input, actor: "采购员" }),
+      }
+    ),
   analyze: (requestId: string) =>
     postJson<ProcurementRunAccepted>(`/api/procurement/requests/${requestId}/analyze`),
   approve: (
     requestId: string,
     input: {
+      decision?: "approved" | "no_award";
       snapshot_id: string;
       input_sha256: string;
-      quote_id: string;
+      quote_id: string | null;
       confirmed: boolean;
       note?: string;
     }
@@ -159,6 +174,10 @@ export const procurementApi = {
     postJson<ProcurementRequest>(`/api/procurement/requests/${requestId}/decision`, {
       ...input,
       actor: "采购员",
+    }),
+  reopen: (requestId: string, copyQuotes: boolean) =>
+    postJson<ProcurementRequest>(`/api/procurement/requests/${requestId}/reopen`, {
+      copy_quotes: copyQuotes,
     }),
   report: (requestId: string) =>
     requestJson<ProcurementAuditReport>(`/api/procurement/requests/${requestId}/report`),

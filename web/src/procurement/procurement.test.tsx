@@ -1,9 +1,11 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { ComparisonView } from "./ComparisonView";
-import { NewProcurementConversation } from "./ProcurementConversation";
+import { NewProcurementConversation, ProcurementConversation } from "./ProcurementConversation";
 import { QuoteWorkspace } from "./QuoteWorkspace";
+import { RequirementReview } from "./RequirementReview";
 import { procurementReportMarkdown, ReportView } from "./ReportView";
 import type {
   ProcurementAuditReport,
@@ -149,6 +151,31 @@ function analyzed(): ProcurementRequest {
   };
 }
 
+function allExcluded(): ProcurementRequest {
+  const current = analyzed();
+  const comparison = current.comparison!;
+  return {
+    ...current,
+    comparison: {
+      ...comparison,
+      result: {
+        ...comparison.result,
+        eligible_count: 0,
+        excluded_count: comparison.result.quotes.length,
+        recommended_quote_id: null,
+        recommendation_explanation: ["没有报价同时满足全部硬性条件，需要调整需求或重新询价"],
+        quotes: comparison.result.quotes.map((quote) => ({
+          ...quote,
+          eligible: false,
+          rank: null,
+          score: null,
+          exclusion_reasons: [{ code: "lead_time", message: "交期超过上限" }],
+        })),
+      },
+    },
+  };
+}
+
 describe("procurement workflow views", () => {
   it("uses the server quote limit for a 30-file blind-test batch", () => {
     const html = renderToString(
@@ -182,6 +209,245 @@ describe("procurement workflow views", () => {
     expect(html).toContain("disabled");
   });
 
+  it("does not duplicate V2 dynamic specs in the quote review", () => {
+    const dynamicRequest: ProcurementRequest = {
+      ...request,
+      schema_version: 2,
+      category: "label_printing",
+      specifications: {
+        material: {
+          label: "材质",
+          type: "text",
+          value: "铜版纸",
+          match: "exact",
+          priority: "hard",
+        },
+        color: {
+          label: "颜色",
+          type: "text",
+          value: "白色",
+          match: "exact",
+          priority: "hard",
+        },
+      },
+      quotes: [{
+        ...request.quotes[0],
+        extracted: {
+          ...request.quotes[0].extracted,
+          specifications: {
+            material: {
+              value: "铜版纸",
+              confidence: 0.9,
+              status: "accepted",
+              source: { document_kind: "xlsx", locator: "Quote!B2", excerpt: "材质: 铜版纸", method: "test" },
+            },
+            color: {
+              value: "白色",
+              confidence: 0.9,
+              status: "accepted",
+              source: { document_kind: "xlsx", locator: "Quote!B3", excerpt: "颜色: 白色", method: "test" },
+            },
+          },
+        },
+      }],
+    };
+    const html = renderToString(
+      <QuoteWorkspace
+        request={dynamicRequest}
+        meta={meta}
+        busy={null}
+        onUpload={async () => undefined}
+        onCorrect={async () => undefined}
+        onAnalyze={async () => undefined}
+      />
+    );
+    expect((html.match(/data-field="material"/g) || []).length).toBe(1);
+    expect((html.match(/data-field="color"/g) || []).length).toBe(1);
+    expect(html).toContain("报价字段与来源证据");
+  });
+
+  it("shows V2 specs from standard quote fields and hides duplicated MOQ", () => {
+    const extractedField = (value: string | number) => ({
+      value,
+      confidence: 0.97,
+      status: "accepted" as const,
+      source: {
+        document_kind: "xlsx",
+        locator: "报价明细!A4",
+        excerpt: String(value),
+        method: "table_header",
+      },
+    });
+    const dynamicRequest: ProcurementRequest = {
+      ...request,
+      schema_version: 2,
+      category: "ecommerce_packaging",
+      specifications: {
+        尺寸: {
+          label: "成品尺寸",
+          type: "text",
+          value: "100×150",
+          match: "exact",
+          priority: "hard",
+        },
+        厚度: {
+          label: "材料厚度",
+          type: "number",
+          value: "80",
+          unit: "μm",
+          match: "tolerance",
+          tolerance: "5",
+          priority: "hard",
+        },
+        材质: {
+          label: "面材",
+          type: "text",
+          value: "铜版纸",
+          match: "exact",
+          priority: "hard",
+        },
+        颜色: {
+          label: "底色",
+          type: "text",
+          value: "白色",
+          match: "exact",
+          priority: "hard",
+        },
+        MOQ: {
+          label: "最小起订量",
+          type: "number",
+          value: "20000",
+          unit: "张",
+          match: "lte",
+          priority: "hard",
+        },
+      },
+      quotes: [{
+        ...request.quotes[0],
+        status: "ready",
+        review_count: 0,
+        review_fields: [],
+        extracted: {
+          ...request.quotes[0].extracted,
+          fields: {
+            ...request.quotes[0].extracted.fields,
+            width_mm: extractedField("100"),
+            length_mm: extractedField("150"),
+            thickness_um: extractedField("80"),
+            material: extractedField("铜版纸"),
+            color: extractedField("白色"),
+            moq: extractedField(10000),
+          },
+        },
+      }],
+      quote_count: 1,
+      unresolved_field_count: 0,
+    };
+    const html = renderToString(
+      <QuoteWorkspace
+        request={dynamicRequest}
+        meta={{
+          ...meta,
+          field_meta: {
+            ...meta.field_meta,
+            moq: { label: "起订量（MOQ）", kind: "integer", required: true },
+          },
+        }}
+        busy={null}
+        onUpload={async () => undefined}
+        onCorrect={async () => undefined}
+        onAnalyze={async () => undefined}
+      />
+    );
+    expect(html).toContain('data-field="尺寸"');
+    expect(html).toContain("100×150");
+    expect(html).toContain("80");
+    expect(html).toContain("铜版纸");
+    expect(html).toContain("白色");
+    expect((html.match(/data-field="MOQ"/g) || []).length).toBe(0);
+    expect(html).not.toContain("原文未找到");
+  });
+
+  it("keeps the quote workspace visible for completed requests", () => {
+    const html = renderToString(
+      <RequirementReview
+        request={{ ...request, status: "approved" }}
+        busy={false}
+        onSave={async () => undefined}
+      />
+    );
+    expect(html).toContain("采购需求已确认");
+    expect(html).toContain("展开");
+    expect(html).not.toContain("保存人工确认");
+  });
+
+  it("derives the required delivery date from the request date and lead time", () => {
+    const html = renderToString(
+      <RequirementReview
+        request={request}
+        busy={false}
+        onSave={async () => undefined}
+      />
+    );
+    expect(html).toContain('value="2026-08-11"');
+  });
+
+  it("renders dynamic specification rows for a V2 requirement", () => {
+    const dynamicRequest: ProcurementRequest = {
+      ...request,
+      schema_version: 2,
+      category: "general",
+      item_name: "透明封箱胶带",
+      quantity: "12.5",
+      unit: "卷",
+      specifications: {
+        length: {
+          label: "长度",
+          type: "number",
+          value: "100",
+          unit: "m",
+          match: "exact",
+          priority: "hard",
+        },
+      },
+    };
+    const html = renderToString(
+      <RequirementReview
+        request={dynamicRequest}
+        busy={false}
+        onSave={async () => undefined}
+      />
+    );
+    expect(html).toContain("新增规格");
+    expect(html).toContain("长度");
+    expect(html).not.toContain("宽度（mm）");
+  });
+
+  it("keeps a reply composer when requirement capture asks for confirmation", () => {
+    const client = new QueryClient();
+    client.setQueryData(["procurement-run", "run"], {
+      status: "require_human",
+      error: "verification requires human review: output is missing required text: ['【采购决策已验证】']",
+    });
+    client.setQueryData(["procurement-messages", "run"], []);
+    client.setQueryData(["procurement-tools", "run"], []);
+    const html = renderToString(
+      <QueryClientProvider client={client}>
+        <ProcurementConversation
+          request={{ ...request, analysis_run_id: "run", unresolved_field_count: 0 }}
+          onResume={async () => undefined}
+          onRecover={async () => undefined}
+          onOpenComparison={() => undefined}
+        />
+      </QueryClientProvider>
+    );
+    expect(html).toContain("补充 Agent 请求的信息");
+    expect(html).toContain("恢复采购 Agent");
+    expect(html).toContain("报价字段尚未全部确认，请在右侧复核后继续。");
+    expect(html).not.toContain("verification requires human review");
+    expect(html).not.toContain("【采购决策已验证】");
+  });
+
   it("explains deterministic cost ranking after excluding hard violations", () => {
     const html = renderToString(
       <ComparisonView request={analyzed()} busy={null} onAnalyze={async () => undefined} onApprove={async () => undefined} />
@@ -191,6 +457,17 @@ describe("procurement workflow views", () => {
     expect(html).toContain("总到货成本");
     expect(html).toContain("精确金额核算");
     expect(html).toContain("提交供应商审批");
+  });
+
+  it("keeps recovery actions available when every quote is excluded", () => {
+    const html = renderToString(
+      <ComparisonView request={allExcluded()} busy={null} onAnalyze={async () => undefined} onApprove={async () => undefined} />
+    );
+    expect(html).toContain("调整需求");
+    expect(html).toContain("补充报价");
+    expect(html).toContain("重新比价");
+    expect(html).toContain("本轮流标");
+    expect(html).not.toContain("提交供应商审批");
   });
 
   it("renders a durable approved report with source and comparison hashes", () => {
@@ -232,5 +509,39 @@ describe("procurement workflow views", () => {
     expect(markdown).toContain("选定供应商：Alpha Packaging");
     expect(markdown).toContain("供应商已人工批准");
     expect(markdown).toContain("分析运行 ID：run");
+  });
+
+  it("renders a durable no-award report without a supplier or execution drafts", () => {
+    const noAward: ProcurementRequest = {
+      ...allExcluded(),
+      status: "no_award",
+      decision: {
+        id: "decision-no-award",
+        request_id: "request",
+        snapshot_id: "snapshot",
+        quote_id: null,
+        run_id: "run",
+        approval_id: "approval",
+        decision: "no_award",
+        actor: "采购员",
+        note: "本轮报价均不满足交期",
+        created_at: "2026-07-27T00:00:04Z",
+      },
+    };
+    const report = {
+      schema_version: 1,
+      evidence_sha256: "e".repeat(64),
+      request: noAward,
+      quotes: noAward.quotes,
+      comparison: noAward.comparison,
+      decision: noAward.decision,
+      execution_artifacts: [],
+      audit_events: [{ id: "event-no-award", request_id: "request", run_id: "run", type: "supplier_no_award", actor: "采购员", payload: {}, created_at: "2026-07-27T00:00:04Z" }],
+      runtime: { session_id: "session", run_id: "run" },
+    } satisfies ProcurementAuditReport;
+    const html = renderToString(<ReportView request={noAward} report={report} loading={false} />);
+    expect(html).toContain("本轮流标");
+    expect(html).toContain("流标不会生成订单或供应商邮件草稿");
+    expect(procurementReportMarkdown(report)).toContain("本轮流标");
   });
 });

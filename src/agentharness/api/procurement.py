@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import re
 from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
@@ -13,7 +14,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from agentharness.procurement.agent import ProcurementAgent
-from agentharness.procurement.costing import RULESET_VERSION
+from agentharness.procurement.costing import DYNAMIC_RULESET_VERSION, RULESET_VERSION
 from agentharness.procurement.evaluation import evaluate_frozen_cases
 from agentharness.procurement.parsing import (
     MAX_FILE_BYTES,
@@ -44,7 +45,12 @@ class PackagingSpecifications(BaseModel):
 class ProcurementConstraints(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    base_currency: str = Field(default="CNY", min_length=3, max_length=3)
+    base_currency: str = Field(
+        default="CNY",
+        min_length=3,
+        max_length=3,
+        pattern=r"^[A-Za-z]{3}$",
+    )
     fx_rates: dict[str, Decimal] = Field(default_factory=lambda: {"CNY": Decimal("1")})
     max_lead_days: int = Field(default=15, ge=1, le=365)
     invoice_required: bool = True
@@ -67,7 +73,7 @@ class ProcurementConstraints(BaseModel):
         normalized: dict[str, Decimal] = {}
         for currency, rate in value.items():
             code = str(currency).upper()
-            if len(code) != 3 or rate <= 0:
+            if re.fullmatch(r"[A-Z]{3}", code) is None or rate <= 0:
                 raise ValueError("币种代码必须为 3 个字母，且汇率必须大于 0")
             normalized[code] = rate
         return normalized
@@ -82,12 +88,13 @@ class ProcurementConstraints(BaseModel):
 class CreateProcurementRequestBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: Literal[1, 2] = 1
     title: str = Field(min_length=1, max_length=200)
-    category: Literal["ecommerce_packaging"] = "ecommerce_packaging"
+    category: str = Field(default="ecommerce_packaging", min_length=1, max_length=100)
     item_name: str = Field(min_length=1, max_length=200)
-    quantity: int = Field(gt=0, le=100_000_000)
-    unit: Literal["piece"] = "piece"
-    specifications: PackagingSpecifications
+    quantity: Decimal = Field(gt=0)
+    unit: str = Field(default="piece", min_length=1, max_length=50)
+    specifications: dict[str, Any]
     constraints: ProcurementConstraints
 
     @field_validator("title", "item_name")
@@ -97,6 +104,25 @@ class CreateProcurementRequestBody(BaseModel):
         if not cleaned:
             raise ValueError("内容不能为空")
         return cleaned
+
+    @field_validator("category", "unit")
+    @classmethod
+    def non_blank_domain_text(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("内容不能为空")
+        return cleaned
+
+    @field_validator("specifications")
+    @classmethod
+    def specifications_object(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if len(value) > 100:
+            raise ValueError("采购规格最多 100 项")
+        return value
+
+
+class CorrectRequirementBody(CreateProcurementRequestBody):
+    actor: str = Field(default="采购员", min_length=1, max_length=100)
 
 
 class ImportQuoteBody(BaseModel):
@@ -137,10 +163,27 @@ class StartProcurementConversationBody(BaseModel):
         return cleaned
 
     def decoded_attachments(self) -> list[tuple[str, bytes]]:
+        estimated_total = sum(
+            _base64_decoded_size_hint(item.content_base64) for item in self.attachments
+        )
+        if estimated_total > MAX_CONVERSATION_UPLOAD_BYTES:
+            raise ProcurementError("单次上传的报价文件总计不得超过 20 MB")
         decoded = [(item.filename, item.decode()) for item in self.attachments]
         if sum(len(data) for _filename, data in decoded) > MAX_CONVERSATION_UPLOAD_BYTES:
             raise ProcurementError("单次上传的报价文件总计不得超过 20 MB")
         return decoded
+
+
+def _base64_decoded_size_hint(value: str) -> int:
+    """Return a conservative decoded-byte estimate without allocating bytes."""
+
+    groups, remainder = divmod(len(value), 4)
+    if remainder:
+        return (groups + 1) * 3
+    padding = len(value) - len(value.rstrip("="))
+    if padding > 2:
+        return groups * 3
+    return max(0, groups * 3 - padding)
 
 
 class CorrectQuoteFieldBody(BaseModel):
@@ -165,15 +208,34 @@ class ResumeProcurementConversationBody(BaseModel):
         return cleaned
 
 
+class ReopenProcurementBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    copy_quotes: bool = False
+    actor: str = Field(default="采购员", min_length=1, max_length=100)
+
+
 class ApproveSupplierBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    decision: Literal["approved", "no_award"] = "approved"
     snapshot_id: str = Field(min_length=1, max_length=128)
     input_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    quote_id: str = Field(min_length=1, max_length=128)
+    quote_id: str | None = Field(default=None, min_length=1, max_length=128)
     confirmed: bool
     note: str | None = Field(default=None, max_length=2_000)
     actor: str = Field(default="采购员", min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_decision(self) -> ApproveSupplierBody:
+        if self.decision == "approved" and not self.quote_id:
+            raise ValueError("批准供应商必须选择报价")
+        if self.decision == "no_award":
+            if self.quote_id is not None:
+                raise ValueError("流标不能选择供应商")
+            if not self.note or not self.note.strip():
+                raise ValueError("流标必须填写原因")
+        return self
 
 
 class ProcurementModelConfigBody(BaseModel):
@@ -227,9 +289,12 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
     @router.get("/meta")
     async def meta() -> dict[str, Any]:
         return {
-            "category": "ecommerce_packaging",
+            "category": "general",
+            "categories": ["ecommerce_packaging", "general"],
+            "requirement_schema_versions": [1, 2],
             "parser_version": PARSER_VERSION,
             "ruleset_version": RULESET_VERSION,
+            "ruleset_versions": [RULESET_VERSION, DYNAMIC_RULESET_VERSION],
             "max_file_bytes": MAX_FILE_BYTES,
             "max_conversation_upload_bytes": MAX_CONVERSATION_UPLOAD_BYTES,
             "max_quotes_per_request": MAX_QUOTES_PER_REQUEST,
@@ -254,7 +319,10 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
 
     @router.post("/requests", status_code=201)
     async def create_request(body: CreateProcurementRequestBody) -> dict[str, Any]:
-        return service.create_request(body.model_dump(mode="json"))
+        try:
+            return service.create_request(body.model_dump(mode="json"))
+        except ProcurementError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @router.get("/requests/{request_id}")
     async def request_detail(request_id: str) -> dict[str, Any]:
@@ -262,6 +330,15 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
             return service.get_request(request_id)
         except KeyError:
             raise HTTPException(404, "未找到采购需求") from None
+
+    @router.delete("/requests/{request_id}")
+    async def delete_request(request_id: str) -> dict[str, Any]:
+        try:
+            return service.delete_request(request_id)
+        except KeyError:
+            raise HTTPException(404, "未找到采购需求") from None
+        except ProcurementError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @router.post("/requests/{request_id}/resume", status_code=202)
     async def resume_conversation(
@@ -275,6 +352,20 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.put("/requests/{request_id}/requirement")
+    async def correct_requirement(
+        request_id: str,
+        body: CorrectRequirementBody,
+    ) -> dict[str, Any]:
+        payload = body.model_dump(mode="json")
+        actor = str(payload.pop("actor", "采购员"))
+        try:
+            return service.replace_requirement(request_id, payload, actor=actor)
+        except KeyError:
+            raise HTTPException(404, "未找到采购需求") from None
+        except ProcurementError as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @router.post("/requests/{request_id}/quotes", status_code=201)
@@ -337,6 +428,7 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
                 snapshot_id=body.snapshot_id,
                 input_sha256=body.input_sha256,
                 quote_id=body.quote_id,
+                decision=body.decision,
                 note=body.note,
                 actor=body.actor,
             )
@@ -344,6 +436,19 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
             raise HTTPException(404, "未找到采购需求、比价快照或报价") from None
         except (ProcurementError, RuntimeError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/requests/{request_id}/reopen")
+    async def reopen(request_id: str, body: ReopenProcurementBody) -> dict[str, Any]:
+        try:
+            return service.reopen_request(
+                request_id,
+                copy_quotes=body.copy_quotes,
+                actor=body.actor,
+            )
+        except KeyError:
+            raise HTTPException(404, "未找到采购需求") from None
+        except ProcurementError as exc:
+            raise HTTPException(409, str(exc)) from None
 
     @router.get("/requests/{request_id}/report")
     async def audit_report(request_id: str) -> dict[str, Any]:
@@ -362,11 +467,13 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
 __all__ = [
     "ApproveSupplierBody",
     "CreateProcurementRequestBody",
+    "CorrectRequirementBody",
     "CorrectQuoteFieldBody",
     "ConversationAttachment",
     "ImportQuoteBody",
     "MAX_CONVERSATION_UPLOAD_BYTES",
     "ProcurementModelConfigBody",
+    "ReopenProcurementBody",
     "ResumeProcurementConversationBody",
     "StartProcurementConversationBody",
     "procurement_router",

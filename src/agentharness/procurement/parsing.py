@@ -50,6 +50,7 @@ FIELD_META: dict[str, dict[str, Any]] = {
     "width_mm": {"label": "宽度（mm）", "kind": "decimal", "required": True},
     "length_mm": {"label": "长度（mm）", "kind": "decimal", "required": True},
     "thickness_um": {"label": "厚度（µm）", "kind": "decimal", "required": True},
+    "layers": {"label": "瓦楞层数", "kind": "integer", "required": False},
     "payment_terms": {"label": "付款条件", "kind": "text", "required": False},
     "valid_until": {"label": "报价有效期", "kind": "date", "required": False},
 }
@@ -57,8 +58,8 @@ FIELD_META: dict[str, dict[str, Any]] = {
 _ALIASES = {
     "supplier_name": ["供应商", "供应商名称", "报价方", "公司名称", "vendor", "supplier", "suppliername"],
     "item_description": ["品名", "产品名称", "物料名称", "物料描述", "产品描述", "规格描述", "description", "item", "product"],
-    "material": ["材质", "材料", "原料", "material"],
-    "color": ["颜色", "色彩", "color", "colour"],
+    "material": ["材质", "材料", "面材", "原料", "material"],
+    "color": ["颜色", "底色", "色彩", "color", "colour"],
     "print_colors": ["印刷色数", "印刷颜色数", "印刷", "printcolors", "printingcolors"],
     "currency": ["币种", "货币", "currency"],
     "unit_price": ["单价", "报价", "含税单价", "未税单价", "price", "unitprice", "quotedprice"],
@@ -72,7 +73,8 @@ _ALIASES = {
     "supports_invoice": ["可开票", "是否可开票", "发票", "增值税专票", "invoice", "supportsinvoice"],
     "width_mm": ["宽", "宽度", "宽mm", "width", "widthmm"],
     "length_mm": ["长", "长度", "高度", "长mm", "length", "height", "lengthmm"],
-    "thickness_um": ["厚度", "厚度um", "厚度微米", "丝数", "thickness", "thicknessum", "micron"],
+    "thickness_um": ["厚度", "材料厚度", "厚度um", "厚度微米", "丝数", "thickness", "thicknessum", "micron"],
+    "layers": ["瓦楞层数", "层数", "layers", "corrugatedlayers"],
     "payment_terms": ["付款条件", "结算方式", "账期", "payment", "paymentterms"],
     "valid_until": ["有效期", "报价有效期", "validuntil", "expiry", "expiration"],
 }
@@ -84,6 +86,31 @@ def _key(value: Any) -> str:
 
 
 ALIASES = {_key(alias): field for field, aliases in _ALIASES.items() for alias in aliases}
+
+_COMPOSITE_REQUIREMENT_FIELDS = {
+    "size": ("width_mm", "length_mm"),
+    "尺寸": ("width_mm", "length_mm"),
+    "成品尺寸": ("width_mm", "length_mm"),
+    "规格尺寸": ("width_mm", "length_mm"),
+}
+
+
+def requirement_quote_field_candidates(
+    key: Any,
+    label: Any = None,
+) -> tuple[str, ...]:
+    """Map common dynamic requirement labels to parsed quote fields."""
+    for raw_value in (key, label):
+        normalized = _key(raw_value)
+        if not normalized:
+            continue
+        composite = _COMPOSITE_REQUIREMENT_FIELDS.get(normalized)
+        if composite is not None:
+            return composite
+        field = ALIASES.get(normalized)
+        if field is not None:
+            return (field,)
+    return ()
 
 
 def _plain_decimal(value: Decimal) -> str:
@@ -361,6 +388,44 @@ def _set_field(fields: dict[str, Any], field: str, entry: dict[str, Any]) -> Non
         fields[field] = entry
 
 
+def _dynamic_key(value: Any) -> str:
+    text = str(value or "").strip()
+    normalized = re.sub(r"\s+", "_", text.casefold())
+    normalized = re.sub(r"[^0-9a-z_\u4e00-\u9fff-]", "", normalized)
+    return normalized[:80]
+
+
+def _set_dynamic_spec(
+    specifications: dict[str, Any],
+    label: Any,
+    value: Any,
+    confidence: float,
+    *,
+    document_kind: str,
+    locator: str,
+    excerpt: str,
+    method: str,
+) -> None:
+    key = _dynamic_key(label)
+    if not key or key in ALIASES:
+        return
+    entry = {
+        "label": str(label).strip()[:120],
+        "value": value,
+        "confidence": max(0.0, min(1.0, float(confidence))),
+        "status": "accepted" if confidence >= REVIEW_THRESHOLD else "needs_review",
+        "source": {
+            "document_kind": document_kind,
+            "locator": locator,
+            "excerpt": str(excerpt).strip()[:500],
+            "method": method,
+        },
+    }
+    current = specifications.get(key)
+    if current is None or float(current.get("confidence", 0)) < entry["confidence"]:
+        specifications[key] = entry
+
+
 def _extract_specs(fields: dict[str, Any], document_kind: str) -> None:
     description = fields.get("item_description")
     if not description or not description.get("value"):
@@ -394,6 +459,34 @@ def _extract_specs(fields: dict[str, Any], document_kind: str) -> None:
             _entry(
                 "thickness_um",
                 thickness.group(1),
+                0.84,
+                document_kind=document_kind,
+                locator=str(source.get("locator", "description")),
+                excerpt=text,
+                method="spec_pattern",
+            ),
+        )
+
+    layers = re.search(r"([1-9]|[一二三四五六七八九十])\s*层\s*瓦楞(?:纸)?箱", text, re.I)
+    if layers:
+        layer_value = {
+            "一": "1",
+            "二": "2",
+            "三": "3",
+            "四": "4",
+            "五": "5",
+            "六": "6",
+            "七": "7",
+            "八": "8",
+            "九": "9",
+            "十": "10",
+        }.get(layers.group(1), layers.group(1))
+        _set_field(
+            fields,
+            "layers",
+            _entry(
+                "layers",
+                layer_value,
                 0.84,
                 document_kind=document_kind,
                 locator=str(source.get("locator", "description")),
@@ -518,12 +611,21 @@ def _infer_common(fields: dict[str, Any], text: str, document_kind: str) -> None
     if re.search(r"未税|不含税|tax\s+excluded|vat\s+excluded", text, re.I):
         inferred("tax_included", False, 0.91, "不含税")
     if re.search(
-        r"不可开票|不能开票|不开票|不(?:提供|支持)(?:发票|专票|开票)|no[ \t]+invoice|invoice[ \t]*:?[ \t]*(?:no|unavailable)",
+        r"不可开票|不能开票|不开票|不(?:提供|支持)(?:发票|专票|开票)|"
+        r"(?:是否)?可开票[ \t]*[:：]?[ \t]*(?:否|无|不支持|no|n|false)|"
+        r"(?:发票|专票|invoice)[ \t]*[:：]?[ \t]*(?:否|无|不支持|no|n|false|unavailable)|"
+        r"no[ \t]+invoice",
         text,
         re.I,
     ):
         inferred("supports_invoice", False, 0.91, "不可开票")
-    elif re.search(r"可开|专票|invoice\s*:?\s*(yes|available)", text, re.I):
+    elif re.search(
+        r"(?<![是否不])可开票|支持(?:开票|发票|专票)|"
+        r"(?:提供|可提供|可开具)(?:发票|专票|开票)|"
+        r"invoice[ \t]*:?[ \t]*(?:是|有|支持|yes|y|true|available)",
+        text,
+        re.I,
+    ):
         inferred("supports_invoice", True, 0.88, "可开票")
     if "currency" not in fields:
         currency = _currency(text)
@@ -532,7 +634,14 @@ def _infer_common(fields: dict[str, Any], text: str, document_kind: str) -> None
     _extract_specs(fields, document_kind)
 
 
-def _finalize(fields: dict[str, Any], *, filename: str, document_kind: str, processing_ms: float) -> dict[str, Any]:
+def _finalize(
+    fields: dict[str, Any],
+    *,
+    filename: str,
+    document_kind: str,
+    processing_ms: float,
+    specifications: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if "supplier_name" not in fields:
         fallback = re.sub(r"[_-]+", " ", Path(filename).stem).strip()
         fields["supplier_name"] = _entry(
@@ -565,13 +674,16 @@ def _finalize(fields: dict[str, Any], *, filename: str, document_kind: str, proc
             excerpt="",
             method="missing",
         )
-    return {
+    result = {
         "schema_version": 1,
         "parser_version": PARSER_VERSION,
         "document_kind": document_kind,
         "fields": fields,
         "processing_ms": round(processing_ms, 2),
     }
+    if specifications:
+        result["specifications"] = specifications
+    return result
 
 
 def _validate_file(filename: str, data: bytes) -> str:
@@ -620,6 +732,7 @@ def _xlsx_quote(filename: str, data: bytes) -> dict[str, Any]:
         if len(workbook.worksheets) > MAX_XLSX_SHEETS:
             raise QuoteParseError(f"XLSX 工作表不得超过 {MAX_XLSX_SHEETS} 个")
         fields: dict[str, Any] = {}
+        specifications: dict[str, Any] = {}
         document_lines: list[str] = []
         for sheet in workbook.worksheets:
             if int(sheet.max_row or 0) > MAX_XLSX_ROWS:
@@ -679,10 +792,45 @@ def _xlsx_quote(filename: str, data: bytes) -> dict[str, Any]:
                                     method="table_header",
                                 ),
                             )
+                        for column, label_value in populated:
+                            if column in header_map:
+                                continue
+                            value = data_row[column - 1]
+                            if value not in (None, ""):
+                                _set_dynamic_spec(
+                                    specifications,
+                                    label_value,
+                                    value,
+                                    0.86,
+                                    document_kind="xlsx",
+                                    locator=f"{sheet.title}!{get_column_letter(column)}{data_row_index}",
+                                    excerpt=f"{label_value}: {value}",
+                                    method="table_dynamic_spec",
+                                )
                     continue
                 for position, (column, label) in enumerate(populated):
                     field = ALIASES.get(_key(label))
                     if not field:
+                        candidate = next(
+                            (
+                                (candidate_column, candidate_value)
+                                for candidate_column, candidate_value in populated[position + 1 :]
+                                if candidate_column <= column + 3
+                            ),
+                            None,
+                        )
+                        if candidate is not None:
+                            value_column, value = candidate
+                            _set_dynamic_spec(
+                                specifications,
+                                label,
+                                value,
+                                0.86,
+                                document_kind="xlsx",
+                                locator=f"{sheet.title}!{get_column_letter(value_column)}{row_index}",
+                                excerpt=f"{label}: {value}",
+                                method="key_value_dynamic_spec",
+                            )
                         continue
                     candidate = next(
                         (
@@ -716,13 +864,17 @@ def _xlsx_quote(filename: str, data: bytes) -> dict[str, Any]:
             filename=filename,
             document_kind="xlsx",
             processing_ms=(time.perf_counter() - started) * 1000,
+            specifications=specifications,
         )
     finally:
         workbook.close()
 
 
 def _pdf_delimited_tables(
-    fields: dict[str, Any], lines: list[str], page_number: int
+    fields: dict[str, Any],
+    specifications: dict[str, Any],
+    lines: list[str],
+    page_number: int,
 ) -> None:
     for line_index, line in enumerate(lines):
         headers = [value.strip() for value in line.split("|")]
@@ -763,6 +915,21 @@ def _pdf_delimited_tables(
                     method="delimited_table",
                 ),
             )
+        for position, label in enumerate(headers):
+            if position in header_map or position >= len(values):
+                continue
+            value = values[position]
+            if value:
+                _set_dynamic_spec(
+                    specifications,
+                    label,
+                    value,
+                    0.82,
+                    document_kind="pdf",
+                    locator=f"page {page_number}, table line {data_index + 1}",
+                    excerpt=f"{label}: {value}",
+                    method="delimited_dynamic_spec",
+                )
 
 
 def _pdf_quote(filename: str, data: bytes) -> dict[str, Any]:
@@ -776,6 +943,7 @@ def _pdf_quote(filename: str, data: bytes) -> dict[str, Any]:
     if len(reader.pages) > MAX_PDF_PAGES:
         raise QuoteParseError(f"PDF 不得超过 {MAX_PDF_PAGES} 页")
     fields: dict[str, Any] = {}
+    specifications: dict[str, Any] = {}
     all_text: list[str] = []
     total_chars = 0
     for page_number, page in enumerate(reader.pages, start=1):
@@ -788,7 +956,7 @@ def _pdf_quote(filename: str, data: bytes) -> dict[str, Any]:
             raise QuoteParseError("PDF 提取文本过大")
         all_text.append(text)
         lines = text.splitlines()
-        _pdf_delimited_tables(fields, lines, page_number)
+        _pdf_delimited_tables(fields, specifications, lines, page_number)
         for line_number, line in enumerate(lines, start=1):
             clean = line.strip()
             if not clean:
@@ -799,6 +967,16 @@ def _pdf_quote(filename: str, data: bytes) -> dict[str, Any]:
             label, value = match.groups()
             field = ALIASES.get(_key(label))
             if not field:
+                _set_dynamic_spec(
+                    specifications,
+                    label,
+                    value,
+                    0.82,
+                    document_kind="pdf",
+                    locator=f"page {page_number}, line {line_number}",
+                    excerpt=clean,
+                    method="labelled_dynamic_spec",
+                )
                 continue
             _set_field(
                 fields,
@@ -822,6 +1000,7 @@ def _pdf_quote(filename: str, data: bytes) -> dict[str, Any]:
         filename=filename,
         document_kind="pdf",
         processing_ms=(time.perf_counter() - started) * 1000,
+        specifications=specifications,
     )
 
 

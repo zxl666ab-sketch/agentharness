@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import sqlite3
+import threading
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,8 +19,14 @@ from scripts import evaluate_procurement as evaluation_script
 from scripts import generate_procurement_demo as demo_script
 from scripts.evaluate_procurement import _controlled_experiment, _load_manifest
 
+from agentharness.api.procurement import (
+    ConversationAttachment,
+    StartProcurementConversationBody,
+)
 from agentharness.api.server import create_app
+from agentharness.contracts import Message, MessageRole, RunStatus
 from agentharness.harness import Harness
+from agentharness.procurement import parsing as parsing_module
 from agentharness.procurement.agent import (
     PROCUREMENT_PROVIDER,
     PROCUREMENT_TOOL_NAMES,
@@ -115,12 +122,742 @@ def test_procurement_profile_defaults_to_openai_and_is_priced_and_budgeted(
     assert request.metadata["procurement_provider_mode"] == "live"
 
 
+def test_procurement_fake_extracts_spaced_chinese_requirement_without_silent_zero_defaults() -> None:
+    message = Message(
+        role=MessageRole.user,
+        content=(
+            "请采购白色 PE 快递袋，250×350 mm，60 微米，单色印刷，数量 10000 个，"
+            "最长交期 15 天，需要开票，送货到华东仓，预算到货单价不超过 0.70 元。"
+        ),
+    )
+
+    payload = ProcurementFakeProvider._extract_requirement([message])
+
+    assert payload["quantity"] == 10_000
+    assert payload["specifications"]["width_mm"] == "250"
+    assert payload["specifications"]["length_mm"] == "350"
+    assert payload["specifications"]["thickness_um"] == "60"
+    assert payload["constraints"]["max_lead_days"] == 15
+    assert payload["constraints"]["destination"] == "华东仓"
+    assert payload["constraints"]["fx_rates"] == {"CNY": "1"}
+
+    with pytest.raises(ValueError, match="采购数量"):
+        ProcurementFakeProvider._extract_requirement(
+            [Message(role=MessageRole.user, content="采购一批包装袋")]
+        )
+
+
+def test_procurement_fake_extracts_dynamic_non_packaging_requirement() -> None:
+    payload = ProcurementFakeProvider._extract_requirement(
+        [
+            Message(
+                role=MessageRole.user,
+                content="请采购透明封箱胶带，数量 12.5 卷，长度 100 米，材质 BOPP，15 天内交付。",
+            )
+        ]
+    )
+
+    assert payload["schema_version"] == 2
+    assert payload["item_name"] == "透明封箱胶带"
+    assert payload["quantity"] == "12.5"
+    assert payload["unit"] == "卷"
+    assert payload["specifications"]["length"]["value"] == "100"
+    assert payload["specifications"]["length"]["unit"] == "米"
+    assert payload["specifications"]["material"]["value"] == "BOPP"
+
+
+def test_v2_requirement_allows_long_measurement_and_decimal_quantity(data_dir: Path) -> None:
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    request = service.create_request(
+        {
+            "schema_version": 2,
+            "title": "胶带采购",
+            "category": "general",
+            "item_name": "透明封箱胶带",
+            "quantity": "12.5",
+            "unit": "卷",
+            "specifications": {
+                "length": {
+                    "label": "长度",
+                    "type": "number",
+                    "value": "100",
+                    "unit": "m",
+                    "match": "exact",
+                    "priority": "hard",
+                },
+                "adhesive_type": {
+                    "label": "胶粘剂类型",
+                    "type": "text",
+                    "value": "丙烯酸",
+                    "match": "exact",
+                    "priority": "preference",
+                },
+            },
+            "constraints": {
+                "base_currency": "CNY",
+                "fx_rates": {"CNY": "1"},
+                "max_lead_days": 30,
+                "invoice_required": False,
+            },
+        }
+    )
+    harness.close()
+
+    assert request["schema_version"] == 2
+    assert request["quantity"] == "12.5"
+    assert request["unit"] == "卷"
+    assert request["specifications"]["length"]["value"] == "100"
+
+
+def test_dynamic_spec_comparison_supports_units_and_preference_warnings() -> None:
+    request = {
+        "schema_version": 2,
+        "id": "dynamic-spec-request",
+        "item_name": "透明封箱胶带",
+        "quantity": "12.5",
+        "unit": "卷",
+        "specifications": {
+            "length": {
+                "label": "长度",
+                "type": "number",
+                "value": "100",
+                "unit": "m",
+                "match": "gte",
+                "priority": "hard",
+            },
+            "adhesive_type": {
+                "label": "胶粘剂类型",
+                "type": "text",
+                "value": "丙烯酸",
+                "match": "exact",
+                "priority": "preference",
+            },
+        },
+        "constraints": {
+            "base_currency": "CNY",
+            "fx_rates": {"CNY": "1"},
+            "max_lead_days": 30,
+            "invoice_required": False,
+        },
+    }
+
+    def quote(quote_id: str, length: str, adhesive_type: str) -> dict:
+        values = {
+            "supplier_name": quote_id,
+            "item_description": "透明封箱胶带",
+            "currency": "CNY",
+            "unit_price": "100",
+            "price_basis": 1,
+            "tax_rate": "0",
+            "tax_included": True,
+            "shipping_fee": "0",
+            "shipping_included": True,
+            "moq": 1,
+            "lead_time_days": 7,
+            "supports_invoice": True,
+        }
+        return {
+            "id": quote_id,
+            "source_sha256": "0" * 64,
+            "supplier_name": quote_id,
+            "extracted": {
+                "fields": {name: {"value": value} for name, value in values.items()},
+                "specifications": {
+                    "length": {"value": length, "unit": "cm"},
+                    "adhesive_type": {"value": adhesive_type},
+                },
+            },
+        }
+
+    result = compare_quotes(
+        request,
+        [quote("dynamic-good", "10000", "热熔胶"), quote("dynamic-bad", "90", "丙烯酸")],
+        analysis_as_of="2026-07-27",
+    )
+    good = next(item for item in result["quotes"] if item["quote_id"] == "dynamic-good")
+    bad = next(item for item in result["quotes"] if item["quote_id"] == "dynamic-bad")
+
+    assert result["ruleset_version"] == "landed-cost-v2"
+    assert result["eligible_count"] == 1
+    assert good["eligible"] is True
+    assert any("偏好规格" in warning for warning in good["warnings"])
+    assert bad["eligible"] is False
+    assert any(reason["code"] == "spec_length" for reason in bad["exclusion_reasons"])
+
+
+def test_v2_quote_review_only_requires_dynamic_hard_specs(data_dir: Path) -> None:
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    request = service.create_request(
+        {
+            "schema_version": 2,
+            "title": "胶带采购",
+            "category": "general",
+            "item_name": "封箱胶带",
+            "quantity": "12.5",
+            "unit": "卷",
+            "specifications": {
+                "length": {
+                    "label": "长度",
+                    "type": "number",
+                    "value": "100",
+                    "unit": "m",
+                    "match": "gte",
+                    "priority": "hard",
+                },
+            },
+            "constraints": {
+                "base_currency": "CNY",
+                "fx_rates": {"CNY": "1"},
+                "max_lead_days": 30,
+                "invoice_required": False,
+            },
+        }
+    )
+    commercial = {
+        "supplier_name": "动态供应商",
+        "item_description": "封箱胶带",
+        "currency": "CNY",
+        "unit_price": "100",
+        "price_basis": 1,
+        "tax_rate": "0",
+        "tax_included": True,
+        "shipping_included": True,
+        "moq": 1,
+        "lead_time_days": 7,
+        "supports_invoice": True,
+    }
+    extracted = {
+        "fields": {
+            name: {
+                "value": value,
+                "confidence": 0.99,
+                "status": "accepted",
+            }
+            for name, value in commercial.items()
+        },
+        "specifications": {
+            "length": {
+                "label": "长度",
+                "value": "100",
+                "unit": "m",
+                "confidence": 0.99,
+                "status": "accepted",
+            }
+        },
+    }
+    first = service.import_quote(
+        str(request["id"]),
+        filename="dynamic-one.xlsx",
+        data=b"dynamic-one",
+        extracted=extracted,
+    )
+    second = service.import_quote(
+        str(request["id"]),
+        filename="dynamic-two.xlsx",
+        data=b"dynamic-two",
+        extracted={
+            **extracted,
+            "fields": {
+                **extracted["fields"],
+                "supplier_name": {
+                    **extracted["fields"]["supplier_name"],
+                    "value": "动态供应商二",
+                },
+            },
+        },
+    )
+    detail = service.get_request(str(request["id"]))
+    harness.close()
+
+    assert first["review_fields"] == []
+    assert second["review_fields"] == []
+    assert detail["unresolved_field_count"] == 0
+
+
+def test_v2_quote_review_matches_unit_suffixed_dynamic_spec_labels(data_dir: Path) -> None:
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    request = service.create_request(
+        {
+            "schema_version": 2,
+            "title": "瓦楞纸箱采购",
+            "category": "general",
+            "item_name": "五层瓦楞纸箱",
+            "quantity": "5000",
+            "unit": "个",
+            "specifications": {
+                "layers": {"label": "瓦楞层数", "type": "number", "value": "5", "unit": "层", "match": "exact", "priority": "hard"},
+                "length": {"label": "长度", "type": "number", "value": "400", "unit": "mm", "match": "exact", "priority": "hard"},
+                "width": {"label": "宽度", "type": "number", "value": "300", "unit": "mm", "match": "exact", "priority": "hard"},
+            },
+            "constraints": {"base_currency": "CNY", "fx_rates": {"CNY": "1"}, "max_lead_days": 30, "invoice_required": True},
+        }
+    )
+    commercial = {"supplier_name": "箱业供应商", "item_description": "五层瓦楞纸箱", "currency": "CNY", "unit_price": "3", "price_basis": 1, "tax_rate": "0.13", "tax_included": True, "shipping_included": True, "moq": 1, "lead_time_days": 7, "supports_invoice": True}
+    extracted = {
+        "fields": {name: {"value": value, "confidence": 0.99, "status": "accepted"} for name, value in commercial.items()},
+        "specifications": {
+            "layers": {"label": "瓦楞层数", "value": "5", "confidence": 0.99, "status": "accepted"},
+            "长度mm": {"label": "长度（mm）", "value": "400", "confidence": 0.99, "status": "accepted"},
+            "宽度mm": {"label": "宽度（mm）", "value": "300", "confidence": 0.99, "status": "accepted"},
+        },
+    }
+    quote = service.import_quote(str(request["id"]), filename="carton.xlsx", data=b"carton", extracted=extracted)
+    harness.close()
+
+    assert quote["review_fields"] == []
+
+
+def test_quote_parser_extracts_corrugated_layers_from_item_description() -> None:
+    fields = {
+        "item_description": {
+            "value": "五层瓦楞纸箱 400×300 mm，厚度 5000 微米",
+            "source": {"locator": "Quote!B2"},
+        }
+    }
+
+    parsing_module._extract_specs(fields, "xlsx")
+
+    assert fields["layers"]["value"] == 5
+
+
+def test_v2_quote_review_maps_standard_fields_to_dynamic_requirement_labels(
+    data_dir: Path,
+) -> None:
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    request = service.create_request(
+        {
+            "schema_version": 2,
+            "title": "热敏标签采购",
+            "category": "ecommerce_packaging",
+            "item_name": "热敏不干胶标签",
+            "quantity": "20000",
+            "unit": "张",
+            "specifications": {
+                "尺寸": {
+                    "label": "成品尺寸",
+                    "type": "text",
+                    "value": "100×150",
+                    "match": "exact",
+                    "priority": "hard",
+                },
+                "厚度": {
+                    "label": "材料厚度",
+                    "type": "number",
+                    "value": "80",
+                    "unit": "μm",
+                    "match": "tolerance",
+                    "tolerance": "5",
+                    "priority": "hard",
+                },
+                "材质": {
+                    "label": "面材",
+                    "type": "text",
+                    "value": "铜版纸",
+                    "match": "exact",
+                    "priority": "hard",
+                },
+                "颜色": {
+                    "label": "底色",
+                    "type": "text",
+                    "value": "白色",
+                    "match": "exact",
+                    "priority": "hard",
+                },
+                "印刷色数": {
+                    "label": "印刷色数",
+                    "type": "number",
+                    "value": "1",
+                    "unit": "色",
+                    "match": "exact",
+                    "priority": "hard",
+                },
+                "MOQ": {
+                    "label": "最小起订量",
+                    "type": "number",
+                    "value": "20000",
+                    "unit": "张",
+                    "match": "lte",
+                    "priority": "hard",
+                },
+            },
+            "constraints": {
+                "base_currency": "CNY",
+                "fx_rates": {"CNY": "1"},
+                "max_lead_days": 10,
+                "invoice_required": True,
+            },
+        }
+    )
+    commercial = {
+        "supplier_name": "苏州标联",
+        "item_description": "热敏不干胶标签",
+        "currency": "CNY",
+        "unit_price": "180",
+        "price_basis": 1000,
+        "tax_rate": "0.13",
+        "tax_included": True,
+        "shipping_included": True,
+        "moq": 10000,
+        "lead_time_days": 7,
+        "supports_invoice": True,
+        "width_mm": "100",
+        "length_mm": "150",
+        "thickness_um": "80",
+        "material": "铜版纸",
+        "color": "白色",
+        "print_colors": 1,
+    }
+    extracted = {
+        "fields": {
+            name: {
+                "value": value,
+                "confidence": 0.97,
+                "status": "accepted",
+            }
+            for name, value in commercial.items()
+        },
+        "specifications": {},
+    }
+
+    try:
+        quote = service.import_quote(
+            str(request["id"]),
+            filename="thermal-label.xlsx",
+            data=b"thermal-label",
+            extracted=extracted,
+        )
+        second_quote = service.import_quote(
+            str(request["id"]),
+            filename="thermal-label-two.xlsx",
+            data=b"thermal-label-two",
+            extracted={
+                **extracted,
+                "fields": {
+                    **extracted["fields"],
+                    "supplier_name": {
+                        **extracted["fields"]["supplier_name"],
+                        "value": "宁波印联",
+                    },
+                },
+            },
+        )
+        service.repo.update_quote(
+            str(quote["id"]),
+            extracted=quote["extracted"],
+            supplier_name=quote["supplier_name"],
+            status="needs_review",
+            review_count=6,
+        )
+        service.repo.update_request(str(request["id"]), status="review")
+        detail = service.get_request(str(request["id"]))
+    finally:
+        harness.close()
+
+    comparison = compare_quotes(
+        request,
+        [quote, second_quote],
+        analysis_as_of=date(2026, 8, 4),
+    )
+
+    assert quote["review_fields"] == []
+    assert detail["unresolved_field_count"] == 0
+    assert detail["status"] == "ready"
+    assert detail["quotes"][0]["status"] == "ready"
+    assert detail["quotes"][0]["review_count"] == 0
+    assert comparison["eligible_count"] == 2
+    assert all(
+        check["passed"]
+        for result in comparison["quotes"]
+        for check in result["match"]["spec_checks"]
+    )
+
+
+def test_v2_parse_staged_quotes_maps_labelled_dimensions(data_dir: Path) -> None:
+    truth = load_frozen_truth()
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    request = service.create_request(
+        {
+            "schema_version": 2,
+            "title": "动态标签采购",
+            "category": "label_printing",
+            "item_name": "热敏标签",
+            "quantity": "10000",
+            "unit": "张",
+            "specifications": {
+                "size": {
+                    "label": "尺寸",
+                    "type": "text",
+                    "value": "100×150 mm",
+                    "match": "exact",
+                    "priority": "hard",
+                },
+            },
+            "constraints": {
+                "base_currency": "CNY",
+                "fx_rates": {"CNY": "1"},
+                "max_lead_days": 15,
+                "invoice_required": True,
+            },
+        }
+    )
+    run_id = "dynamic-review-gap-label-test"
+    harness.storage.create_run(
+        run_id=run_id,
+        session_id=str(request["session_id"]),
+        root_run_id=run_id,
+    )
+    try:
+        for case in truth["quotes"][:2]:
+            service.stage_attachment(
+                str(request["id"]),
+                filename=str(case["filename"]),
+                data=build_case_document(case),
+            )
+
+        result = service.parse_staged_quotes(str(request["id"]), run_id=run_id)
+
+        assert result["quote_count"] == 2
+        assert result["review_gaps"] == []
+
+        pipeline = service.execute_analysis_pipeline(str(request["id"]), run_id=run_id)
+
+        assert pipeline["status"] == "completed"
+    finally:
+        harness.close()
+
+
+def test_all_excluded_snapshot_can_be_marked_no_award_but_not_approved(
+    data_dir: Path,
+) -> None:
+    truth = load_frozen_truth()
+    payload = _request_body(truth)
+    payload["constraints"]["max_lead_days"] = 1
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    request = service.create_request(payload)
+    for case in truth["quotes"][:2]:
+        document = build_case_document(case)
+        service.import_quote(
+            str(request["id"]),
+            filename=case["filename"],
+            data=document,
+            extracted=parse_quote(case["filename"], document),
+        )
+    run_id = "no-award-test-run"
+    harness.storage.create_run(
+        run_id=run_id,
+        session_id=str(request["session_id"]),
+        root_run_id=run_id,
+    )
+
+    snapshot = service.compare_for_agent(str(request["id"]), run_id=run_id)
+    assert snapshot["result"]["eligible_count"] == 0
+    assert snapshot["result"]["recommended_quote_id"] is None
+
+    with pytest.raises(ProcurementError, match="只能选定通过全部硬性条件的报价"):
+        service.approve_supplier_from_agent(
+            str(request["id"]),
+            snapshot_id=str(snapshot["id"]),
+            input_sha256=str(snapshot["input_sha256"]),
+            quote_id=str(snapshot["result"]["quotes"][0]["quote_id"]),
+            run_id=run_id,
+            approval_id="approval-must-not-approve",
+            note=None,
+            actor="采购员",
+        )
+
+    finalized = service.approve_supplier_from_agent(
+        str(request["id"]),
+        snapshot_id=str(snapshot["id"]),
+        input_sha256=str(snapshot["input_sha256"]),
+        quote_id=None,
+        decision="no_award",
+        run_id=run_id,
+        approval_id="approval-no-award",
+        note="当前报价均不满足最长交期，本轮流标",
+        actor="采购员",
+    )
+    report = service.audit_report(str(request["id"]))
+    harness.close()
+
+    assert finalized["status"] == "no_award"
+    assert finalized["decision"]["decision"] == "no_award"
+    assert finalized["decision"]["quote_id"] is None
+    assert report["execution_artifacts"] == []
+    assert any(event["type"] == "supplier_no_award" for event in report["audit_events"])
+
+
+@pytest.mark.asyncio
+async def test_api_creates_v2_dynamic_requirement(data_dir: Path, workspace: Path) -> None:
+    harness = Harness(data_dir=data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    body = {
+        "schema_version": 2,
+        "title": "封箱胶带询价",
+        "category": "general",
+        "item_name": "透明封箱胶带",
+        "quantity": "12.5",
+        "unit": "卷",
+        "specifications": {
+            "length": {
+                "label": "长度",
+                "type": "number",
+                "value": "100",
+                "unit": "m",
+                "match": "gte",
+                "priority": "hard",
+            },
+            "adhesive_type": {
+                "label": "胶粘剂类型",
+                "type": "text",
+                "value": "丙烯酸",
+                "match": "exact",
+                "priority": "preference",
+            },
+        },
+        "constraints": {
+            "base_currency": "CNY",
+            "fx_rates": {"CNY": "1"},
+            "max_lead_days": 30,
+            "invoice_required": False,
+            "destination": "华东仓",
+        },
+    }
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            created = await client.post("/api/procurement/requests", json=body)
+            assert created.status_code == 201
+            payload = created.json()
+            assert payload["schema_version"] == 2
+            assert payload["category"] == "general"
+            assert payload["quantity"] == "12.5"
+            assert payload["specifications"]["length"]["unit"] == "m"
+
+            meta = await client.get("/api/procurement/meta")
+            assert meta.status_code == 200
+            assert 2 in meta.json()["requirement_schema_versions"]
+            assert "landed-cost-v2" in meta.json()["ruleset_versions"]
+    finally:
+        await app.state.procurement_agent.aclose()
+        await app.state.run_supervisor.aclose()
+        await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_api_deletes_one_procurement_request(data_dir: Path, workspace: Path) -> None:
+    harness = Harness(data_dir=data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            created = await client.post(
+                "/api/procurement/requests",
+                json=_request_body(load_frozen_truth()),
+            )
+            assert created.status_code == 201
+            request_id = created.json()["id"]
+
+            deleted = await client.delete(f"/api/procurement/requests/{request_id}")
+            assert deleted.status_code == 200
+            assert deleted.json() == {
+                "request_id": request_id,
+                "reference": created.json()["reference"],
+                "deleted": True,
+            }
+            assert (await client.get(f"/api/procurement/requests/{request_id}")).status_code == 404
+            assert all(
+                item["id"] != request_id
+                for item in (await client.get("/api/procurement/requests")).json()
+            )
+    finally:
+        await app.state.procurement_agent.aclose()
+        await app.state.run_supervisor.aclose()
+        await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_api_no_award_can_be_reopened_with_copied_quotes(
+    data_dir: Path,
+    workspace: Path,
+) -> None:
+    truth = load_frozen_truth()
+    body = _request_body(truth)
+    body["constraints"] = {**body["constraints"], "max_lead_days": 1}
+    cases = [next(item for item in truth["quotes"] if item["id"] == case_id) for case_id in ("q-alpha", "q-beta")]
+    harness = Harness(data_dir=data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            created = await client.post("/api/procurement/requests", json=body)
+            assert created.status_code == 201
+            request_id = created.json()["id"]
+            for case in cases:
+                imported = await client.post(
+                    f"/api/procurement/requests/{request_id}/quotes",
+                    json=_upload(case),
+                )
+                assert imported.status_code == 201
+
+            analyzed = await client.post(f"/api/procurement/requests/{request_id}/analyze")
+            assert analyzed.status_code == 202
+            run_id = analyzed.json()["run_id"]
+            detail = await _wait_for_comparison(client, request_id, run_id=run_id)
+            await _wait_for_run_status(client, run_id, {"require_human"})
+            snapshot = detail["comparison"]
+            assert snapshot["result"]["eligible_count"] == 0
+
+            finalized = await client.post(
+                f"/api/procurement/requests/{request_id}/decision",
+                json={
+                    "decision": "no_award",
+                    "snapshot_id": snapshot["id"],
+                    "input_sha256": snapshot["input_sha256"],
+                    "confirmed": True,
+                    "note": "两家报价均超过本次交期要求，本轮流标",
+                    "actor": "采购员",
+                },
+            )
+            assert finalized.status_code == 200
+            assert finalized.json()["status"] == "no_award"
+            await _wait_for_run_status(client, run_id, {"completed"})
+
+            report = await client.get(f"/api/procurement/requests/{request_id}/report")
+            assert report.status_code == 200
+            assert report.json()["decision"]["decision"] == "no_award"
+            assert report.json()["execution_artifacts"] == []
+
+            reopened = await client.post(
+                f"/api/procurement/requests/{request_id}/reopen",
+                json={"copy_quotes": True, "actor": "采购员"},
+            )
+            assert reopened.status_code == 200
+            copied = reopened.json()
+            assert copied["id"] != request_id
+            assert copied["status"] == "collecting"
+            assert copied["quote_count"] == len(cases)
+            assert copied["decision"] is None
+    finally:
+        await app.state.procurement_agent.aclose()
+        await app.state.run_supervisor.aclose()
+        await harness.aclose()
+
+
 @pytest.mark.asyncio
 async def test_procurement_model_config_redacts_api_key_and_applies_to_runs(
     data_dir: Path,
 ) -> None:
     harness = Harness(data_dir=data_dir)
-    app = create_app(harness=harness, execution_enabled=False)
+    app = create_app(harness=harness, execution_enabled=True)
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
@@ -175,7 +912,7 @@ async def test_procurement_model_config_persists_and_restores_on_restart(
     data_dir: Path,
 ) -> None:
     harness = Harness(data_dir=data_dir)
-    app = create_app(harness=harness, execution_enabled=False)
+    app = create_app(harness=harness, execution_enabled=True)
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
@@ -205,7 +942,7 @@ async def test_procurement_model_config_persists_and_restores_on_restart(
     assert json.loads(persisted_path.read_text(encoding="utf-8"))["model"] == "persisted-model"
 
     restored = Harness(data_dir=data_dir)
-    restored_app = create_app(harness=restored, execution_enabled=False)
+    restored_app = create_app(harness=restored, execution_enabled=True)
     try:
         async with AsyncClient(
             transport=ASGITransport(app=restored_app), base_url="http://test"
@@ -524,6 +1261,7 @@ async def test_all_procurement_posts_respect_web_execution_disabled(
     attempts = [
         ("/api/procurement/requests", request_body),
         ("/api/procurement/conversations", conversation_body),
+        ("/api/procurement/config", {}),
         ("/api/procurement/requests/missing/resume", {"message": "继续"}),
         ("/api/procurement/requests/missing/quotes", quote_body),
         (
@@ -558,9 +1296,20 @@ async def test_all_procurement_posts_respect_web_execution_disabled(
                     "detail": "Web execution is disabled for this server"
                 }
 
-            read_response = await client.get("/api/procurement/requests")
-            assert read_response.status_code == 200
-            assert read_response.json() == []
+            for path in (
+                "/api/runtime",
+                "/api/procurement/meta",
+                "/api/procurement/config",
+                "/api/procurement/requests",
+                "/api/runs",
+                "/api/sessions",
+                "/api/stream",
+            ):
+                read_response = await client.get(path)
+                assert read_response.status_code == 403, (path, read_response.text)
+
+            health = await client.get("/api/health")
+            assert health.status_code == 200
             assert harness.list_runs() == []
     finally:
         await app.state.procurement_agent.aclose()
@@ -598,6 +1347,29 @@ async def test_duplicate_conversation_attachments_leave_no_partial_state(
         await app.state.procurement_agent.aclose()
         await app.state.run_supervisor.aclose()
         await harness.aclose()
+
+
+def test_conversation_batch_checks_base64_budget_before_decoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agentharness.api.procurement as procurement_api
+
+    monkeypatch.setattr(procurement_api, "MAX_CONVERSATION_UPLOAD_BYTES", 10)
+    encoded = base64.b64encode(b"123456").decode("ascii")
+    body = StartProcurementConversationBody(
+        message="上传报价",
+        attachments=[
+            ConversationAttachment(filename="one.pdf", content_base64=encoded),
+            ConversationAttachment(filename="two.pdf", content_base64=encoded),
+        ],
+    )
+
+    def fail_decode(*_args, **_kwargs):
+        raise AssertionError("aggregate budget must be checked before decoding")
+
+    monkeypatch.setattr(procurement_api.base64, "b64decode", fail_decode)
+    with pytest.raises(ProcurementError, match="总计不得超过 20 MB"):
+        body.decoded_attachments()
 
 
 @pytest.mark.asyncio
@@ -638,6 +1410,71 @@ async def test_conversation_creation_rolls_back_on_attachment_audit_failure(
         await app.state.procurement_agent.aclose()
         await app.state.run_supervisor.aclose()
         await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_conversation_recovery_parses_staged_quotes_before_retry(
+    data_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    truth = load_frozen_truth()
+    cases = truth["quotes"][:2]
+    message = "采购白色 PE 快递袋，250x350mm，60 微米，10000 个。"
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    request = service.create_conversation(
+        message,
+        [(str(case["filename"]), build_case_document(case)) for case in cases],
+    )
+    run_id = "failed-conversation-recovery-run"
+    harness.storage.create_run(
+        run_id=run_id,
+        session_id=str(request["session_id"]),
+        root_run_id=run_id,
+        status=RunStatus.failed,
+        provider="openai",
+        model="streaming-gateway-model",
+    )
+    harness.storage.save_message(
+        run_id,
+        str(request["session_id"]),
+        Message(role=MessageRole.user, content=message),
+        seq=0,
+    )
+    service.bind_run(str(request["id"]), run_id=run_id)
+    service.repo.update_request(str(request["id"]), status="ready")
+    launched: dict[str, str] = {}
+
+    async def fake_launch(
+        request_id: str,
+        *,
+        message: str,
+        source: str,
+    ) -> dict[str, str]:
+        launched.update(request_id=request_id, message=message, source=source)
+        return {
+            "purchase_request_id": request_id,
+            "session_id": str(request["session_id"]),
+            "run_id": "recovery-retry-run",
+            "status": "accepted",
+        }
+
+    agent = ProcurementAgent(harness, service)
+    monkeypatch.setattr(agent, "_launch", fake_launch)
+    try:
+        accepted = await agent.start_existing(str(request["id"]))
+        detail = service.get_request(str(request["id"]))
+    finally:
+        harness.close()
+
+    assert accepted["status"] == "accepted"
+    assert detail["quote_count"] == 2
+    assert detail["unresolved_field_count"] == 0
+    assert launched == {
+        "request_id": str(request["id"]),
+        "message": message,
+        "source": "procurement_conversation",
+    }
 
 
 def test_agent_cannot_mutate_quote_facts(data_dir: Path) -> None:
@@ -697,6 +1534,7 @@ def test_quote_parser_preserves_negative_shipping_and_invoice_semantics(
             ["运费", "600"],
             ["MOQ", "1000"],
             ["交期", "7"],
+            ["是否可开票", "否"],
             ["备注", f"不包邮；{invoice_phrase}"],
         ]
     )
@@ -707,6 +1545,31 @@ def test_quote_parser_preserves_negative_shipping_and_invoice_semantics(
     assert fields["shipping_included"]["value"] is False
     assert fields["shipping_fee"]["value"] == "600"
     assert fields["supports_invoice"]["value"] is False
+    assert fields["supports_invoice"]["status"] == "accepted"
+
+
+def test_quote_parser_treats_explicit_no_invoice_as_accepted_false() -> None:
+    document = _xlsx_bytes(
+        [
+            ["供应商", "明确否定供应商"],
+            ["品名", "三层瓦楞纸箱 400x300x200mm"],
+            ["币种", "CNY"],
+            ["单价", "2.5"],
+            ["计价数量", "1000"],
+            ["税率", "13%"],
+            ["是否含税", "是"],
+            ["是否包邮", "是"],
+            ["MOQ", "1000"],
+            ["交期", "7"],
+            ["是否可开票", "否"],
+        ]
+    )
+
+    invoice = parse_quote("explicit-no-invoice.xlsx", document)["fields"]["supports_invoice"]
+
+    assert invoice["value"] is False
+    assert invoice["status"] == "accepted"
+    assert "conflicts" not in invoice
 
 
 @pytest.mark.parametrize(
@@ -937,6 +1800,76 @@ def test_material_identity_constraints_exclude_cheaper_wrong_product() -> None:
 
 
 @pytest.mark.parametrize(
+    ("width", "length", "thickness", "expected_eligible"),
+    [
+        pytest.param("400", "300", "5", True, id="direct-orientation"),
+        pytest.param("300", "400", "5", True, id="swapped-orientation"),
+        pytest.param("410", "300", "5", False, id="width-out-of-tolerance"),
+        pytest.param("400", "300", "8", False, id="thickness-out-of-tolerance"),
+    ],
+)
+def test_compare_quotes_accepts_box_dimensions_in_either_orientation(
+    width: str,
+    length: str,
+    thickness: str,
+    expected_eligible: bool,
+) -> None:
+    request = {
+        "id": "box-orientation-request",
+        "item_name": "纸箱",
+        "quantity": 1000,
+        "specifications": {
+            "width_mm": "400",
+            "length_mm": "300",
+            "thickness_um": "5",
+        },
+        "constraints": {
+            "base_currency": "CNY",
+            "fx_rates": {"CNY": "1"},
+            "size_tolerance_mm": "3",
+            "thickness_tolerance_um": "0",
+        },
+    }
+
+    def quote(quote_id: str, actual_width: str, actual_length: str, actual_thickness: str) -> dict:
+        values = {
+            "supplier_name": quote_id,
+            "item_description": "纸箱 400x300mm 5mm",
+            "currency": "CNY",
+            "unit_price": "100",
+            "price_basis": 1000,
+            "tax_rate": "0",
+            "tax_included": True,
+            "shipping_fee": "0",
+            "shipping_included": True,
+            "moq": 100,
+            "lead_time_days": 7,
+            "supports_invoice": True,
+            "width_mm": actual_width,
+            "length_mm": actual_length,
+            "thickness_um": actual_thickness,
+        }
+        return {
+            "id": quote_id,
+            "source_sha256": "0" * 64,
+            "extracted": {"fields": {name: {"value": value} for name, value in values.items()}},
+        }
+
+    result = compare_quotes(
+        request,
+        [
+            quote("candidate", width, length, thickness),
+            quote("baseline", "400", "300", "5"),
+        ],
+        analysis_as_of="2026-07-27",
+    )
+    candidate = next(item for item in result["quotes"] if item["quote_id"] == "candidate")
+
+    assert candidate["eligible"] is expected_eligible
+    assert candidate["match"]["passed"] is expected_eligible
+
+
+@pytest.mark.parametrize(
     ("description", "expected"),
     [
         (
@@ -1057,6 +1990,86 @@ def test_agent_requirement_validation_leaves_draft_unchanged(data_dir: Path) -> 
     assert stored["status"] == "draft"
     assert stored["quantity"] == 1
     assert stored["constraints"] == {}
+
+
+def test_service_delete_request_removes_procurement_projection(data_dir: Path) -> None:
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    draft = service.create_draft("待删除的采购任务")
+    request_id = str(draft["id"])
+
+    deleted = service.delete_request(request_id)
+
+    assert deleted == {
+        "request_id": request_id,
+        "reference": draft["reference"],
+        "deleted": True,
+    }
+    with pytest.raises(KeyError):
+        service.get_request(request_id)
+    assert service.repo.list_audit_events(request_id) == []
+    assert all(item["id"] != request_id for item in service.list_requests())
+    harness.close()
+
+
+def test_service_delete_request_rejects_active_run(data_dir: Path) -> None:
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    draft = service.create_draft("不可删除的运行中任务")
+    run_id = "active-delete-test-run"
+    harness.storage.create_run(
+        run_id=run_id,
+        session_id=str(draft["session_id"]),
+        root_run_id=run_id,
+        status=RunStatus.running,
+    )
+    service.bind_run(str(draft["id"]), run_id=run_id)
+
+    with pytest.raises(ProcurementError, match="正在运行"):
+        service.delete_request(str(draft["id"]))
+
+    assert service.get_request(str(draft["id"]))["id"] == draft["id"]
+    harness.close()
+
+
+@pytest.mark.parametrize(
+    ("explicit_date", "expected_date"),
+    [
+        (None, "2026-08-24"),
+        ("2026-08-21", "2026-08-21"),
+    ],
+)
+def test_requirement_derives_delivery_deadline_but_preserves_explicit_date(
+    data_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit_date: str | None,
+    expected_date: str,
+) -> None:
+    import agentharness.procurement.service as service_module
+
+    monkeypatch.setattr(service_module, "_utcnow", lambda: "2026-08-04T09:00:00+00:00")
+    truth = load_frozen_truth()
+    payload = _request_body(truth)
+    payload["constraints"]["max_lead_days"] = 20
+    if explicit_date is None:
+        payload["constraints"].pop("required_delivery_date", None)
+    else:
+        payload["constraints"]["required_delivery_date"] = explicit_date
+
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    draft = service.create_draft("采购纸箱")
+    run_id = "delivery-date-test-run"
+    harness.storage.create_run(
+        run_id=run_id,
+        session_id=str(draft["session_id"]),
+        root_run_id=run_id,
+    )
+
+    captured = service.capture_requirement(str(draft["id"]), payload, run_id=run_id)
+    harness.close()
+
+    assert captured["constraints"]["required_delivery_date"] == expected_date
 
 
 @pytest.mark.parametrize(
@@ -1402,6 +2415,62 @@ def test_quote_correction_and_snapshot_invalidation_are_atomic(
     assert stored["current_snapshot_id"] == before["id"]
     assert stored["status"] == "analyzed"
     assert not any(event["type"] == "field_corrected" for event in report["audit_events"])
+
+
+def test_requirement_correction_revalidates_and_records_before_after_audit(
+    data_dir: Path,
+) -> None:
+    truth = load_frozen_truth()
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    request = service.create_request(_request_body(truth))
+    payload = _request_body(truth)
+    payload["quantity"] = 12_000
+    payload["constraints"]["destination"] = "华东二仓"
+
+    corrected = service.replace_requirement(
+        str(request["id"]),
+        payload,
+        actor="采购员王敏",
+    )
+    report = service.audit_report(str(request["id"]))
+    harness.close()
+
+    assert corrected["quantity"] == 12_000
+    assert corrected["constraints"]["destination"] == "华东二仓"
+    event = next(item for item in report["audit_events"] if item["type"] == "requirement_corrected")
+    assert event["actor"] == "采购员王敏"
+    assert event["payload"]["after"]["quantity"] == 12_000
+    assert "quantity" in event["payload"]["changed_fields"]
+
+
+@pytest.mark.asyncio
+async def test_requirement_confirmation_allows_put_through_write_guard(
+    data_dir: Path,
+    workspace: Path,
+) -> None:
+    truth = load_frozen_truth()
+    harness = Harness(data_dir=data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            created = await client.post("/api/procurement/requests", json=_request_body(truth))
+            assert created.status_code == 201, created.text
+            request_id = created.json()["id"]
+
+            payload = _request_body(truth)
+            payload["constraints"]["destination"] = "华东二仓"
+            corrected = await client.put(
+                f"/api/procurement/requests/{request_id}/requirement",
+                json={**payload, "actor": "采购员"},
+            )
+
+            assert corrected.status_code == 200, corrected.text
+            assert corrected.json()["constraints"]["destination"] == "华东二仓"
+    finally:
+        await app.state.procurement_agent.aclose()
+        await app.state.run_supervisor.aclose()
+        await harness.aclose()
 
 
 def test_comparison_snapshot_and_audit_are_atomic(
@@ -2480,6 +3549,16 @@ async def test_procurement_supplier_decision_is_a_harness_approval(
         assert checkpoint["status"] == "completed"
         assert report["decision"]["approval_id"] == approvals[-1]["id"]
         assert report["runtime"]["run_id"] == run_id
+        assert {item["kind"] for item in report["execution_artifacts"]} == {
+            "purchase_order_draft",
+            "supplier_confirmation_email",
+        }
+        order_artifact = next(
+            item for item in report["execution_artifacts"] if item["kind"] == "purchase_order_draft"
+        )
+        order_response = await client.get(f"/api/artifacts/{order_artifact['artifact_id']}")
+        assert order_response.status_code == 200
+        assert "采购订单草稿" in order_response.json()["content"]
         usage = json.loads(completed["usage_json"])
         assert usage["model_turns"] <= 5
 
@@ -2655,6 +3734,8 @@ async def test_procurement_quote_change_invalidates_stale_snapshot(
         )
         resumed = await client.post(f"/api/procurement/requests/{request_id}/analyze")
         assert corrected_theta.status_code == 200
+        assert corrected_theta.json()["status"] == "ready"
+        assert (await client.get(f"/api/procurement/requests/{request_id}")).json()["status"] == "ready"
         assert resumed.status_code == 202
         detail = await _wait_for_comparison(client, request_id, run_id=run_id)
         await _wait_for_run_status(client, run_id, {"require_human"})
@@ -2725,6 +3806,110 @@ async def test_procurement_quote_change_invalidates_stale_snapshot(
     await app.state.run_supervisor.aclose()
     await harness.aclose()
 
+
+def test_comparison_rejects_quote_change_during_snapshot_build(
+    data_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agentharness.procurement.service as service_module
+
+    truth = load_frozen_truth()
+    cases = [
+        next(item for item in truth["quotes"] if item["id"] == case_id)
+        for case_id in ("q-alpha", "q-beta")
+    ]
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    request = service.create_request(_request_body(truth))
+    imported = []
+    for case in cases:
+        document = build_case_document(case)
+        imported.append(
+            service.import_quote(
+                str(request["id"]),
+                filename=case["filename"],
+                data=document,
+                extracted=parse_quote(case["filename"], document),
+            )
+        )
+
+    initial_run = "concurrency-initial-run"
+    concurrent_run = "concurrency-stale-run"
+    for run_id in (initial_run, concurrent_run):
+        harness.storage.create_run(
+            run_id=run_id,
+            session_id=str(request["session_id"]),
+            root_run_id=run_id,
+        )
+    service.compare_for_agent(str(request["id"]), run_id=initial_run)
+
+    started = threading.Event()
+    release = threading.Event()
+    errors: list[BaseException] = []
+    original_compare_quotes = service_module.compare_quotes
+
+    def blocked_compare(*args, **kwargs):
+        result = original_compare_quotes(*args, **kwargs)
+        started.set()
+        if not release.wait(5):
+            raise AssertionError("comparison test was not released")
+        return result
+
+    monkeypatch.setattr(service_module, "compare_quotes", blocked_compare)
+
+    def analyze() -> None:
+        try:
+            service.compare_for_agent(str(request["id"]), run_id=concurrent_run)
+        except BaseException as exc:  # noqa: BLE001 - assert the worker outcome below
+            errors.append(exc)
+
+    worker = threading.Thread(target=analyze)
+    worker.start()
+    try:
+        assert started.wait(5)
+        corrected = service.correct_field(
+            str(request["id"]),
+            str(imported[0]["id"]),
+            field="shipping_fee",
+            value="25",
+        )
+        assert corrected["status"] == "ready"
+    finally:
+        release.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], ProcurementError)
+    stored = service.get_request(str(request["id"]))
+    assert stored["current_snapshot_id"] is None
+    assert stored["comparison"] is None
+    harness.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_currency_code_is_rejected_as_client_input(
+    data_dir: Path,
+    workspace: Path,
+) -> None:
+    truth = load_frozen_truth()
+    body = _request_body(truth)
+    body["constraints"] = {
+        **body["constraints"],
+        "base_currency": "12$",
+        "fx_rates": {"12$": "1"},
+    }
+    harness = Harness(data_dir=data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/api/procurement/requests", json=body)
+            assert response.status_code == 422
+            assert (await client.get("/api/procurement/requests")).json() == []
+    finally:
+        await app.state.procurement_agent.aclose()
+        await app.state.run_supervisor.aclose()
+        await harness.aclose()
 
 @pytest.mark.asyncio
 async def test_procurement_flow_requires_review_and_survives_restart(data_dir, workspace) -> None:

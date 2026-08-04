@@ -274,6 +274,45 @@ async def test_mcp_connect_http_blocks_private_url():
     assert "blocked by egress policy" in msg
 
 
+def test_mcp_http_client_factory_disables_redirects():
+    import httpx
+
+    from agentharness.tools.mcp_tool import _mcp_http_client_factory
+
+    client = _mcp_http_client_factory()
+    try:
+        assert isinstance(client, httpx.AsyncClient)
+        assert client.follow_redirects is False
+    finally:
+        import asyncio
+
+        asyncio.run(client.aclose())
+
+
+@pytest.mark.asyncio
+async def test_mcp_connect_passes_no_redirect_factory(monkeypatch):
+    from agentharness.tools import mcp_tool
+
+    captured: dict[str, object] = {}
+
+    def stop_before_session(_url: str, **kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("test transport stop")
+
+    monkeypatch.setattr(
+        "mcp.client.streamable_http.streamablehttp_client",
+        stop_before_session,
+    )
+    policy = EgressPolicy.from_config(
+        resolver=_static_resolver({"good.example": ["93.184.216.34"]})
+    )
+    bridge = mcp_tool.MCPBridge(policy=policy)
+    message = await bridge.connect_http("good", "https://good.example/mcp")
+
+    assert "MCP connect failed" in message
+    assert captured["httpx_client_factory"] is mcp_tool._mcp_http_client_factory
+
+
 # -- MCP dynamic effects + stdio env whitelist ------------------------------
 
 

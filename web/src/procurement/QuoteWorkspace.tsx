@@ -16,8 +16,10 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   FieldMeta,
   ProcurementMeta,
+  ProcurementQuote,
   ProcurementRequest,
   QuoteField,
+  RequirementSpecification,
 } from "./types";
 
 type Props = {
@@ -57,6 +59,23 @@ const FIELD_ORDER = [
   "valid_until",
 ];
 
+const V2_FIELD_ORDER = [
+  "supplier_name",
+  "item_description",
+  "currency",
+  "unit_price",
+  "price_basis",
+  "tax_rate",
+  "tax_included",
+  "shipping_fee",
+  "shipping_included",
+  "moq",
+  "lead_time_days",
+  "supports_invoice",
+  "payment_terms",
+  "valid_until",
+];
+
 function sourceIcon(kind: string) {
   return kind === "xlsx" ? <FileSpreadsheet size={16} /> : <FileText size={16} />;
 }
@@ -72,6 +91,99 @@ function correctionValue(value: string, meta: FieldMeta) {
   if (meta.kind === "boolean") return value === "true";
   if (["decimal", "integer", "rate"].includes(meta.kind)) return value;
   return value.trim() || null;
+}
+
+function dynamicFieldMeta(spec: RequirementSpecification): FieldMeta {
+  return {
+    label: spec.label,
+    kind: spec.type === "number" ? "decimal" : spec.type === "boolean" ? "boolean" : "text",
+    required: spec.priority === "hard",
+  };
+}
+
+const DYNAMIC_STANDARD_FIELD_ALIASES: Record<string, string[]> = {
+  size: ["width_mm", "length_mm"],
+  尺寸: ["width_mm", "length_mm"],
+  成品尺寸: ["width_mm", "length_mm"],
+  规格尺寸: ["width_mm", "length_mm"],
+  thickness: ["thickness_um"],
+  厚度: ["thickness_um"],
+  材料厚度: ["thickness_um"],
+  thicknessum: ["thickness_um"],
+  material: ["material"],
+  材质: ["material"],
+  面材: ["material"],
+  color: ["color"],
+  颜色: ["color"],
+  底色: ["color"],
+  printcolors: ["print_colors"],
+  印刷色数: ["print_colors"],
+  moq: ["moq"],
+  最小起订量: ["moq"],
+};
+
+function normalizedDynamicField(value: unknown) {
+  return String(value || "")
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/[^0-9a-z\u4e00-\u9fff]+/g, "");
+}
+
+function dynamicStandardFieldCandidates(name: string, spec: RequirementSpecification) {
+  for (const value of [name, spec.label]) {
+    const candidates = DYNAMIC_STANDARD_FIELD_ALIASES[normalizedDynamicField(value)];
+    if (candidates) return candidates;
+  }
+  return [];
+}
+
+function missingDynamicField(quote: ProcurementQuote): QuoteField {
+  return {
+    value: null,
+    confidence: 0,
+    status: "needs_review",
+    source: {
+      document_kind: quote.source_kind,
+      locator: "not found",
+      excerpt: "",
+      method: "missing",
+    },
+  };
+}
+
+function dynamicQuoteField(
+  name: string,
+  spec: RequirementSpecification,
+  quote: ProcurementQuote,
+): QuoteField {
+  const direct = quote.extracted.specifications?.[name];
+  if (direct) return direct;
+
+  const candidates = dynamicStandardFieldCandidates(name, spec);
+  const fields = candidates
+    .map((candidate) => quote.extracted.fields[candidate])
+    .filter((field): field is QuoteField => Boolean(field));
+  if (candidates.length === 1 && fields.length === 1) return fields[0];
+  if (candidates.length > 1 && fields.length === candidates.length) {
+    const first = fields[0];
+    const status = fields.some((field) => field.status === "needs_review")
+      ? "needs_review"
+      : fields.some((field) => field.status === "corrected")
+        ? "corrected"
+        : "accepted";
+    return {
+      value: fields.map((field) => String(field.value ?? "")).join("×"),
+      confidence: Math.min(...fields.map((field) => field.confidence)),
+      status,
+      source: {
+        document_kind: first.source.document_kind,
+        locator: fields.map((field) => field.source.locator).join("；"),
+        excerpt: fields.map((field) => field.source.excerpt).filter(Boolean).join("；"),
+        method: "standard_field_mapping",
+      },
+    };
+  }
+  return missingDynamicField(quote);
 }
 
 function sourceLocator(value: string) {
@@ -179,17 +291,29 @@ export function QuoteWorkspace({
   const selected = request.quotes.find((quote) => quote.id === selectedId) || null;
   const entries = useMemo(() => {
     if (!selected) return [];
-    return FIELD_ORDER.flatMap((name) => {
+    const fixedFieldOrder = request.schema_version === 2 ? V2_FIELD_ORDER : FIELD_ORDER;
+    const fixedEntries = fixedFieldOrder.flatMap((name) => {
       const field = selected.extracted.fields[name];
       const fieldMeta = meta.field_meta[name];
       if (!field || !fieldMeta || (onlyReview && field.status !== "needs_review")) return [];
       return [{ name, field, meta: fieldMeta }];
     });
-  }, [meta.field_meta, onlyReview, selected]);
+    const dynamicEntries = Object.entries(request.specifications || {}).flatMap(([name, raw]) => {
+      if (!raw || typeof raw !== "object" || !("type" in raw)) return [];
+      const spec = raw as RequirementSpecification;
+      const candidates = dynamicStandardFieldCandidates(name, spec);
+      if (candidates.length === 1 && fixedFieldOrder.includes(candidates[0])) return [];
+      const field = dynamicQuoteField(name, spec, selected);
+      if (onlyReview && field.status !== "needs_review") return [];
+      return [{ name, field, meta: dynamicFieldMeta(spec) }];
+    });
+    return [...fixedEntries, ...dynamicEntries];
+  }, [meta.field_meta, onlyReview, request.schema_version, request.specifications, selected]);
   const canAnalyze =
     request.quote_count >= 2 &&
     request.unresolved_field_count === 0 &&
-    request.status !== "approved";
+    request.status !== "approved" &&
+    request.status !== "no_award";
 
   return (
     <div className="proc-workspace-grid">
@@ -204,7 +328,7 @@ export function QuoteWorkspace({
               type="file"
               accept=".xlsx,.pdf"
               multiple
-              disabled={busy === "upload" || request.status === "approved"}
+              disabled={busy === "upload" || request.status === "approved" || request.status === "no_award"}
               onChange={(event) => {
                 const files = Array.from(event.target.files || []);
                 event.target.value = "";
@@ -267,7 +391,7 @@ export function QuoteWorkspace({
           <>
             <header className="proc-panel-head review-head">
               <div>
-                <h2>{selected.supplier_name}</h2>
+                <h2>报价字段与来源证据</h2>
                 <span>{selected.review_count ? "待人工复核" : "字段可用于比价"}</span>
               </div>
               <div className="proc-review-tools">

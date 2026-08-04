@@ -33,6 +33,10 @@ export const AGENT_EVENT_TYPES = [
 
 export type StreamStatus = "connecting" | "live" | "error" | "closed";
 
+export function agentStreamUrl(after: number) {
+  return after > 0 ? `/api/stream?after=${after}` : "/api/stream";
+}
+
 export function useAgentStream(enabled: boolean, after: number) {
   const [status, setStatus] = useState<StreamStatus>("closed");
   const [events, setEvents] = useState<EventRow[]>([]);
@@ -40,7 +44,7 @@ export function useAgentStream(enabled: boolean, after: number) {
   useEffect(() => {
     if (!enabled) return;
     let lastSequence = after;
-    const source = new EventSource(`/api/stream?after=${after}`);
+    const source = new EventSource(agentStreamUrl(after));
     setStatus("connecting");
 
     const receive = (message: MessageEvent) => {

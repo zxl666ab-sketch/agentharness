@@ -151,14 +151,29 @@ def create_app(
         app.add_middleware(
             CORSMiddleware,
             allow_origins=origins,
-            allow_methods=["GET", "HEAD", "OPTIONS", "POST"],
+            allow_methods=["GET", "HEAD", "OPTIONS", "POST", "PUT", "DELETE"],
             allow_headers=["Content-Type", "Last-Event-ID"],
         )
 
     def allowed_write(request: Request) -> bool:
+        path = request.url.path
+        if request.method == "PUT":
+            parts = path.removeprefix("/api/procurement/requests/").strip("/").split("/")
+            return (
+                path.startswith("/api/procurement/requests/")
+                and len(parts) == 2
+                and bool(parts[0])
+                and parts[1] == "requirement"
+            )
+        if request.method == "DELETE":
+            parts = path.removeprefix("/api/procurement/requests/").strip("/").split("/")
+            return (
+                path.startswith("/api/procurement/requests/")
+                and len(parts) == 1
+                and bool(parts[0])
+            )
         if request.method != "POST":
             return False
-        path = request.url.path
         if path == "/api/procurement/conversations":
             return True
         if path == "/api/procurement/config":
@@ -181,10 +196,9 @@ def create_app(
     @app.middleware("http")
     async def restrict_writes(request: Request, call_next):  # type: ignore[no-untyped-def]
         if (
-            request.method == "POST"
-            and request.url.path.startswith("/api/procurement/")
-            and request.url.path != "/api/procurement/config"
-            and not supervisor.execution_enabled
+            not supervisor.execution_enabled
+            and request.url.path.startswith("/api/")
+            and request.url.path != "/api/health"
         ):
             return JSONResponse(
                 {"detail": "Web execution is disabled for this server"},
