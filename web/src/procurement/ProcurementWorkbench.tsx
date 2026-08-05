@@ -22,7 +22,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { useAgentStream } from "../useAgentStream";
 import { AuditView } from "./AuditView";
-import { procurementApi } from "./api";
+import { friendlyProcurementError, procurementApi } from "./api";
 import { ComparisonView } from "./ComparisonView";
 import {
   NewProcurementConversation,
@@ -51,13 +51,14 @@ const STATUS: Record<ProcurementStatus, { label: string; tone: string; step: num
   review: { label: "待复核", tone: "warning", step: 2 },
   ready: { label: "待比价", tone: "info", step: 3 },
   analyzed: { label: "待审批", tone: "warning", step: 4 },
+  no_award: { label: "已流标", tone: "neutral", step: 5 },
   approved: { label: "已批准", tone: "success", step: 5 },
 };
 
 const STEPS = ["创建需求", "上传报价", "字段复核", "供应商比价", "人工审批"];
 
 function errorText(error: unknown) {
-  return error instanceof Error ? error.message : String(error || "操作失败");
+  return friendlyProcurementError(error instanceof Error ? error.message : String(error || "操作失败"));
 }
 
 function requestDate(value: string) {
@@ -277,6 +278,28 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     }
   }
 
+  async function noAward(note: string) {
+    const detail = detailQuery.data;
+    if (!selectedId || !detail?.comparison) return;
+    setBusy("no_award");
+    setActionError(null);
+    try {
+      const updated = await procurementApi.approve(selectedId, {
+        snapshot_id: detail.comparison.id,
+        input_sha256: detail.comparison.input_sha256,
+        decision: "no_award",
+        confirmed: true,
+        note,
+      });
+      await commit(updated);
+      setActiveTab("report");
+    } catch (error) {
+      setActionError(errorText(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   const detail = detailQuery.data || null;
   const status = detail ? STATUS[detail.status] : null;
 
@@ -435,7 +458,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                       </section>
                     ) : null}
                     {activeTab === "compare" ? (
-                      <ComparisonView request={detail} busy={busy} error={actionError} onAnalyze={analyze} onApprove={approve} />
+                      <ComparisonView request={detail} busy={busy} error={actionError} onAnalyze={analyze} onApprove={approve} onNoAward={noAward} />
                     ) : null}
                     {activeTab === "report" ? (
                       <ReportView request={detail} report={reportQuery.data || null} loading={reportQuery.isPending} error={reportQuery.isError ? errorText(reportQuery.error) : null} />
@@ -492,7 +515,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
               {!configQuery.isPending && !configQuery.isError ? (
                 <>
                   <section className="proc-config-section">
-                    <div className="proc-config-section-title"><strong>模型服务</strong><span>选择离线演示或 OpenAI 兼容接口</span></div>
+                    <div className="proc-config-section-title"><strong>模型服务</strong><span>默认读取环境变量；保存后由本机配置覆盖</span></div>
                     <label className="proc-field proc-span-2">
                       <span>Provider</span>
                       <select value={configForm.provider} onChange={(event) => {

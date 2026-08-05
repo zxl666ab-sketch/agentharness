@@ -7,8 +7,6 @@ import { checkBackendCompatibility } from "./api/compatibility";
 import { ProcurementWorkbench } from "./procurement/ProcurementWorkbench";
 import "./procurement/procurement.css";
 
-export { eventLabel } from "./viewModel";
-
 function message(error: unknown) {
   if (error instanceof Error && error.message === "Failed to fetch") {
     return "网络连接失败，请确认采购服务已启动";

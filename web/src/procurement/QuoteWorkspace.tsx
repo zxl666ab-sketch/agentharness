@@ -189,7 +189,8 @@ export function QuoteWorkspace({
   const canAnalyze =
     request.quote_count >= 2 &&
     request.unresolved_field_count === 0 &&
-    request.status !== "approved";
+    request.status !== "approved" &&
+    request.status !== "no_award";
 
   return (
     <div className="proc-workspace-grid">
@@ -204,7 +205,7 @@ export function QuoteWorkspace({
               type="file"
               accept=".xlsx,.pdf"
               multiple
-              disabled={busy === "upload" || request.status === "approved"}
+              disabled={busy === "upload" || request.status === "approved" || request.status === "no_award"}
               onChange={(event) => {
                 const files = Array.from(event.target.files || []);
                 event.target.value = "";

@@ -22,6 +22,7 @@ type Props = {
   error?: string | null;
   onAnalyze: () => Promise<void>;
   onApprove: (quoteId: string, note: string) => Promise<void>;
+  onNoAward: (note: string) => Promise<void>;
 };
 
 function money(value: string, currency: string) {
@@ -45,18 +46,20 @@ function QuoteStatus({ quote }: { quote: ComparisonQuote }) {
   );
 }
 
-export function ComparisonView({ request, busy, error, onAnalyze, onApprove }: Props) {
+export function ComparisonView({ request, busy, error, onAnalyze, onApprove, onNoAward }: Props) {
   const snapshot = request.comparison;
   const result = snapshot?.result;
   const [selectedId, setSelectedId] = useState<string | null>(
     result?.recommended_quote_id || null
   );
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [noAwardOpen, setNoAwardOpen] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [note, setNote] = useState("");
   useEffect(() => {
     setSelectedId(result?.recommended_quote_id || null);
     setConfirmOpen(false);
+    setNoAwardOpen(false);
     setConfirmed(false);
   }, [request.status, snapshot?.id, result?.recommended_quote_id]);
   const rows = useMemo(
@@ -69,6 +72,8 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove }: P
     [result?.quotes]
   );
   const selected = rows.find((quote) => quote.quote_id === selectedId) || null;
+  const terminal = request.status === "approved" || request.status === "no_award";
+  const noEligibleQuotes = result?.eligible_count === 0;
 
   if (!snapshot || !result) {
     return (
@@ -145,7 +150,7 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove }: P
                     aria-label={`选择${quote.supplier_name}`}
                     value={quote.quote_id}
                     checked={selectedId === quote.quote_id}
-                    disabled={!quote.eligible || request.status === "approved"}
+                    disabled={!quote.eligible || terminal}
                     onChange={() => setSelectedId(quote.quote_id)}
                   />
                 </td>
@@ -197,6 +202,17 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove }: P
         {error ? <p className="proc-inline-error" role="alert">{error}</p> : <span />}
         {request.status === "approved" ? (
           <span className="proc-approved-banner"><CheckCircle2 size={16} />供应商已人工批准</span>
+        ) : request.status === "no_award" ? (
+          <span className="proc-approved-banner"><XCircle size={16} />已确认本轮无合格报价</span>
+        ) : noEligibleQuotes ? (
+          <button
+            className="proc-button primary"
+            type="button"
+            disabled={busy === "no_award"}
+            onClick={() => setNoAwardOpen(true)}
+          >
+            <ShieldAlert size={16} />确认无合格报价
+          </button>
         ) : (
           <button
             className="proc-button primary"
@@ -237,6 +253,40 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove }: P
               >
                 {busy === "approve" ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}
                 确认选定
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
+      {noAwardOpen ? (
+        <div className="proc-modal-backdrop" role="presentation">
+          <section className="proc-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="no-award-title">
+            <header>
+              <div><ShieldAlert size={18} /><h2 id="no-award-title">确认无合格报价</h2></div>
+              <button className="proc-icon-button" type="button" title="关闭" aria-label="关闭" onClick={() => setNoAwardOpen(false)}><X size={18} /></button>
+            </header>
+            <div className="proc-confirm-supplier">
+              <span>本轮询价不选定供应商</span>
+              <strong>{result.excluded_count} 家报价全部淘汰</strong>
+              <small>提交后会固化当前比价快照与淘汰原因</small>
+            </div>
+            <label className="proc-field"><span>处理备注</span><textarea value={note} onChange={(event) => setNote(event.target.value)} maxLength={2000} placeholder="例如：全部报价超过预算，重新询价" /></label>
+            <label className="proc-check approval-confirm">
+              <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
+              <span><strong>我确认当前没有满足全部硬性条件的报价</strong><small>不会选中被淘汰供应商，也不会生成采购下单结论</small></span>
+            </label>
+            {error ? <p className="proc-form-error" role="alert"><AlertTriangle size={14} />{error}</p> : null}
+            <footer>
+              <button type="button" className="proc-button secondary" onClick={() => setNoAwardOpen(false)}>取消</button>
+              <button
+                type="button"
+                className="proc-button danger"
+                disabled={!confirmed || busy === "no_award"}
+                onClick={() => void onNoAward(note)}
+              >
+                {busy === "no_award" ? <LoaderCircle className="spin" size={16} /> : <ShieldAlert size={16} />}
+                提交流标结论
               </button>
             </footer>
           </section>

@@ -1,4 +1,4 @@
-"""Minimal FastAPI control plane for the Web-first Agent Runtime."""
+"""Minimal FastAPI control plane for the procurement workbench."""
 
 from __future__ import annotations
 
@@ -18,10 +18,6 @@ from fastapi.staticfiles import StaticFiles
 from agentharness import __version__
 from agentharness.api.compatibility import API_CAPABILITIES, API_SCHEMA_VERSION
 from agentharness.api.execution import (
-    ApprovalDecisionBody,
-    CreateRunBody,
-    ResumeRunBody,
-    ToolRecoveryDecisionBody,
     WebRunSupervisor,
 )
 from agentharness.api.procurement import procurement_router
@@ -165,17 +161,6 @@ def create_app(
             return True
         if path == "/api/procurement/requests" or path.startswith("/api/procurement/requests/"):
             return True
-        if path == "/api/runs":
-            return True
-        if path.startswith("/api/runs/"):
-            parts = path.removeprefix("/api/runs/").strip("/").split("/")
-            return len(parts) == 2 and parts[1] in {"cancel", "resume"}
-        if path.startswith("/api/approvals/"):
-            parts = path.removeprefix("/api/approvals/").strip("/").split("/")
-            return len(parts) == 2 and parts[1] == "decision"
-        if path.startswith("/api/tool-invocations/"):
-            parts = path.removeprefix("/api/tool-invocations/").strip("/").split("/")
-            return len(parts) == 2 and parts[1] == "resolution"
         return False
 
     @app.middleware("http")
@@ -217,93 +202,6 @@ def create_app(
             }
         )
 
-    @app.get("/api/runtime")
-    async def runtime_info(response: Response) -> dict[str, Any]:
-        response.headers["Cache-Control"] = "no-store"
-        return public_redact(supervisor.describe())
-
-    @app.post("/api/runs", status_code=202)
-    async def create_run(body: CreateRunBody) -> dict[str, Any]:
-        try:
-            return public_redact(await supervisor.start(body))
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-
-    @app.post("/api/runs/{run_id}/cancel")
-    async def cancel_run(run_id: str) -> dict[str, Any]:
-        try:
-            return public_redact(await supervisor.cancel(run_id))
-        except KeyError:
-            raise HTTPException(404, "run not found") from None
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(409, str(exc)) from exc
-
-    @app.post("/api/runs/{run_id}/resume", status_code=202)
-    async def resume_run(run_id: str, body: ResumeRunBody | None = None) -> dict[str, Any]:
-        try:
-            return public_redact(await supervisor.resume(run_id, body or ResumeRunBody()))
-        except KeyError:
-            raise HTTPException(404, "run not found") from None
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
-        except (RuntimeError, ValueError) as exc:
-            raise HTTPException(409, str(exc)) from exc
-
-    @app.post("/api/approvals/{approval_id}/decision")
-    async def decide_approval(
-        approval_id: str, body: ApprovalDecisionBody
-    ) -> dict[str, Any]:
-        try:
-            return public_redact(supervisor.decide(approval_id, body))
-        except KeyError:
-            raise HTTPException(409, "approval is not pending in this process") from None
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(409, str(exc)) from exc
-
-    @app.post("/api/tool-invocations/{invocation_id}/resolution")
-    async def resolve_tool_recovery(
-        invocation_id: str,
-        body: ToolRecoveryDecisionBody,
-    ) -> dict[str, Any]:
-        try:
-            return public_redact(supervisor.resolve_tool_recovery(invocation_id, body))
-        except KeyError:
-            raise HTTPException(404, "tool invocation not found") from None
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(409, str(exc)) from exc
-
-    @app.get("/api/sessions")
-    async def sessions(limit: int = Query(100, ge=1, le=500)) -> list[dict[str, Any]]:
-        return public_redact(runtime.list_sessions(limit=limit))
-
-    @app.get("/api/sessions/{session_id}/transcript")
-    async def transcript(session_id: str) -> list[dict[str, Any]]:
-        if runtime.get_session(session_id) is None:
-            raise HTTPException(404, "session not found")
-        return public_redact(
-            [item.model_dump(mode="json") for item in runtime.get_session_transcript(session_id)]
-        )
-
-    @app.get("/api/runs")
-    async def runs(
-        session_id: str | None = None,
-        limit: int = Query(100, ge=1, le=500),
-        offset: int = Query(0, ge=0),
-    ) -> list[dict[str, Any]]:
-        return public_redact(
-            runtime.list_runs(session_id=session_id, limit=limit, offset=offset)
-        )
-
     @app.get("/api/runs/{run_id}")
     async def run(run_id: str) -> dict[str, Any]:
         row = runtime.get_run(run_id)
@@ -326,29 +224,6 @@ def create_app(
             [item.model_dump(mode="json") for item in runtime.get_run_messages(run_id)]
         )
 
-    @app.get("/api/runs/{run_id}/events")
-    async def events(
-        run_id: str,
-        after: int = Query(0, ge=0),
-        limit: int = Query(500, ge=1, le=5_000),
-    ) -> list[dict[str, Any]]:
-        if runtime.get_run(run_id) is None:
-            raise HTTPException(404, "run not found")
-        return public_redact(
-            [
-                item.model_dump(mode="json")
-                for item in runtime.get_events(
-                    run_id=run_id, after_global_seq=after, limit=limit
-                )
-            ]
-        )
-
-    @app.get("/api/runs/{run_id}/approvals")
-    async def approvals(run_id: str) -> list[dict[str, Any]]:
-        if runtime.get_run(run_id) is None:
-            raise HTTPException(404, "run not found")
-        return public_redact(runtime.list_approvals(run_id))
-
     @app.get("/api/runs/{run_id}/tool-invocations")
     async def tool_invocations(run_id: str) -> list[dict[str, Any]]:
         if runtime.get_run(run_id) is None:
@@ -360,14 +235,12 @@ def create_app(
             ]
         )
 
-    @app.get("/api/tool-invocations/{invocation_id}")
-    async def tool_invocation(invocation_id: str) -> dict[str, Any]:
-        item = runtime.get_tool_invocation(invocation_id)
-        if item is None:
-            raise HTTPException(404, "tool invocation not found")
-        payload = item.model_dump(mode="json")
-        payload["attempts_audit"] = runtime.list_tool_attempts(invocation_id)
-        return public_redact(payload)
+    @app.get("/api/runs/{run_id}/approvals")
+    async def approvals(run_id: str) -> list[dict[str, Any]]:
+        """Expose procurement approval evidence as a read-only audit view."""
+        if runtime.get_run(run_id) is None:
+            raise HTTPException(404, "run not found")
+        return public_redact(runtime.list_approvals(run_id))
 
     @app.get("/api/runs/{run_id}/checkpoint")
     async def checkpoint(run_id: str) -> dict[str, Any] | None:

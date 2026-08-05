@@ -83,10 +83,10 @@ sequenceDiagram
 
 文件扩展名、大小、XLSX ZIP 结构、工作表数、行列数、PDF 页数、提取字符数和加密状态均在解析前或解析中受限。扫描件 OCR 当前明确拒绝。Artifact Store 保存原件内容与 SHA-256；结构化字段保存文档类型、页码/单元格、原文摘录、方法、置信度和人工修正。
 
-## Runtime 兼容性与恢复
+## 运行时恢复与审计
 
-原有 `WebRunSupervisor`、`RunEngine`、工具治理、进程丢失恢复、SSE 和嵌入式 `Harness.run/resume/cancel` 保持可用。`GET /api/runs/{id}/report` 仍从持久化 Run、事件、工具、审批和 Artifacts 投影证据，不引入第二份 Runtime 状态。
+采购任务由 `WebRunSupervisor` 在后台拥有；采购 API 只暴露采购入口和只读审计视图。`GET /api/runs/{id}/report` 从持久化 Run、消息、工具、审批、Checkpoint 和 Artifacts 投影证据，不引入第二份 Runtime 状态，也不提供通用 Agent 控制面。
 
 审批工具成功后返回由受信任后端生成的 `final_output`。`RunEngine` 仍对其执行脱敏、输出预算和既有 Verification，再写终态 Checkpoint；已提交的确定性决定不需要额外模型回合来复述。
 
-进程重启时，SQLite 中的 Run、Checkpoint、消息、工具调用和采购事实共同恢复。`require_human` 从原 `run_id` 继续；运行中的进程丢失会由租约恢复为可解释的中断状态，副作用工具不会凭空重复执行。Provider 的 429、超时和重试均以事件及 `usage.provider_attempts` 记录，不依赖上游控制台是否展示同一状态码。
+进程重启时，SQLite 中的 Run、Checkpoint、消息、工具调用和采购事实共同恢复。`require_human` 从原 `run_id` 继续；运行中的进程丢失会由租约恢复为可解释的中断状态，采购副作用工具不会凭空重复执行。Provider 的 429、超时和重试均以事件及 `usage.provider_attempts` 记录，不依赖上游控制台是否展示同一状态码。

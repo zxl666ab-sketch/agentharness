@@ -1,4 +1,4 @@
-"""Asyncio agent run engine — stream, tools, checkpoint, resume, cancel, delegate."""
+"""Asyncio run engine for procurement model turns, tools, checkpoints and recovery."""
 
 from __future__ import annotations
 
@@ -58,7 +58,6 @@ from agentharness.engine.tool_execution import (
     ToolInvocationExecutor,
     canonical_arguments,
     tool_call_completed,
-    validate_tool_spec,
 )
 from agentharness.engine.verification import VerificationLoop
 from agentharness.security.redaction import Redactor, default_redactor
@@ -150,8 +149,6 @@ class RunEngine:
         redactor: Redactor | None = None,
         approval_callback: ApprovalCallback | None = None,
         on_events: Callable[[list[EventEnvelope]], None] | None = None,
-        mcp_bridge: Any = None,
-        process_registry: dict[str, list[Any]] | None = None,
         lease_owner_id: str | None = None,
         lease_ttl_s: float = 60.0,
         lease_heartbeat_s: float = 10.0,
@@ -160,7 +157,6 @@ class RunEngine:
         self.providers = providers
         self.tools = tools
         self.redactor = redactor or default_redactor
-        self.mcp_bridge = mcp_bridge
         self.lease = LeaseManager(
             storage,
             owner_id=lease_owner_id,
@@ -198,12 +194,6 @@ class RunEngine:
             spawner=self.spawner,
             approval_callback=approval_callback,
         )
-        # Process handles per run. Kept separate from RunContext because the shell tools
-        # share this dict by reference (the harness passes its own registry), registering
-        # handles the engine later kills — a per-run field could not be shared that way.
-        self._active_processes: dict[str, list[Any]] = (
-            process_registry if process_registry is not None else {}
-        )
         self._active_run_ids: set[str] = set()
         self.active_run_id: str | None = None
 
@@ -222,7 +212,7 @@ class RunEngine:
         self.tool_executor.approval_callback = callback
 
     def child_run_ids(self, run_id: str) -> list[str]:
-        """Child run ids spawned by a run (used by the delegate concurrency limiter)."""
+        """Child run ids, retained for persisted-run compatibility."""
         ctx = self._runs.get(run_id)
         return list(ctx.child_runs) if ctx else []
 
@@ -278,7 +268,6 @@ class RunEngine:
     def _forget_run(self, run_id: str) -> None:
         """Drop all in-memory state for a run and unlink it from any parent's children."""
         self._runs.pop(run_id, None)
-        self._active_processes.pop(run_id, None)
         for ctx in self._runs.values():
             if run_id in ctx.child_runs:
                 ctx.child_runs = [child for child in ctx.child_runs if child != run_id]
@@ -287,19 +276,11 @@ class RunEngine:
         return self._ctx(run_id).cancel_event
 
     async def _kill_descendants(self, run_id: str) -> None:
-        """Propagate cancel signal, kill shell trees, clear process registry."""
+        """Propagate cancellation to the procurement run and its children."""
         self.get_cancel_event(run_id).set()
         ctx = self._runs.get(run_id)
         for child_id in list(ctx.child_runs if ctx else []):
             await self._kill_descendants(child_id)
-        for proc in list(self._active_processes.get(run_id, [])):
-            try:
-                from agentharness.tools.shell import kill_process_tree
-
-                await kill_process_tree(proc)
-            except Exception:  # noqa: BLE001
-                pass
-        self._active_processes[run_id] = []
         for tool in dict.fromkeys(self.tools.values()):
             cancel_run = getattr(tool, "cancel_run", None)
             if callable(cancel_run):
@@ -427,13 +408,11 @@ class RunEngine:
                 "_agentharness_budget": request.budget.model_dump(),
                 "_agentharness_provider_retry": request.provider_retry.model_dump(),
                 "_agentharness_pricing": request.pricing.model_dump(mode="json"),
-                "_agentharness_shell": request.shell.model_dump(mode="json"),
                 "_agentharness_context_request": {
                     "original_goal": request.message,
                     "system": request.system,
                     "reasoning_effort": request.reasoning_effort,
                     "extra_dirs": request.extra_dirs,
-                    "skills_dirs": request.skills_dirs,
                     "tools": request.tools,
                 },
                 "_agentharness_verification_policy": (
@@ -483,7 +462,7 @@ class RunEngine:
 
         # Multi-turn context: load completed top-level history when session already exists.
         # Resume uses its own checkpoint path and must not call this splice.
-        # Delegate child runs start with only their own task message.
+        # Nested runs start with only their own task message.
         messages: list[Message] = []
         if is_top_level and existing_session:
             messages = list(self.storage.get_session_history_messages(session_id))
@@ -547,7 +526,7 @@ class RunEngine:
                 parent_run_id,
             )
         except asyncio.CancelledError:
-            # Kill shell trees + children; preserve completed tools for resume
+            # Preserve completed tools for resume when the run is cancelled.
             await self.interrupt(run_id, "cancelled")
             self.lifecycle.mark_interrupted(run_id, "cancelled")
             raise
@@ -1962,13 +1941,13 @@ class RunEngine:
             if request.tools is not None and "shell" not in request.tools:
                 return ToolResult(
                     tool_call_id="",
-                    name="shell",
-                    content="Shell tool is disabled for this run",
+                    name="verification_command",
+                    content="Command verification is not available in the procurement run",
                     is_error=True,
                     error_code="tool_disabled",
                     error_category="configuration",
                     retryable=False,
-                    recovery_hint="Enable shell explicitly or use file/deterministic validation.",
+                    recovery_hint="Use the procurement output verification policy.",
                 )
             run_context = self._ctx(run_id)
             if command_calls_this_turn >= request.budget.max_tool_calls_per_turn:
@@ -2198,26 +2177,6 @@ class RunEngine:
         )
 
     def _tool_specs(self, request: RunRequest) -> list[ToolSpec]:
-        proxy_factory = getattr(self.mcp_bridge, "proxy_tools", None)
-        if callable(proxy_factory):
-            proxies = proxy_factory()
-            if not isinstance(proxies, dict):
-                proxies = {}
-            valid_proxies: dict[str, Any] = {}
-            for name, proxy in proxies.items():
-                try:
-                    validate_tool_spec(proxy.spec)
-                except ValueError:
-                    continue
-                valid_proxies[name] = proxy
-            for name, tool in list(self.tools.items()):
-                if getattr(tool, "mcp_proxy", False) and name not in valid_proxies:
-                    del self.tools[name]
-            for name, proxy in valid_proxies.items():
-                existing = self.tools.get(name)
-                if existing is not None and not getattr(existing, "mcp_proxy", False):
-                    continue
-                self.tools[name] = proxy
         names = request.tools
         specs: list[ToolSpec] = []
         for name, tool in self.tools.items():
@@ -2260,9 +2219,8 @@ class RunEngine:
 class RunSpawner:
     """Narrow runtime surface handed to tools via ``ToolContext.harness``.
 
-    Tools that spawn or inspect runs (delegate) and tools that persist
-    artifacts or memories (MCP, memory) get exactly this: ``storage`` plus
-    ``run``/``child_run_ids``. They never see the Harness or the engine.
+    Retained tools receive only this narrow storage/run surface and never see
+    the Harness or the engine directly.
     """
 
     def __init__(self, engine: RunEngine) -> None:

@@ -29,20 +29,6 @@ async def test_simple_echo_run(harness, workspace):
 
 
 @pytest.mark.asyncio
-async def test_tool_read_file(harness, workspace):
-    result = await harness.run(
-        RunRequest(
-            message='[fake:tools]read_file\n{"path": "README.md"}',
-            provider="fake",
-            approval=ApprovalMode.auto,
-            cwd=str(workspace),
-        )
-    )
-    assert result.status == RunStatus.completed
-    assert "hello workspace" in result.output or "Tool results" in result.output
-
-
-@pytest.mark.asyncio
 async def test_external_stop_interrupts_blocked_provider_stream(
     harness, workspace, data_dir
 ):

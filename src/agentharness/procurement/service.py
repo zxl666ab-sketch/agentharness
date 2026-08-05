@@ -988,6 +988,72 @@ class ProcurementService:
         )
         return self.get_request(request_id)
 
+    def record_no_award(
+        self,
+        request_id: str,
+        *,
+        snapshot_id: str,
+        input_sha256: str,
+        note: str | None,
+        actor: str,
+    ) -> dict[str, Any]:
+        request = self.get_request(request_id)
+        if request.get("decision") is not None:
+            raise ProcurementError("该采购需求已经形成审批结论")
+        if request.get("current_snapshot_id") != snapshot_id:
+            raise ProcurementError("比价快照已失效，请重新分析")
+        snapshot = self.repo.get_snapshot(snapshot_id)
+        run_id = str(request.get("analysis_run_id") or "")
+        if snapshot is None or snapshot["request_id"] != request_id or not run_id:
+            raise ProcurementError("比价快照不属于当前采购任务")
+        quotes = self.repo.list_quotes(request_id)
+        analysis_as_of = snapshot["result"].get("analysis_as_of")
+        if not analysis_as_of:
+            raise ProcurementError("比价快照缺少分析基准日期")
+        current_hash = analysis_input_sha256(
+            request,
+            quotes,
+            analysis_as_of=analysis_as_of,
+        )
+        if snapshot["input_sha256"] != input_sha256 or current_hash != input_sha256:
+            raise ProcurementError("报价或采购需求已变化，比价快照失效")
+        current = compare_quotes(request, quotes, analysis_as_of=analysis_as_of)
+        if int(snapshot["result"].get("eligible_count") or 0) != 0:
+            raise ProcurementError("仍有满足全部硬性条件的报价，不能提交无合格报价结论")
+        if int(current.get("eligible_count") or 0) != 0:
+            raise ProcurementError("当前报价中已有合格供应商，请重新分析")
+        decision = {
+            "id": new_id(),
+            "request_id": request_id,
+            "snapshot_id": snapshot_id,
+            "quote_id": None,
+            "run_id": run_id,
+            "approval_id": None,
+            "decision": "no_award",
+            "note": (note or "").strip() or "全部报价未通过硬性条件，确认本轮不选定供应商。",
+            "actor": actor,
+            "created_at": _utcnow(),
+        }
+        self.repo.commit_decision(
+            decision,
+            {
+                "id": new_id(),
+                "request_id": request_id,
+                "quote_id": None,
+                "run_id": run_id,
+                "type": "procurement_no_award",
+                "actor": actor,
+                "payload": {
+                    "decision_id": decision["id"],
+                    "snapshot_id": snapshot_id,
+                    "input_sha256": input_sha256,
+                    "excluded_count": snapshot["result"].get("excluded_count", 0),
+                    "note": decision["note"],
+                },
+            },
+        )
+        return self.get_request(request_id)
+
     def agent_state(self, request_id: str) -> dict[str, Any]:
         detail = self.get_request(request_id)
         comparison = detail.get("comparison")
@@ -1244,8 +1310,8 @@ class ProcurementService:
         request = self.repo.get_request(request_id)
         if request is None:
             raise KeyError(request_id)
-        if request.get("approved_quote_id"):
-            raise ProcurementError("已批准的采购需求不可再修改")
+        if self.repo.get_decision(request_id) is not None:
+            raise ProcurementError("已形成审批结论的采购需求不可再修改")
         return request
 
     def _refresh_request_state(

@@ -9,12 +9,16 @@ All notable changes are documented here. The project follows semantic versioning
 - Procurement sourcing workbench for ecommerce packaging: structured requests, bounded XLSX/text-PDF quote imports, evidence-backed fields, confidence review and manual corrections.
 - Deterministic Decimal landed-cost normalization, hard-constraint qualification, immutable supplier-comparison snapshots and mandatory one-time human supplier approval.
 - Procurement analysis linkage to Harness runs, terminal checkpoints, approvals, original/snapshot artifacts, event evidence and restart-stable audit reports.
-- Frozen 30-quote truth set spanning six independent XLSX/PDF layouts and 21 anomaly or boundary combinations, plus reproducible demo generation and extraction/matching/cost/constraint/recommendation/time/model-cost metrics.
+- Frozen 31-quote truth set spanning six independent XLSX/PDF layouts and 22 anomaly or boundary combinations, plus reproducible demo generation and extraction/matching/cost/constraint/recommendation/time/model-cost metrics.
 - Controlled one-tester blind comparison with server-derived assisted evidence, and isolated real-model acceptance evidence for complete quotes, human clarification recovery, and deterministic rejection of ineligible quotes.
 - Procurement approval recovery that resumes the public Harness run once when a successful approval lacks the exact verification marker, plus a guard that blocks supplier selection until the current run has successfully verified the comparison.
 
-- Web acceptance rules for deterministic output assertions, workspace-relative file assertions and governed verification commands, mapped to the existing `VerificationPolicy`.
-- Durable run reports with explicit accepted/failed/human-review/unverified conclusions, verification attempts and evidence, workspace-write versions, complete tool and approval audits, referenced Artifacts, usage, event trace and a reproducible public-evidence SHA-256.
+### Changed
+
+- Procurement is now the only public product line. Generic Shell, Docker, browser, MCP, memory, delegate and skills modules, together with their generic Web control routes and tests, are no longer shipped. The Run/Checkpoint/Approval/Event/Artifact runtime remains only as the procurement audit and recovery substrate.
+- Historical SQLite migrations remain readable for existing databases; they are compatibility data, not active product capabilities.
+
+- Procurement Run reports with explicit accepted/failed/human-review/unverified conclusions, output verification attempts, complete tool and approval audits, referenced Artifacts, usage, event trace and a reproducible public-evidence SHA-256.
 - Auto-compaction: when live history crosses `context_compact_ratio × max_context_tokens` (default 80%), the engine folds old message groups into a rolling model-written summary rendered in the stable prefix. Tool pairs stay atomic, the latest user goal and the newest groups stay verbatim, originals are externalized to an artifact, and the compacted view is checkpointed for resume. Every failure path degrades to the planner's externalization fallback.
 - `context_compacted` event (applied/skipped, tokens before, coverage, artifact id) surfaced in the Web activity feed.
 - Prompt-cache metrics: the OpenAI adapter reads `cached_tokens` from both Chat Completions and Responses usage shapes; `Usage` gains cumulative/per-turn `cached_input_tokens` and a serialized `cache_hit_rate`; provider attempts record per-attempt cache reads; the Web run header shows the hit rate.

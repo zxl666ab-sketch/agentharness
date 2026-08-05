@@ -2,7 +2,7 @@
 
 The connection, its writer lock and per-thread readers live in
 :class:`StorageCore`; each domain (runs, events, messages, checkpoints, tool
-invocations, approvals, memories, leases, artifact index, maintenance) owns its
+invocations, approvals, leases, artifact index) owns its
 SQL in a dedicated repo module. This class is the stable public surface: every
 method keeps its original signature and delegates 1:1.
 """
@@ -29,8 +29,6 @@ from agentharness.storage.checkpoints import CheckpointRepo
 from agentharness.storage.core import StorageCore
 from agentharness.storage.events import EventRepo
 from agentharness.storage.leases import LeaseRepo
-from agentharness.storage.maintenance import MaintenanceOps
-from agentharness.storage.memories import MemoryRepo
 from agentharness.storage.messages import MessageRepo
 from agentharness.storage.procurement import ProcurementRepo
 from agentharness.storage.runs import RunRepo
@@ -65,11 +63,7 @@ class Storage:
         self.checkpoints = CheckpointRepo(self._core, self.redactor)
         self.tool_invocations = ToolInvocationRepo(self._core, self.redactor)
         self.approvals = ApprovalRepo(self._core, self.redactor)
-        self.memories = MemoryRepo(self._core, self.redactor)
         self.artifact_index = ArtifactIndexRepo(self._core, self.redactor)
-        self.maintenance = MaintenanceOps(self._core, artifacts=self.artifacts)
-        with self._lock:
-            self.memories._backfill_memory_metadata_unlocked()
 
     def close(self) -> None:
         self._core.close()
@@ -367,70 +361,6 @@ class Storage:
     def list_approvals(self, run_id: str) -> list[dict[str, Any]]:
         return self.approvals.list_approvals(run_id)
 
-    # -- memories (FTS5) ----------------------------------------------------
-
-    def add_memory(
-        self,
-        content: str,
-        *,
-        source: str = "tool",
-        scope: str = "global",
-        memory_id: str | None = None,
-        expires_at: str | None = None,
-    ) -> str:
-        return self.memories.add_memory(
-            content,
-            source=source,
-            scope=scope,
-            memory_id=memory_id,
-            expires_at=expires_at,
-        )
-
-    def get_memory(self, memory_id: str) -> dict[str, Any] | None:
-        return self.memories.get_memory(memory_id)
-
-    def list_memories(
-        self,
-        *,
-        scope: str | None = None,
-        include_expired: bool = False,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        return self.memories.list_memories(
-            scope=scope, include_expired=include_expired, limit=limit
-        )
-
-    def update_memory(
-        self,
-        memory_id: str,
-        *,
-        content: str | None = None,
-        source: str | None = None,
-        scope: str | None = None,
-        expires_at: str | None = None,
-        expected_hash: str | None = None,
-    ) -> dict[str, Any]:
-        return self.memories.update_memory(
-            memory_id,
-            content=content,
-            source=source,
-            scope=scope,
-            expires_at=expires_at,
-            expected_hash=expected_hash,
-        )
-
-    def delete_memory(self, memory_id: str, *, expected_hash: str | None = None) -> bool:
-        return self.memories.delete_memory(memory_id, expected_hash=expected_hash)
-
-    def search_memories(
-        self,
-        query: str,
-        limit: int = 5,
-        *,
-        scopes: list[str] | None = None,
-    ) -> list[dict[str, Any]]:
-        return self.memories.search_memories(query, limit, scopes=scopes)
-
     # -- artifacts meta -----------------------------------------------------
 
     def register_artifact(self, meta: dict[str, Any]) -> str:
@@ -441,17 +371,3 @@ class Storage:
 
     def get_artifact_by_sha(self, sha: str) -> dict[str, Any] | None:
         return self.artifact_index.get_artifact_by_sha(sha)
-
-    # -- explicit maintenance ---------------------------------------------
-
-    def maintenance_stats(self) -> dict[str, Any]:
-        return self.maintenance.maintenance_stats()
-
-    def plan_gc(self, *, older_than_days: int = 30) -> dict[str, Any]:
-        return self.maintenance.plan_gc(older_than_days=older_than_days)
-
-    def apply_gc(self, *, older_than_days: int = 30) -> dict[str, Any]:
-        return self.maintenance.apply_gc(older_than_days=older_than_days)
-
-    def compact(self) -> dict[str, int]:
-        return self.maintenance.compact()

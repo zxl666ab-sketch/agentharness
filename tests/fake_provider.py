@@ -189,29 +189,6 @@ class FakeModelAdapter:
             invoked.append(
                 ("write_file", {"path": "out.txt", "content": "hello from fake agent"})
             )
-        if "shell" in tool_names and ("shell" in lower or "run " in lower or "执行" in user_text):
-            cmd = "echo hello"
-            m_cmd = re.search(r"shell[:\s]+(.+)", user_text, re.I)
-            if m_cmd:
-                cmd = m_cmd.group(1).strip()
-            invoked.append(("shell", {"command": cmd}))
-        if "http_request" in tool_names and ("http" in lower or "fetch" in lower):
-            invoked.append(("http_request", {"url": "https://example.com", "method": "GET"}))
-        if "memory_store" in tool_names and ("remember" in lower or "记忆" in user_text):
-            invoked.append(("memory_store", {"content": user_text[:200], "scope": "global"}))
-        if "memory_search" in tool_names and ("recall" in lower or "检索记忆" in user_text):
-            invoked.append(("memory_search", {"query": user_text[:100]}))
-        if "delegate" in tool_names and ("delegate" in lower or "委派" in user_text):
-            invoked.append(
-                (
-                    "delegate",
-                    {
-                        "task": user_text,
-                        "allow_write": False,
-                    },
-                )
-            )
-
         if invoked:
             async for item in self._stream_text("I will use tools to help."):
                 yield item

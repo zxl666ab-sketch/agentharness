@@ -170,7 +170,8 @@ class ApproveSupplierBody(BaseModel):
 
     snapshot_id: str = Field(min_length=1, max_length=128)
     input_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    quote_id: str = Field(min_length=1, max_length=128)
+    decision: Literal["approved", "no_award"] = "approved"
+    quote_id: str | None = Field(default=None, min_length=1, max_length=128)
     confirmed: bool
     note: str | None = Field(default=None, max_length=2_000)
     actor: str = Field(default="采购员", min_length=1, max_length=100)
@@ -330,8 +331,18 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
     @router.post("/requests/{request_id}/decision")
     async def approve(request_id: str, body: ApproveSupplierBody) -> dict[str, Any]:
         if not body.confirmed:
-            raise HTTPException(409, "正式选定供应商必须人工确认")
+            raise HTTPException(409, "采购结论必须人工确认")
         try:
+            if body.decision == "no_award":
+                return service.record_no_award(
+                    request_id,
+                    snapshot_id=body.snapshot_id,
+                    input_sha256=body.input_sha256,
+                    note=body.note,
+                    actor=body.actor,
+                )
+            if not body.quote_id:
+                raise ValueError("正式选定供应商必须提供报价 ID")
             return await agent.approve(
                 request_id,
                 snapshot_id=body.snapshot_id,

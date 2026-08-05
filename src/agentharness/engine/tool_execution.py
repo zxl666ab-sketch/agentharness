@@ -1,4 +1,4 @@
-"""Governed tool execution: validation, policy, approvals, and the executor."""
+"""Governed procurement tool execution, validation, approvals and recovery."""
 
 from __future__ import annotations
 
@@ -731,7 +731,6 @@ class ToolInvocationExecutor:
         for tc, invocation in allowed:
             tool = self.tools[tc.name]
             effect = self._effect_for(tool, tc)
-            browser_id = self._resolve_browser_context_id(tc)
             parallel_safe = self._parallel_safe_for(tool, tc, effect)
             self.events.emit_and_update(
                 run_id,
@@ -753,7 +752,6 @@ class ToolInvocationExecutor:
                 (
                     effect,
                     lambda tc=tc, invocation=invocation: make_runner(tc, invocation),
-                    browser_id,
                     parallel_safe,
                 )
             )
@@ -845,11 +843,6 @@ class ToolInvocationExecutor:
                         "name": tc.name,
                         "tool_call_id": tc.id,
                         "invocation_id": tc.invocation_id,
-                        **(
-                            {"executor": request.shell.executor}
-                            if tc.name == "shell"
-                            else {}
-                        ),
                     },
                     span_id=span_id,
                 ),
@@ -880,10 +873,8 @@ class ToolInvocationExecutor:
                 "root_run_id": root_run_id,
                 "parent_run_id": parent_run_id,
                 "tool_call_id": tc.id,
-                "delegate_depth": request.delegate_depth,
                 "budget": request.budget.model_dump(),
                 "pricing": request.pricing.model_dump(mode="json"),
-                "shell": request.shell.model_dump(mode="json"),
                 "provider": (
                     usage.provider_attempts[-1].provider
                     if usage.provider_attempts
@@ -894,7 +885,6 @@ class ToolInvocationExecutor:
                     if usage.provider_attempts
                     else request.model
                 ),
-                "skills_dirs": request.skills_dirs,
             },
             harness=self.spawner,
         )
@@ -1433,13 +1423,7 @@ class ToolInvocationExecutor:
         return result
 
     def _effect_for(self, tool: Any, tc: ToolCall) -> EffectKind:
-        """Resolve the *dynamic* effect of a call, falling back to the static spec.
-
-        Tools like MCP expose ``effect_for(arguments)`` so a bare ``list_tools`` is
-        ``pure`` while ``call_tool`` is ``destructive``. Approval gating and the
-        scheduler batch both use this so they act on the real blast radius, not the
-        lowest-common-denominator spec label.
-        """
+        """Resolve a domain tool's dynamic effect, if it provides one."""
         effect_for = getattr(tool, "effect_for", None)
         if callable(effect_for):
             args = tc.arguments if isinstance(tc.arguments, dict) else {}
@@ -1476,24 +1460,6 @@ class ToolInvocationExecutor:
             if isinstance(dynamic, bool):
                 return dynamic
         return resolved_parallel_safe(tool.spec, effect)
-
-    def _resolve_browser_context_id(self, tc: ToolCall) -> str | None:
-        """Browser ops always share a context key (default 'default' when omitted).
-
-        Matches BrowserTool which uses ``arguments.get('context_id') or 'default'``.
-        Without this, concurrent browser tools without an explicit context_id skip
-        the scheduler lock and race on the same Playwright context.
-        """
-        tool = self.tools.get(tc.name)
-        is_browser = tc.name == "browser" or (
-            tool is not None and getattr(tool, "browser_bound", False)
-        )
-        args = tc.arguments if isinstance(tc.arguments, dict) else {}
-        if is_browser:
-            return str(args.get("context_id") or "default")
-        if args.get("context_id"):
-            return str(args["context_id"])
-        return None
 
     def _append_tool_result(
         self,

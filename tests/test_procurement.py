@@ -222,6 +222,47 @@ async def test_procurement_model_config_persists_and_restores_on_restart(
         await restored.aclose()
 
 
+def test_procurement_env_is_default_and_persisted_fields_override_it(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENTHARNESS_PROCUREMENT_PROVIDER", "openai")
+    monkeypatch.setenv("AGENTHARNESS_PROCUREMENT_MODEL", "env-default-model")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://env.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env-default")
+    (data_dir / "procurement-model-config.json").write_text(
+        json.dumps({"source": "ui", "model": "ui-override-model"}), encoding="utf-8"
+    )
+
+    harness = Harness(data_dir=data_dir)
+    agent = ProcurementAgent(harness, ProcurementService(harness))
+    try:
+        assert agent.run_profile.model == "ui-override-model"
+        assert agent.run_profile.base_url == "https://env.example/v1"
+        assert agent.run_profile.api_key == "sk-env-default"
+    finally:
+        asyncio.run(agent.aclose())
+        harness.close()
+
+
+def test_procurement_legacy_config_does_not_mask_environment_defaults(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENTHARNESS_PROCUREMENT_PROVIDER", "openai")
+    monkeypatch.setenv("AGENTHARNESS_PROCUREMENT_MODEL", "env-default-model")
+    (data_dir / "procurement-model-config.json").write_text(
+        json.dumps({"provider": "procurement_fake", "model": "procurement-fake-v1"}),
+        encoding="utf-8",
+    )
+    harness = Harness(data_dir=data_dir)
+    agent = ProcurementAgent(harness, ProcurementService(harness))
+    try:
+        assert agent.run_profile.provider == "openai"
+        assert agent.run_profile.model == "env-default-model"
+    finally:
+        asyncio.run(agent.aclose())
+        harness.close()
+
+
 @pytest.mark.asyncio
 async def test_procurement_live_profile_flows_through_api_with_fake_transport(
     data_dir: Path,
@@ -1341,6 +1382,148 @@ def test_supplier_decision_request_and_audit_are_atomic(
     assert stored["approved_quote_id"] is None
     assert stored["status"] == "analyzed"
     assert not any(event["type"] == "supplier_approved" for event in report["audit_events"])
+
+
+def test_no_award_decision_closes_zero_eligible_comparison_with_audit(
+    data_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    truth = load_frozen_truth()
+    body = _request_body(truth)
+    body["constraints"] = {
+        **body["constraints"],
+        "max_landed_unit_cost": "0.01",
+    }
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    request = service.create_request(body)
+    for case in truth["quotes"][:2]:
+        document = build_case_document(case)
+        service.import_quote(
+            str(request["id"]),
+            filename=case["filename"],
+            data=document,
+            extracted=parse_quote(case["filename"], document),
+        )
+    run_id = "no-award-run"
+    harness.storage.create_run(
+        run_id=run_id,
+        session_id=str(request["session_id"]),
+        root_run_id=run_id,
+    )
+    monkeypatch.setattr("agentharness.procurement.service._today", lambda: date(2026, 7, 27))
+    snapshot = service.compare_for_agent(str(request["id"]), run_id=run_id)
+    assert snapshot["result"]["eligible_count"] == 0
+
+    closed = service.record_no_award(
+        str(request["id"]),
+        snapshot_id=str(snapshot["id"]),
+        input_sha256=str(snapshot["input_sha256"]),
+        note="全部报价超过预算，重新询价",
+        actor="采购员王敏",
+    )
+    report = service.audit_report(str(request["id"]))
+    harness.close()
+
+    assert closed["status"] == "no_award"
+    assert closed["approved_quote_id"] is None
+    assert closed["decision"]["decision"] == "no_award"
+    assert closed["decision"]["quote_id"] is None
+    assert report["decision"] == closed["decision"]
+    assert report["audit_events"][-1]["type"] == "procurement_no_award"
+
+
+def test_no_award_decision_rejects_comparison_with_eligible_quote(
+    data_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    truth = load_frozen_truth()
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    request = service.create_request(_request_body(truth))
+    for case in truth["quotes"][:2]:
+        document = build_case_document(case)
+        service.import_quote(
+            str(request["id"]),
+            filename=case["filename"],
+            data=document,
+            extracted=parse_quote(case["filename"], document),
+        )
+    run_id = "no-award-rejected-run"
+    harness.storage.create_run(
+        run_id=run_id,
+        session_id=str(request["session_id"]),
+        root_run_id=run_id,
+    )
+    monkeypatch.setattr("agentharness.procurement.service._today", lambda: date(2026, 7, 27))
+    snapshot = service.compare_for_agent(str(request["id"]), run_id=run_id)
+    assert snapshot["result"]["eligible_count"] > 0
+
+    with pytest.raises(ProcurementError, match="仍有满足全部硬性条件"):
+        service.record_no_award(
+            str(request["id"]),
+            snapshot_id=str(snapshot["id"]),
+            input_sha256=str(snapshot["input_sha256"]),
+            note=None,
+            actor="采购员王敏",
+        )
+    harness.close()
+
+
+@pytest.mark.asyncio
+async def test_no_award_decision_api_accepts_zero_eligible_snapshot(
+    data_dir: Path,
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    truth = load_frozen_truth()
+    body = _request_body(truth)
+    body["constraints"] = {
+        **body["constraints"],
+        "max_landed_unit_cost": "0.01",
+    }
+    harness = Harness(data_dir=data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    service = app.state.procurement_service
+    request = service.create_request(body)
+    for case in truth["quotes"][:2]:
+        document = build_case_document(case)
+        service.import_quote(
+            str(request["id"]),
+            filename=case["filename"],
+            data=document,
+            extracted=parse_quote(case["filename"], document),
+        )
+    run_id = "no-award-api-run"
+    harness.storage.create_run(
+        run_id=run_id,
+        session_id=str(request["session_id"]),
+        root_run_id=run_id,
+    )
+    monkeypatch.setattr("agentharness.procurement.service._today", lambda: date(2026, 7, 27))
+    snapshot = service.compare_for_agent(str(request["id"]), run_id=run_id)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            f"/api/procurement/requests/{request['id']}/decision",
+            json={
+                "decision": "no_award",
+                "snapshot_id": snapshot["id"],
+                "input_sha256": snapshot["input_sha256"],
+                "confirmed": True,
+                "note": "全部报价不符合预算",
+                "actor": "采购员王敏",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "no_award"
+    assert response.json()["decision"]["decision"] == "no_award"
+    await app.state.procurement_agent.aclose()
+    await app.state.run_supervisor.aclose()
+    await harness.aclose()
 
 
 def test_quote_correction_and_snapshot_invalidation_are_atomic(

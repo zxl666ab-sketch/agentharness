@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from typing import Any
 
 from agentharness.contracts import EventEnvelope, EventType, ToolInvocationRecord
 from agentharness.harness import Harness
 
 _ACTIVE_STATUSES = {"pending", "running", "waiting_approval"}
-_VERSION_PATTERN = re.compile(r"file_version sha256=([0-9a-f]{64})")
 
 
 def _event_type(event: EventEnvelope) -> str:
@@ -193,33 +191,6 @@ def _tool_payload(runtime: Harness, invocation: ToolInvocationRecord) -> dict[st
     return payload
 
 
-def _workspace_changes(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    changes: list[dict[str, Any]] = []
-    for tool in tools:
-        if tool.get("effect") != "workspace_write":
-            continue
-        arguments = tool.get("arguments") if isinstance(tool.get("arguments"), dict) else {}
-        result = tool.get("result") if isinstance(tool.get("result"), dict) else {}
-        content = str(result.get("content") or "")
-        version = _VERSION_PATTERN.search(content)
-        target = arguments.get("path") or arguments.get("target") or arguments.get("file")
-        changes.append(
-            {
-                "invocation_id": tool.get("id"),
-                "tool": tool.get("tool_name"),
-                "path": str(target) if target is not None else None,
-                "status": tool.get("status"),
-                "changed": tool.get("status") == "succeeded",
-                "expected_version": arguments.get("expected_version"),
-                "resulting_version": version.group(1) if version else None,
-                "arguments_sha256": tool.get("arguments_sha256"),
-                "artifact_id": result.get("artifact_id"),
-                "finished_at": tool.get("finished_at"),
-            }
-        )
-    return changes
-
-
 def build_run_report(runtime: Harness, run_id: str) -> dict[str, Any] | None:
     """Project a durable report without introducing a second state owner."""
     run = runtime.get_run(run_id)
@@ -276,7 +247,6 @@ def build_run_report(runtime: Harness, run_id: str) -> dict[str, Any] | None:
             "attempts": attempts,
             "failure_reasons": failures,
         },
-        "workspace_changes": _workspace_changes(tools),
         "tools": tools,
         "approvals": approvals,
         "artifacts": artifacts,

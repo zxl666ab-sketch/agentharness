@@ -30,6 +30,7 @@ build/
 # Node
 web/node_modules/
 web/dist/
+web/*.tsbuildinfo
 web/playwright-report/
 web/test-results/
 
