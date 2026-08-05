@@ -15,16 +15,15 @@ async def test_only_explicit_control_plane_writes_are_allowed(data_dir):
     app = create_app(harness=h)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # POST /api/runs is a real control-plane route; reaching validation proves
-        # the write middleware allowed it through without creating a run.
-        assert (await client.post("/api/runs", json={})).status_code == 422
+        # Generic runtime execution is deliberately absent from the procurement
+        # control plane; only token-protected internal commands may mutate it.
+        assert (await client.post("/api/runs", json={})).status_code == 405
         for path in ("/api/sessions", "/api/health"):
             assert (await client.post(path)).status_code == 405
         for path in ("/api/runs", "/api/sessions", "/api/health"):
             for method in ("put", "patch", "delete"):
                 r = await getattr(client, method)(path)
                 assert r.status_code == 405, f"{method} {path}"
-    await app.state.run_supervisor.aclose()
     await h.aclose()
 
 

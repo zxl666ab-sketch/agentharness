@@ -877,6 +877,7 @@ class ToolInvocationExecutor:
             approval_mode=request.approval,
             shell=request.shell,
             metadata={
+                "request_metadata": request.metadata,
                 "root_run_id": root_run_id,
                 "parent_run_id": parent_run_id,
                 "tool_call_id": tc.id,

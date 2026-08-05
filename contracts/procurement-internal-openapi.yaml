@@ -1,0 +1,71 @@
+openapi: 3.1.0
+info:
+  title: Caijiatai Java Procurement Internal API
+  version: 0.4.0
+  description: Narrow callback and artifact API used only by the Python Agent service.
+servers:
+  - url: http://procurement:8741
+security:
+  - InternalToken: []
+paths:
+  /internal/v1/tasks/{taskId}/context:
+    get:
+      operationId: getTaskAgentContext
+      parameters: [{$ref: '#/components/parameters/TaskId'}]
+      responses:
+        '200':
+          description: Current authoritative task context.
+          content:
+            application/json:
+              schema: {type: object}
+        '404': {description: Unknown task}
+  /internal/v1/artifacts/{artifactId}/raw:
+    get:
+      operationId: readBusinessArtifact
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema: {type: string, pattern: '^jb[0-9a-f]{32}$'}
+      responses:
+        '200':
+          description: Original artifact bytes.
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '404': {description: Unknown Java-owned artifact}
+  /internal/v1/operations/{operationId}/result:
+    post:
+      operationId: submitAgentOperationResult
+      parameters:
+        - name: operationId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [payload_sha256, status, result]
+              properties:
+                payload_sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+                status: {type: string, enum: [completed, failed]}
+                result: {type: object}
+                error: {type: [string, 'null']}
+      responses:
+        '200': {description: Existing idempotent application result}
+        '409': {description: Payload or task generation is stale}
+components:
+  securitySchemes:
+    InternalToken:
+      type: apiKey
+      in: header
+      name: X-Agent-Internal-Token
+  parameters:
+    TaskId:
+      name: taskId
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[0-9a-f]{32}$'}

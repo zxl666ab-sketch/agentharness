@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-const apiSchemaVersion = 10;
+const apiSchemaVersion = 11;
 const webRoot = dirname(fileURLToPath(import.meta.url));
 
 function sourceFiles(path: string): string[] {
@@ -66,7 +66,7 @@ export default defineConfig(({ command }) => ({
     },
   },
   build: {
-    outDir: "../src/agentharness/web_dist",
+    outDir: "dist",
     emptyOutDir: true,
     sourcemap: false,
   },

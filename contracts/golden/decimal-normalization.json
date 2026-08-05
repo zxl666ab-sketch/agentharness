@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "rules": {
+    "wire_type": "string",
+    "exponent_notation": false,
+    "zero": "0",
+    "trailing_zero_policy": "strip",
+    "negative_zero": "0"
+  },
+  "samples": [
+    {"input": "5200.00", "canonical": "5200"},
+    {"input": "0.5200", "canonical": "0.52"},
+    {"input": "1E+3", "canonical": "1000"},
+    {"input": "-0.000", "canonical": "0"},
+    {"input": "7.200", "canonical": "7.2"}
+  ]
+}

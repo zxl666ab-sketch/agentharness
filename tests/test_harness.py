@@ -166,7 +166,7 @@ async def test_cleanup_survives_tool_release_exception(data_dir: Path, workspace
         await harness.aclose()
 
 
-def test_doctor_reports_storage_web_and_browser_readiness(data_dir: Path):
+def test_doctor_reports_procurement_runtime_readiness(data_dir: Path):
     harness = Harness(data_dir=data_dir)
     try:
         info = harness.doctor()
@@ -176,4 +176,5 @@ def test_doctor_reports_storage_web_and_browser_readiness(data_dir: Path):
     assert info["sqlite_integrity"] == "ok"
     assert info["schema_version"] == SCHEMA_VERSION
     assert info["web_build"] in {"ready", "missing"}
-    assert info["browser_runtime"] in {"ready", "missing"}
+    assert info["providers"] == ["openai"]
+    assert info["tools"] == []

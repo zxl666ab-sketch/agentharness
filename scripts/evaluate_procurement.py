@@ -17,7 +17,6 @@ from typing import Any
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from agentharness.procurement.agent import PROCUREMENT_TOOL_NAMES
 from agentharness.procurement.evaluation import (
     FROZEN_DATASET_NAME,
     FROZEN_TRUTH_SHA256,
@@ -27,6 +26,13 @@ from agentharness.procurement.evaluation import (
     load_frozen_truth,
     recompute_approach_metrics,
     recompute_human_trial_metrics,
+)
+
+PROCUREMENT_TOOL_NAMES = (
+    "procurement_read_request",
+    "procurement_capture_requirement",
+    "procurement_execute_analysis",
+    "procurement_approve_supplier",
 )
 
 _EXCLUSION_LABELS = {
@@ -41,7 +47,7 @@ _EXCLUSION_LABELS = {
 }
 
 TRIAL_SCHEMA_VERSION = 3
-ASSISTED_TRIAL_BASE_URL = "http://127.0.0.1:8766"
+ASSISTED_TRIAL_BASE_URL = "http://127.0.0.1:8741"
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -1190,9 +1196,9 @@ def _report(result: dict[str, Any], experiment: dict[str, Any]) -> str:
             "uv run python scripts/generate_procurement_demo.py --output output/procurement-demo",
             "uv run python scripts/evaluate_procurement.py human-trial --mode manual --observer 匿名测试员-01",
             "# 纯人工实验完成后，在终端 A 启动从未使用过的空白数据目录",
-            "uv run agentharness --workspace . --data-dir output/procurement-human-trial-data --port 8766",
+            "docker compose up -d --build",
             "# 在终端 B 启动产品辅助计时；审批事实将由脚本自动取证",
-            "uv run python scripts/evaluate_procurement.py human-trial --mode assisted --observer 匿名测试员-01 --base-url http://127.0.0.1:8766",
+            "uv run python scripts/evaluate_procurement.py human-trial --mode assisted --observer 匿名测试员-01 --base-url http://127.0.0.1:8741",
             "uv run python scripts/evaluate_procurement.py run --manual-trial output/procurement-evaluation/manual-trial.json --assisted-trial output/procurement-evaluation/assisted-trial.json --workflow-evidence output/procurement-evaluation/workflow-evidence.json",
             "```",
         ]

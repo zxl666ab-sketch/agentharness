@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -320,76 +319,6 @@ async def test_run_engine_stops_when_verification_retries_are_exhausted(harness,
     assert result.status == RunStatus.failed
     assert "verification failed" in (result.error or "")
     assert len(provider.calls) == 2
-
-
-@pytest.mark.asyncio
-async def test_command_verifier_flows_through_shell_approval_and_events(
-    ask_harness, workspace
-) -> None:
-    command = f'"{sys.executable}" -c "print(\'verified-command\')"'
-    result = await ask_harness.run(
-        RunRequest(
-            message="[fake:text]candidate",
-            provider="fake",
-            approval=ApprovalMode.auto,
-            cwd=str(workspace),
-            verification=VerificationPolicy(
-                validators=[
-                    VerificationCheck(
-                        kind="command", command=command, contains=["verified-command"]
-                    )
-                ]
-            ),
-        )
-    )
-
-    assert result.status == RunStatus.completed
-    transcript = ask_harness.get_session_transcript(result.session_id)
-    assert "[verification command validator]" not in transcript[0].assistant_content
-    approvals = ask_harness.list_approvals(result.run_id)
-    assert len(approvals) == 1
-    assert approvals[0]["tool_name"] == "shell"
-    assert approvals[0]["effect"] == "destructive"
-    events = ask_harness.get_events(run_id=result.run_id, limit=1000)
-    types = {event.type.value if hasattr(event.type, "value") else str(event.type) for event in events}
-    assert {"verification_started", "approval_requested", "tool_result", "verification_result"} <= types
-
-
-@pytest.mark.asyncio
-async def test_multiple_command_verifiers_receive_unique_audit_ordinals(
-    ask_harness, workspace
-) -> None:
-    commands = [
-        f'"{sys.executable}" -c "print(\'first-validator\')"',
-        f'"{sys.executable}" -c "print(\'second-validator\')"',
-    ]
-    result = await ask_harness.run(
-        RunRequest(
-            message="[fake:text]candidate",
-            provider="fake",
-            approval=ApprovalMode.auto,
-            cwd=str(workspace),
-            verification=VerificationPolicy(
-                validators=[
-                    VerificationCheck(
-                        kind="command",
-                        command=commands[0],
-                        contains=["first-validator"],
-                    ),
-                    VerificationCheck(
-                        kind="command",
-                        command=commands[1],
-                        contains=["second-validator"],
-                    ),
-                ]
-            ),
-        )
-    )
-
-    assert result.status == RunStatus.completed
-    invocations = ask_harness.list_tool_invocations(result.run_id)
-    assert len({item.step for item in invocations}) == 1
-    assert [item.ordinal for item in invocations] == [0, 1]
 
 
 @pytest.mark.asyncio

@@ -58,7 +58,6 @@ from agentharness.engine.tool_execution import (
     ToolInvocationExecutor,
     canonical_arguments,
     tool_call_completed,
-    validate_tool_spec,
 )
 from agentharness.engine.verification import VerificationLoop
 from agentharness.security.redaction import Redactor, default_redactor
@@ -150,8 +149,6 @@ class RunEngine:
         redactor: Redactor | None = None,
         approval_callback: ApprovalCallback | None = None,
         on_events: Callable[[list[EventEnvelope]], None] | None = None,
-        mcp_bridge: Any = None,
-        process_registry: dict[str, list[Any]] | None = None,
         lease_owner_id: str | None = None,
         lease_ttl_s: float = 60.0,
         lease_heartbeat_s: float = 10.0,
@@ -160,7 +157,6 @@ class RunEngine:
         self.providers = providers
         self.tools = tools
         self.redactor = redactor or default_redactor
-        self.mcp_bridge = mcp_bridge
         self.lease = LeaseManager(
             storage,
             owner_id=lease_owner_id,
@@ -201,9 +197,6 @@ class RunEngine:
         # Process handles per run. Kept separate from RunContext because the shell tools
         # share this dict by reference (the harness passes its own registry), registering
         # handles the engine later kills — a per-run field could not be shared that way.
-        self._active_processes: dict[str, list[Any]] = (
-            process_registry if process_registry is not None else {}
-        )
         self._active_run_ids: set[str] = set()
         self.active_run_id: str | None = None
 
@@ -278,7 +271,6 @@ class RunEngine:
     def _forget_run(self, run_id: str) -> None:
         """Drop all in-memory state for a run and unlink it from any parent's children."""
         self._runs.pop(run_id, None)
-        self._active_processes.pop(run_id, None)
         for ctx in self._runs.values():
             if run_id in ctx.child_runs:
                 ctx.child_runs = [child for child in ctx.child_runs if child != run_id]
@@ -287,19 +279,11 @@ class RunEngine:
         return self._ctx(run_id).cancel_event
 
     async def _kill_descendants(self, run_id: str) -> None:
-        """Propagate cancel signal, kill shell trees, clear process registry."""
+        """Propagate a cancellation signal through active child Runs."""
         self.get_cancel_event(run_id).set()
         ctx = self._runs.get(run_id)
         for child_id in list(ctx.child_runs if ctx else []):
             await self._kill_descendants(child_id)
-        for proc in list(self._active_processes.get(run_id, [])):
-            try:
-                from agentharness.tools.shell import kill_process_tree
-
-                await kill_process_tree(proc)
-            except Exception:  # noqa: BLE001
-                pass
-        self._active_processes[run_id] = []
         for tool in dict.fromkeys(self.tools.values()):
             cancel_run = getattr(tool, "cancel_run", None)
             if callable(cancel_run):
@@ -1091,6 +1075,7 @@ class RunEngine:
                     parallel_tool_calls=(
                         False if budget.max_tool_calls_per_turn == 1 else None
                     ),
+                    metadata=request.metadata,
                 )
                 text_parts = []
                 tool_acc = {}
@@ -1606,6 +1591,38 @@ class RunEngine:
                     messages=messages,
                 )
             step += 1
+
+            pauses = [
+                result
+                for result in tool_results
+                if not result.is_error and result.pause_status is not None
+            ]
+            if pauses:
+                if len(pauses) != 1 or len(tool_results) != 1:
+                    return self.lifecycle.finish(
+                        run_id,
+                        session_id,
+                        root_run_id,
+                        parent_run_id,
+                        RunStatus.failed,
+                        "".join(output_parts),
+                        usage,
+                        step,
+                        "a pause-requesting tool must be the only successful tool in its batch",
+                        messages=messages,
+                    )
+                pause = pauses[0]
+                return self._pause_for_tool_result(
+                    run_id=run_id,
+                    session_id=session_id,
+                    root_run_id=root_run_id,
+                    parent_run_id=parent_run_id,
+                    output="".join(output_parts),
+                    usage=usage,
+                    steps=step,
+                    messages=messages,
+                    result=pause,
+                )
 
             final_outputs = [
                 result.final_output
@@ -2142,6 +2159,73 @@ class RunEngine:
                 int(raw.get("cached_input_tokens") or 0), input_tokens
             )
 
+    def _pause_for_tool_result(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        root_run_id: str,
+        parent_run_id: str | None,
+        output: str,
+        usage: Usage,
+        steps: int,
+        messages: list[Message],
+        result: ToolResult,
+    ) -> RunResult:
+        """Persist a deliberate domain pause requested by a completed tool.
+
+        A pause is not a failed or terminal run.  The same run id resumes once
+        the owning business system has collected the required human input.
+        """
+
+        status = RunStatus(result.pause_status or RunStatus.require_human.value)
+        if status not in {RunStatus.require_human, RunStatus.waiting_approval}:
+            raise ValueError(f"unsupported tool pause status: {status.value}")
+        reason = self.redactor.redact_text(result.pause_reason or result.content)
+        phase = "waiting_approval" if status == RunStatus.waiting_approval else "model_turn"
+        self.lifecycle.checkpoint(
+            run_id,
+            phase=phase,
+            step=steps,
+            messages=messages,
+            pending=[],
+            completed=self._ctx(run_id).completed_tool_ids,
+            usage=usage,
+            status=status,
+        )
+        run = self.storage.get_run(run_id)
+        if run:
+            self.events.emit_and_update(
+                run_id,
+                status=status,
+                error=reason,
+                output_summary=output[:2000],
+                usage=usage,
+                steps=steps,
+                events=[
+                    self.events.event(
+                        run,
+                        EventType.run_status,
+                        {
+                            "status": status.value,
+                            "reason": reason,
+                            "source": result.name,
+                        },
+                    )
+                ],
+            )
+        return RunResult(
+            run_id=run_id,
+            session_id=session_id,
+            status=status,
+            output=self.redactor.redact_text(output),
+            error=reason,
+            usage=usage,
+            steps=steps,
+            parent_run_id=parent_run_id,
+            root_run_id=root_run_id,
+        )
+
     def _pause_for_verification_human(
         self,
         *,
@@ -2198,26 +2282,6 @@ class RunEngine:
         )
 
     def _tool_specs(self, request: RunRequest) -> list[ToolSpec]:
-        proxy_factory = getattr(self.mcp_bridge, "proxy_tools", None)
-        if callable(proxy_factory):
-            proxies = proxy_factory()
-            if not isinstance(proxies, dict):
-                proxies = {}
-            valid_proxies: dict[str, Any] = {}
-            for name, proxy in proxies.items():
-                try:
-                    validate_tool_spec(proxy.spec)
-                except ValueError:
-                    continue
-                valid_proxies[name] = proxy
-            for name, tool in list(self.tools.items()):
-                if getattr(tool, "mcp_proxy", False) and name not in valid_proxies:
-                    del self.tools[name]
-            for name, proxy in valid_proxies.items():
-                existing = self.tools.get(name)
-                if existing is not None and not getattr(existing, "mcp_proxy", False):
-                    continue
-                self.tools[name] = proxy
         names = request.tools
         specs: list[ToolSpec] = []
         for name, tool in self.tools.items():

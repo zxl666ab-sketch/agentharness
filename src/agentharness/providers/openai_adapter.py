@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from agentharness.contracts import (
     ModelRequest,
@@ -25,6 +26,18 @@ from agentharness.contracts import (
 )
 
 ApiMode = Literal["auto", "chat", "responses"]
+
+
+def normalize_openai_base_url(base_url: str | None) -> str | None:
+    """Accept a provider root while preserving an explicitly supplied API path."""
+
+    raw = str(base_url or "").strip().rstrip("/")
+    if not raw:
+        return None
+    parsed = urlsplit(raw)
+    if parsed.scheme and parsed.netloc and parsed.path in {"", "/"}:
+        return urlunsplit((parsed.scheme, parsed.netloc, "/v1", "", ""))
+    return raw
 
 
 class _ProviderProtocolError(ValueError):
@@ -361,9 +374,10 @@ class OpenAIResponsesAdapter:
         self.api_key = (
             (api_key or os.environ.get("OPENAI_API_KEY")) if use_env else api_key
         )
-        self.base_url = (
+        configured_base_url = (
             (base_url or os.environ.get("OPENAI_BASE_URL")) if use_env else base_url
         )
+        self.base_url = normalize_openai_base_url(configured_base_url)
         # Prefer explicit arg, then env, then hard default (arg must be None to allow env)
         self.default_model = (
             (default_model or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini")

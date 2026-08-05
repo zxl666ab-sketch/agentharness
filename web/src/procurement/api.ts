@@ -5,6 +5,7 @@ import type {
   ProcurementMeta,
   ProcurementModelConfig,
   ProcurementModelConfigUpdate,
+  ProcurementOperation,
   ProcurementQuote,
   ProcurementRequest,
   ProcurementRequestSummary,
@@ -67,9 +68,18 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     let message = httpError(response.status);
     try {
-      const body = (await response.json()) as { detail?: string | ValidationIssue[] };
-      if (typeof body.detail === "string") message = body.detail;
-      if (Array.isArray(body.detail)) message = body.detail.map(validationMessage).join("；");
+      const body = (await response.json()) as {
+        detail?: string | ValidationIssue[];
+        message?: string;
+        field_errors?: Array<{ field: string; message: string }>;
+      };
+      if (typeof body.message === "string") message = body.message;
+      else if (typeof body.detail === "string") message = body.detail;
+      if (Array.isArray(body.field_errors) && body.field_errors.length) {
+        message = body.field_errors.map((item) => `${FIELD_LABELS[item.field] || item.field}：${item.message}`).join("；");
+      } else if (Array.isArray(body.detail)) {
+        message = body.detail.map(validationMessage).join("；");
+      }
     } catch {
       // Preserve the HTTP status when the body is not JSON.
     }
@@ -86,18 +96,28 @@ function postJson<T>(path: string, body?: unknown): Promise<T> {
   });
 }
 
-function fileBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("无法读取报价文件，请检查文件是否可访问"));
-    reader.onload = () => {
-      const value = String(reader.result || "");
-      const separator = value.indexOf(",");
-      if (separator < 0) reject(new Error("无法编码文件"));
-      else resolve(value.slice(separator + 1));
-    };
-    reader.readAsDataURL(file);
-  });
+function idempotencyKey() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `web-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function waitForOperation(operationId: string, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  let delay = 250;
+  while (Date.now() < deadline) {
+    const operation = await requestJson<ProcurementOperation>(
+      `/api/procurement/operations/${operationId}`
+    );
+    if (operation.status === "completed") return operation;
+    if (operation.status === "failed") {
+      throw new Error(operation.last_error || "异步操作执行失败");
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, delay));
+    delay = Math.min(1_500, Math.round(delay * 1.5));
+  }
+  return null;
 }
 
 export const procurementApi = {
@@ -116,17 +136,16 @@ export const procurementApi = {
   createRequest: (input: CreateProcurementRequest) =>
     postJson<ProcurementRequest>("/api/procurement/requests", input),
   async startConversation(message: string, files: File[]) {
-    const attachments = await Promise.all(
-      files.map(async (file) => ({
-        filename: file.name,
-        content_base64: await fileBase64(file),
-      }))
-    );
-    return postJson<ProcurementRunAccepted>("/api/procurement/conversations", {
-      message,
-      attachments,
-      actor: "采购员",
+    const form = new FormData();
+    form.append("message", message);
+    files.forEach((file) => form.append("files", file, file.name));
+    const accepted = await requestJson<ProcurementRunAccepted>("/api/procurement/conversations", {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey() },
+      body: form,
     });
+    await waitForOperation(accepted.operation_id);
+    return accepted;
   },
   resume: (requestId: string, message: string) =>
     postJson<ProcurementRunAccepted>(
@@ -134,9 +153,12 @@ export const procurementApi = {
       { message }
     ),
   async uploadQuote(requestId: string, file: File) {
-    return postJson<ProcurementQuote>(`/api/procurement/requests/${requestId}/quotes`, {
-      filename: file.name,
-      content_base64: await fileBase64(file),
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return requestJson<ProcurementRunAccepted>(`/api/procurement/requests/${requestId}/quotes`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey() },
+      body: form,
     });
   },
   correctField: (
@@ -147,7 +169,7 @@ export const procurementApi = {
   ) =>
     postJson<ProcurementQuote>(
       `/api/procurement/requests/${requestId}/quotes/${quoteId}/corrections`,
-      { field, value, actor: "采购员" }
+      { field, value }
     ),
   correctRequirement: (requestId: string, input: CreateProcurementRequest) =>
     requestJson<ProcurementRequest>(
@@ -155,11 +177,18 @@ export const procurementApi = {
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...input, actor: "采购员" }),
+        body: JSON.stringify(input),
       }
     ),
-  analyze: (requestId: string) =>
-    postJson<ProcurementRunAccepted>(`/api/procurement/requests/${requestId}/analyze`),
+  analyze: async (requestId: string) => {
+    const accepted = await requestJson<ProcurementRunAccepted>(`/api/procurement/requests/${requestId}/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey() },
+      body: "{}",
+    });
+    await waitForOperation(accepted.operation_id);
+    return accepted;
+  },
   approve: (
     requestId: string,
     input: {
@@ -170,11 +199,18 @@ export const procurementApi = {
       confirmed: boolean;
       note?: string;
     }
-  ) =>
-    postJson<ProcurementRequest>(`/api/procurement/requests/${requestId}/decision`, {
-      ...input,
-      actor: "采购员",
-    }),
+  ) => (async () => {
+    const accepted = await requestJson<ProcurementRunAccepted>(
+      `/api/procurement/requests/${requestId}/decision`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey() },
+        body: JSON.stringify(input),
+      }
+    );
+    await waitForOperation(accepted.operation_id);
+    return requestJson<ProcurementRequest>(`/api/procurement/requests/${requestId}`);
+  })(),
   reopen: (requestId: string, copyQuotes: boolean) =>
     postJson<ProcurementRequest>(`/api/procurement/requests/${requestId}/reopen`, {
       copy_quotes: copyQuotes,

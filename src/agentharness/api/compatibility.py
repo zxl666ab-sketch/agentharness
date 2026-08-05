@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-API_SCHEMA_VERSION = 10
+API_SCHEMA_VERSION = 12
 API_CAPABILITIES = (
-    "run_execution_v1",
-    "interactive_approval_v1",
-    "run_resume_v1",
     "sse_events_v1",
-    "tool_execution_v2",
-    "verification_reports_v1",
-    "procurement_sourcing_v1",
-    "procurement_sourcing_v2",
+    "procurement_agent_loop_v1",
+    "procurement_audit_v1",
+    "procurement_evaluation_v1",
 )

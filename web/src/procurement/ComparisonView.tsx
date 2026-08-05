@@ -98,11 +98,11 @@ export function ComparisonView({
       <section className="proc-empty-state">
         <span className="proc-empty-symbol"><Calculator size={30} /></span>
         <h2>尚未生成比价快照</h2>
-        <p>{request.unresolved_field_count ? "先完成低置信度字段复核。" : "系统会先执行硬约束，再按总到货成本排序。"}</p>
+        <p>{!request.requirement_confirmed ? "先保存采购需求的人工确认。" : request.unresolved_field_count ? "先完成低置信度字段复核。" : "系统会先执行硬约束，再按总到货成本排序。"}</p>
         <button
           className="proc-button primary"
           type="button"
-          disabled={request.quote_count < 2 || request.unresolved_field_count > 0 || busy === "analyze"}
+          disabled={!request.requirement_confirmed || request.quote_count < 2 || request.unresolved_field_count > 0 || busy === "analyze"}
           onClick={() => void onAnalyze()}
         >
           {busy === "analyze" ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}

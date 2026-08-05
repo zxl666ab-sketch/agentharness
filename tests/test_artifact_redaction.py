@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from agentharness.api.server import create_app
-from agentharness.contracts import ApprovalMode, RunRequest
+from agentharness.contracts import ApprovalMode, EffectKind, RunRequest, ToolResult
 from agentharness.security.redaction import Redactor
 from agentharness.storage.artifacts import ArtifactStore
+from agentharness.tools.base import FunctionTool
 from tests.fake_provider import create_test_harness
 
 
@@ -32,17 +31,31 @@ async def test_large_tool_result_uses_redacted_artifact_through_api(
     data_dir, workspace
 ):
     secret = "SECRET_ENGINE_ARTIFACT_SENTINEL_44556"
-    source = workspace / "large-secret.txt"
-    source.write_text((f"line {secret}\n" + "x" * 300) * 30, encoding="utf-8")
+
+    async def large_result(_ctx, _arguments):
+        return ToolResult(
+            tool_call_id="",
+            name="procurement_large_evidence",
+            content=(f"line {secret}\n" + "x" * 300) * 30,
+        )
+
     harness = create_test_harness(
         data_dir=data_dir,
         redactor=Redactor(extra_sentinels=[secret]),
+        tools={
+            "procurement_large_evidence": FunctionTool(
+                "procurement_large_evidence",
+                "Return bounded procurement audit evidence.",
+                {"type": "object", "properties": {}, "additionalProperties": False},
+                EffectKind.pure,
+                large_result,
+            )
+        },
     )
     try:
         result = await harness.run(
             RunRequest(
-                message="[fake:tools]read_file\n"
-                + json.dumps({"path": "large-secret.txt"}),
+                message="[fake:tools]procurement_large_evidence",
                 provider="fake",
                 approval=ApprovalMode.auto,
                 cwd=str(workspace),

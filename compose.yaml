@@ -1,0 +1,78 @@
+name: caijiatai
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: caijiatai
+      POSTGRES_USER: caijiatai
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-caijiatai-local}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U caijiatai -d caijiatai"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - procurement-postgres-v04:/var/lib/postgresql/data
+
+  agent:
+    image: caijiatai-agent:0.4.0
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    environment:
+      AGENTHARNESS_INTERNAL_ONLY: "true"
+      AGENT_INTERNAL_TOKEN: ${AGENT_INTERNAL_TOKEN:-local-compose-internal-token}
+      PROCUREMENT_INTERNAL_BASE_URL: http://procurement:8741
+      AGENTHARNESS_DATA_DIR: /data
+      AGENTHARNESS_PROCUREMENT_PROVIDER: ${AGENTHARNESS_PROCUREMENT_PROVIDER:-procurement_fake}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+    volumes:
+      - agent-runtime-v04:/data
+      - .:/workspace:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8742/api/health', timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  procurement:
+    image: caijiatai-procurement:0.4.0
+    build:
+      context: .
+      dockerfile: procurement-service/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_BIND_ADDRESS: 0.0.0.0
+      APP_PORT: 8741
+      DATABASE_URL: jdbc:postgresql://postgres:5432/caijiatai
+      DATABASE_USER: caijiatai
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-caijiatai-local}
+      APP_ARTIFACT_ROOT: /data/artifacts
+      AGENT_INTERNAL_BASE_URL: http://agent:8742
+      AGENT_INTERNAL_TOKEN: ${AGENT_INTERNAL_TOKEN:-local-compose-internal-token}
+      APP_LOCAL_OPERATOR: ${APP_LOCAL_OPERATOR:-采购员}
+    ports:
+      - "127.0.0.1:8741:8741"
+    volumes:
+      - procurement-artifacts-v04:/data/artifacts
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -lc
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8741 &&
+          printf 'GET /actuator/health/readiness HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q 'HTTP/1.1 200' <&3
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+volumes:
+  procurement-postgres-v04:
+  procurement-artifacts-v04:
+  agent-runtime-v04:

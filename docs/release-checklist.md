@@ -1,77 +1,119 @@
 # 采价台本地发布检查清单
 
-从仓库根目录运行。测试数据只写入 `output/`；不得覆盖归属不明的工作树修改，也不得提交数据库、密钥、完整运行日志或旧真人实验数据。
+从仓库根目录运行。不得覆盖用户改动，不得提交 `.env`、数据库卷、密钥、完整日志、Playwright profile/trace 或真实报价。
 
-## 自动门槛
+## 1. Python
 
 ```powershell
 uv sync --all-groups --frozen
 uv run ruff check .
 uv run pytest --cov=agentharness --cov-report=term --cov-fail-under=80 -q
 uv build
+```
 
+必须保留解析器、Runtime、Provider、Run、Checkpoint、Approval、工具治理和 internal-only 安全测试。Python 不得重新出现公共采购 Router、业务 Service、costing 或采购 Repo。
+
+## 2. Java 与 PostgreSQL 17
+
+```powershell
+Set-Location procurement-service
+.\mvnw.cmd test
+Set-Location ..
+```
+
+Testcontainers 必须实际启动 PostgreSQL 17。验证 BigDecimal 精度、税费、汇率、MOQ、交期、V1/V2 动态规格、排序、规范 JSON/hash、Artifact 路径、失效、审批状态机、事务回滚、乐观锁、幂等、重复调度、响应丢失和重启恢复。
+
+## 3. Web
+
+```powershell
 Set-Location web
 npm ci
 npm test
 npm run lint
+npm run build
 Set-Location ..
 uv run python scripts/check_web_build_determinism.py
+```
 
+`web/dist` 必须被忽略。不得恢复 `src/agentharness/web_dist` 或 Python Web 打包逻辑。
+
+## 4. 冻结契约
+
+```powershell
 uv run python scripts/evaluate_procurement.py run --output output/procurement-evaluation-v3
 uv run python scripts/evaluate_procurement.py verify --input output/procurement-evaluation-v3/raw-results.json
 ```
 
-必须同时满足：
+必须满足：
 
-- 后端覆盖率不低于 80%，Ruff、wheel/sdist 构建通过。
-- 前端测试、ESLint、TypeScript/Vite 构建通过，连续两次 Web 构建逐字节一致。
-- 冻结集恰为当前 v3 的 31 份、6 种版式；真值 SHA-256 为 `63647f520bff1ab20e9215cc65e1b246a6f27fcf88cdb226fe7eae72fd6c1ffb`。
-- 字段抽取不低于 95%、物料匹配不低于 90%、金额 100%、硬约束漏检 0、不合格错误入选 0。
-- `docs/evidence/evaluation-summary.json` 与同次冻结复算一致。
+- 31 份、6 种版式，真值 SHA-256 `63647f520bff1ab20e9215cc65e1b246a6f27fcf88cdb226fe7eae72fd6c1ffb`；
+- 字段抽取 617/620；
+- 物料/规格匹配 31/31；
+- 金额 31/31；
+- 硬约束漏检 0/17；
+- 不合格错误入选 0；
+- Java `FrozenComparisonContractTest` 与 `contracts/golden/frozen-comparison-v3.json` 一致；
+- Decimal、规范 JSON UTF-8 字节和 SHA-256 跨语言一致。
 
-GitHub Actions 使用 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) 执行同类 Python 与 Web 门槛。
+## 5. Compose
 
-## 浏览器闭环
+在 Windows 中文路径遇到 BuildKit header 错误时使用：
 
 ```powershell
-uv run python scripts/generate_procurement_demo.py --output output/procurement-demo-v3
-uv run agentharness --workspace . --data-dir output/procurement-release-smoke-v3 --port 8768 --no-open
+$env:DOCKER_BUILDKIT='0'
+docker build -f Dockerfile.agent -t caijiatai-agent:0.4.0 .
+docker build -f procurement-service/Dockerfile -t caijiatai-procurement:0.4.0 .
+docker compose up -d --no-build
+docker compose ps
 ```
 
-在 Chromium 的 1440×900 与 390×844 视口检查：
+检查：
 
-1. 提交采购目标和 XLSX/PDF 报价后只创建一个采购任务、Session 和 Run。
-2. 低置信度字段进入 `require_human`；对话文本不能修改报价，结构化人工修正后 `/analyze` 复用原 Run。
-3. 组合分析工具内部完成解析、物料身份匹配、历史、比价、复算与人工选择项，金额可由原件独立复算。
-4. 正式决定必须产生 `procurement_approve_supplier` 的 `allow_once` Approval，并绑定当前快照。
-5. 修改报价后旧快照和旧审批被拒绝；刷新与进程重启后批准状态、Checkpoint 和报告指纹一致。
-6. 采购需求人工确认会校验完整结构，记录前后值；审批后生成采购订单草稿和供应商确认邮件 Artifact。
-7. 全部报价被硬约束淘汰时，比较页隐藏供应商审批按钮，只能调整需求、补充报价、重新比价或提交带原因的 `no_award`；报告不生成执行草稿，并可复制重开任务。
-8. V2 非包装需求可编辑任意动态规格、单位、匹配方式和优先级；V1 包装任务的历史字段与规则哈希保持不变。
-9. 最终 Runtime 报告为 `passed`，历史 Verification 失败只在尝试详情中显示，不作为最终红色告警。
-10. 浏览器控制台无错误或警告；`document.documentElement.scrollHeight === innerHeight`，窗口滚轮不移动页面，报价/对话内容仍在各自内部滚动容器中滚动。
+- 三个服务 healthy；
+- 只有 `127.0.0.1:8741->8741` 映射宿主机；
+- Java `/api/health` 报告版本 0.4.0、API Schema 11、数据库 ready 和独立 Agent 状态；
+- Java readiness 在 Agent 停止时仍为 UP；
+- Python internal-only 无 Token 返回 401，有效 Token 才能访问 Runtime；
+- Java Host/Origin 边界拒绝非本地生产请求。
 
-当前合成闭环截图、最小运行汇总和中文报告见 [`docs/evidence/`](evidence/README.md)。
+## 6. 隔离无头浏览器
 
-## 故障与安全
+使用独立、无头 Playwright context，不连接或复用用户 Chrome tab/profile。桌面 1440×900 与移动 390×844 均验证：
 
-- `execution_enabled=False` 时除 `/api/health` 外的 API 请求返回 403，且不创建 Session、Run、任务或 Artifact。
-- 二进制原件按字节保存；公共文本和 JSON 才进入脱敏流程。
-- 重复附件和创建审计先完整预检，再以单个事务写入。
-- 正式决定、任务冻结和审批审计在同一 SQLite 事务内提交。
-- HTTP 取消传播至内部分析/审批任务，响应失败后不会后台继续提交。
-- 非法数值、超限 XLSX、否定语义、过期报价和错误物料均有回归用例。
+1. 正常批准：创建、上传、复核、比价、选择、allow-once Approval、批准报告。
+2. 低置信度：星河包装供应商名和顺达包装运费在修正前阻止比价，修正后归零。
+3. 31 文件 multipart：返回 202，最终保存 31 份报价。
+4. 全部淘汰：只能调整、补报价、重比或带原因流标；报告无执行草稿。
+5. 复制重开：新任务可选择复制报价，旧终态不变。
+6. 刷新/Java 重启：任务、附件、报价、Session、Run、修正和状态恢复。
+7. 重复审批：只存在一个正式决定、一个订单和一个邮件。
+8. 并发失效：修正与审批竞争时旧审批 stale，迟到结果被拒绝。
+9. Agent 中断恢复：accepted operation 不丢失，恢复后沿原 operation 继续。
+10. Runtime 降级：Agent 停止时业务报告 HTTP 200，实时 Runtime 结构化 503。
+11. V2 动态规格：标签/key 映射和 `µm/mm/cm/m` 单位换算正确。
+12. 异步失败：错误可见且任务不永久停在 analyzing。
+13. SSE：连接超过 30 秒不被服务器超时，保留 ID、Last-Event-ID、心跳和重连。
+14. 控制台无应用错误；文字无溢出或重叠；核心控件在两种视口可见可用。
 
-## 真实模型验收
+批准报告必须可见 2 个执行 Artifact 和 PostgreSQL 供应商历史。截图、trace 和日志只写临时/忽略目录，并在验收后删除。
 
-真实模型验收使用全新数据目录设置 `AGENTHARNESS_PROCUREMENT_PROVIDER=openai`，并按目标网关设置 `AGENTHARNESS_PROCUREMENT_REASONING_EFFORT`（例如 `max`）。至少覆盖“完整报价直达”“一次人工复核恢复”“异常输入暂停”三类场景；每场保存 Run 报告、采购报告、Checkpoint、Approval、Token、费用与失败记录。当前已完成的脱敏结果见 [`docs/evidence/real-model-acceptance.md`](evidence/real-model-acceptance.md)。
+## 7. 故障与事务
 
-模型价格未配置时，报告中的估算费用只能标记为未知/未计价，不得当作免费；不得把一次真实模型冒烟结果外推为总体准确率。
+- Python 暂时不可用：已持久接受请求保持 202/outbox retryable；未接受或实时代理才返回 503。
+- 响应丢失：新 worker 使用同 operation ID 获取原结果。
+- 同幂等键同载荷返回原结果；异载荷返回 409。
+- 需求/报价修正原子失效快照与 pending decision。
+- 最终提交锁定并复核任务版本、快照、输入哈希、资格、审批摘要和日期。
+- PostgreSQL 回滚不留下部分业务状态；乐观锁冲突返回 409。
+- Java Artifact Store 拒绝路径穿越并验证 SHA-256。
+- Python 关闭时采购报告仍返回 200 且明确 `runtime_evidence_status=unavailable`。
 
-## 最终树检查
+## 8. 最终清理与启动
 
-- 唯一产品入口是采购工作台；旧通用 Run Composer、Session Sidebar、Tool Timeline、Markdown 消息和独立 Request Form 不存在。
-- `react-markdown`、`remark-gfm`、临时简历副本、Playwright 会话、缓存和本地日志未进入 Git。
-- `src/agentharness/web_dist/` 与当前 Web 源码一致，README 只链接已跟踪的 `docs/evidence/`。
-- 采购产品只提供桌面浏览器工作台，不添加 Docker 编排或手机端代码。
-- 简历与 README 只声明采购产品实际使用且能由当前证据证明的能力，不写 RAG、Redis、Kafka、LangGraph 或多 Agent。
+- 检查 `git status` 和所有新增路径所有者；
+- 删除本次任务创建的 `.playwright-cli`、截图、trace、日志、临时数据库和演示输出；
+- 不删除归属不明的预存用户数据；
+- 清理测试容器后用新 PostgreSQL/Agent/Artifact 卷完成一次最终 Compose 闭环；
+- 最后保持 `docker compose ps` 三服务 healthy，并确认 [http://127.0.0.1:8741](http://127.0.0.1:8741) 可访问。
+
+旧 SQLite 采购数据只可归档，不自动导入或双写。任何未验证的 Compose/Testcontainers/浏览器项都不能以单元测试绿灯替代。

@@ -40,6 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-open", action="store_true", help="Do not open a browser.")
     parser.add_argument(
+        "--internal-only",
+        action="store_true",
+        help="Run only the token-protected Agent Runtime API for the Java control plane.",
+    )
+    parser.add_argument(
         "--allow-remote-execution",
         action="store_true",
         help="Explicitly allow run/approval endpoints on a non-loopback bind.",
@@ -52,6 +57,8 @@ def main() -> None:
     args = build_parser().parse_args()
     env_data_dir = os.environ.get("AGENTHARNESS_DATA_DIR", "").strip()
     data_dir = args.data_dir or (Path(env_data_dir) if env_data_dir else None)
+    if args.internal_only and args.port == 8741:
+        args.port = 8742
     roots = [path.expanduser().resolve() for path in (args.workspace or [Path.cwd()])]
     for root in roots:
         if not root.is_dir():
@@ -65,7 +72,7 @@ def main() -> None:
     url = f"http://{args.host}:{args.port}"
     print(f"采价台 Web: {url}")
     print("Workspaces: " + ", ".join(str(root) for root in roots))
-    if not args.no_open and _is_loopback(args.host):
+    if not args.internal_only and not args.no_open and _is_loopback(args.host):
         timer = threading.Timer(0.8, webbrowser.open, args=(url,))
         timer.daemon = True
         timer.start()
@@ -73,6 +80,7 @@ def main() -> None:
         data_dir=data_dir,
         workspace_roots=roots,
         execution_enabled=execution_enabled,
+        internal_only=args.internal_only,
     )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

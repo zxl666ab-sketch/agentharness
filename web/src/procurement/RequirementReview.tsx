@@ -257,6 +257,7 @@ export function RequirementReview({ request, busy, error, onSave }: Props) {
       const payload: CreateProcurementRequest = request.schema_version === 2
         ? { schema_version: 2, ...basePayload, specifications: dynamicSpecPayload(dynamicSpecs) }
         : {
+            schema_version: 1,
             ...basePayload,
             specifications: {
               width_mm: numberValue(form.width, "宽度"),
@@ -280,7 +281,7 @@ export function RequirementReview({ request, busy, error, onSave }: Props) {
       <header className="proc-panel-head">
         <div><ClipboardEdit size={16} /><h2>采购需求结构化复核</h2><span>AI 结果可修改</span></div>
         <div className="proc-requirement-head-actions">
-          <span className="proc-requirement-proof"><ShieldCheck size={14} />人工确认后才进入比价</span>
+          <span className="proc-requirement-proof"><ShieldCheck size={14} />{request.requirement_confirmed ? "已保存人工确认" : "人工确认后才进入比价"}</span>
           <button
             className="proc-collapse-button"
             type="button"
