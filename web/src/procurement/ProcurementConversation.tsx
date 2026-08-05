@@ -308,7 +308,7 @@ export function ProcurementConversation({
         <span className={`proc-run-state ${status}`}>{active ? <LoaderCircle className="spin" size={13} /> : <Circle size={10} fill="currentColor" />}{runLabel}</span>
       </header>
       <div className="proc-conversation-ids">
-        <span><small>SESSION</small><code title={request.session_id}>{request.session_id.slice(0, 10)}</code></span>
+        <span><small>SESSION</small><code title={request.session_id || "-"}>{request.session_id ? request.session_id.slice(0, 10) : "-"}</code></span>
         <span><small>REQUEST</small><code title={request.id}>{request.id.slice(0, 10)}</code></span>
         <span><small>RUN</small><code title={runId || "-"}>{runId ? runId.slice(0, 10) : "-"}</code></span>
       </div>

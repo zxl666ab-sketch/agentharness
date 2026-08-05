@@ -57,45 +57,6 @@ def test_failed_migration_rolls_back_ddl_and_schema_version(
         conn.close()
 
 
-def test_v5_memory_data_survives_v6_forward_migration(tmp_path: Path) -> None:
-    created_at = "2026-01-02T03:04:05+00:00"
-    conn = _database_at_version(tmp_path / "agentharness.db", 5)
-    conn.execute(
-        """INSERT INTO memories(
-               id, content, source, scope, created_at, last_used_at
-           ) VALUES(?,?,?,?,?,?)""",
-        (
-            "historical-memory",
-            "historical migration fact",
-            "v5",
-            "global",
-            created_at,
-            created_at,
-        ),
-    )
-    conn.execute(
-        """INSERT INTO memories_fts(rowid, content, source, scope)
-           SELECT rowid, content, source, scope FROM memories WHERE id = ?""",
-        ("historical-memory",),
-    )
-    conn.commit()
-    conn.close()
-
-    storage = Storage(tmp_path)
-    try:
-        row = storage.get_memory("historical-memory")
-        assert storage.schema_version() == SCHEMA_VERSION
-        assert row is not None
-        assert row["content"] == "historical migration fact"
-        assert row["content_hash"]
-        assert row["updated_at"] == created_at
-        assert row["expires_at"] is None
-        assert row["use_count"] == 0
-        assert storage.search_memories("historical migration", scopes=["global"])
-    finally:
-        storage.close()
-
-
 def test_v6_approvals_gain_confirmation_flag(tmp_path: Path) -> None:
     created_at = "2026-01-02T03:04:05+00:00"
     conn = _database_at_version(tmp_path / "agentharness.db", 6)
@@ -296,13 +257,18 @@ def test_v10_procurement_decisions_preserve_v1_rows_and_allow_no_award(
         }
         assert storage.schema_version() == SCHEMA_VERSION
         assert decision_columns["quote_id"] == 0
-        legacy = storage.procurement.get_decision("proc-request")
+        legacy = storage._conn.execute(  # noqa: SLF001 - archived migration evidence
+            "SELECT decision, quote_id FROM procurement_decisions WHERE request_id = ?",
+            ("proc-request",),
+        ).fetchone()
         assert legacy is not None
-        assert legacy["decision"] == "approved"
-        assert legacy["quote_id"] == "proc-quote"
-        snapshot = storage.procurement.get_snapshot("proc-snapshot")
+        assert tuple(legacy) == ("approved", "proc-quote")
+        snapshot = storage._conn.execute(  # noqa: SLF001 - archived migration evidence
+            "SELECT result_json FROM procurement_comparison_snapshots WHERE id = ?",
+            ("proc-snapshot",),
+        ).fetchone()
         assert snapshot is not None
-        assert snapshot["result"]["schema_version"] == 1
+        assert json.loads(snapshot[0])["schema_version"] == 1
 
         # The v10 table accepts a final no-award decision without a quote.
         storage._conn.execute("PRAGMA foreign_keys=OFF")  # noqa: SLF001

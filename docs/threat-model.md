@@ -2,51 +2,61 @@
 
 ## Scope
 
-Agent Harness is a local, single-user application. It is not a multi-tenant security boundary. The browser, model output, tool arguments, fetched content, providers and MCP servers are untrusted inputs.
+采价台是本地单用户应用，不是多租户安全边界。浏览器输入、上传文档、模型输出、工具参数、Provider、MCP 和网络内容均视为不可信。
 
 ## Assets
 
-- authorized workspace files;
-- provider credentials and spend;
-- prompts, messages, memory, checkpoints and artifacts;
-- host processes and network access;
-- integrity of run status and approval decisions.
+- 采购需求、报价、人工修正、快照、决定与审计完整性；
+- 原始报价与生成的采购执行 Artifact；
+- Provider 凭据、Token 与费用预算；
+- Run、Session、Checkpoint、Approval 和工具结果；
+- 工作区文件、宿主进程与网络访问。
 
 ## Trust zones
 
 ```mermaid
 flowchart LR
-    U["Local browser"] --> API["localhost Web/API"]
-    API --> R["Agent Runtime"]
-    R --> DB["SQLite / artifacts"]
-    R --> HOST["Governed host tools"]
-    R --> EXT["Providers / approved network / MCP"]
+    Browser["本地浏览器"] -->|"127.0.0.1:8741"| Java["Java 业务边界"]
+    Java --> PG["PostgreSQL"]
+    Java --> JArt["Java Artifact Store"]
+    Java -->|"内部 Token"| Agent["Python Agent Runtime"]
+    Agent --> RDB["Runtime SQLite / Artifacts"]
+    Agent --> Tools["受治理工具"]
+    Agent --> External["Provider / MCP / 批准网络"]
 ```
 
 ## Controls
 
 | Threat | Controls |
 |---|---|
-| Browser selects arbitrary host paths | startup-configured workspace roots, opaque workspace ids, relative cwd only, real-path containment |
-| Model path traversal or symlink escape | tool-level real-path sandbox and explicit extra roots |
-| Unapproved write, command or network action | effect classification, `approval=ask`, default `allow_write=false`, Web approval broker |
-| Destructive action auto-approved | destructive effects always require an interactive decision; confirmation-only actions cannot receive `allow_run` |
-| Duplicate side effects after failure | durable invocation state; terminal-result reuse; safe retry/reconciliation; unknown non-idempotent outcomes require human review |
-| Run stolen after process loss | lease owner, heartbeat, expiry-based recovery |
-| Token or cost runaway | step/time/token/output caps, Provider attempt accounting and strict configured cost budgets |
-| SSRF or private-network access | per-hop DNS/IP validation, private target denial, peer validation and browser request interception |
-| Secret disclosure | structured redaction before persistence/public API, credential-header stripping and artifact redaction |
-| Remote unauthenticated execution or data access | loopback default; non-loopback bind disables all API access except health checks unless explicitly overridden |
-| Shutdown leaves live work | supervisor interrupts and cancels owned tasks before Harness closes resources |
+| 远程浏览器访问 | Java 生产模式只接受本地 Host；非安全方法校验同源 Origin；开发模式只额外允许配置的 Vite Origin |
+| 直接访问 Python | Python 端口不映射宿主机；internal-only 模式除健康检查外全部校验 `X-Agent-Internal-Token` |
+| 任意反向代理 | Java 只实现显式 Runtime 路径允许列表，不接受用户提供的代理目标或任意路径 |
+| 请求伪造 actor | 公共请求不接受 actor；本地采购员来自 `APP_LOCAL_OPERATOR`，Agent actor 固定为 `agent` |
+| 上传炸弹或恶意文档 | 扩展名、单文件/总大小、数量、XLSX ZIP 条目/压缩比/工作表/行列、PDF 页数/字符/加密限制；扫描件拒绝 |
+| Artifact 路径穿越 | 内容寻址 ID、所有者前缀、两级 SHA-256 分片、规范路径校验、临时文件加原子移动 |
+| 模型修改报价或决定 | Python 无采购业务写入 Repo；人工修正和最终事务仅在 Java；模型只能经白名单命令和 Harness Approval |
+| 重放或重复副作用 | PostgreSQL 持久幂等键、不可变 operation ID/payload SHA、generation/version、Python 幂等结果与最终决定复用 |
+| stale approval | pending decision 绑定 Run、工具、任务版本、快照、输入哈希、决定、报价与备注哈希；Java 最终事务重新核验 |
+| Agent 中断或响应丢失 | durable outbox、有界重试、同 operation replay；非重试失败恢复任务状态；未知副作用结果保留证据并拒绝盲目重复 |
+| PostgreSQL 中途失败 | 业务状态、outbox、失效、决定和审计在对应单一事务中提交；乐观锁与最终悲观锁复核 |
+| Python 宕机拖垮业务读取 | Java readiness 不依赖 Python；业务报告本地投影或 unavailable 降级均返回 200；实时 Runtime 代理返回结构化 503 |
+| Secret 泄露 | Token/凭据来自环境或 Python 本地配置；结构化脱敏后再持久化/返回；凭据 Header 不透传到公共响应 |
+| SSRF / 私网访问 | 每跳 DNS/IP 与 peer 校验、默认拒绝私网目标、Provider/网络工具遵循显式治理 |
+| 成本失控 | step/time/token/output/费用上限，Provider 尝试与 429/Retry-After 证据持久化 |
+| 路径逃逸和宿主命令 | real-path containment、工作区根、效果分类、交互审批；路径 sandbox 不等同 OS 隔离 |
+
+## Data lifecycle
+
+PostgreSQL 与 Java Artifact 卷保存当前采购业务；Python Runtime 卷只保存 Runtime 事实。历史 SQLite 采购数据只可离线归档，不自动导入或双写。不得把 `.env`、数据库卷、完整日志、浏览器 profile、trace 或真实报价提交到 Git。
 
 ## Residual risks
 
-- Local Shell has the OS privileges of the current user after approval.
-- Path containment cannot detect a hardlink inside a workspace that points to external file content.
-- Prompt injection can still persuade a user to approve a harmful action.
-- Redaction cannot prove arbitrary natural-language content is non-sensitive.
-- Provider retention and billing follow provider policy.
-- Browser engines and MCP implementations are external dependencies.
-- `--allow-remote-execution` does not add authentication; an authenticating proxy is mandatory.
+- 获批 Shell 与工具拥有当前 OS 用户权限。
+- 工作区内指向外部内容的硬链接不能由路径规范化完全识别。
+- Prompt injection 仍可能诱导用户批准有害动作。
+- 脱敏无法证明任意自然语言绝不含敏感信息。
+- Provider 留存、计费和可用性遵循外部服务政策。
+- 本地单用户边界不提供登录、RBAC、多租户或恶意本机用户隔离。
 
-Fix priority is safety, correctness, interruption recovery, tool reliability, cost/latency, then usability. A known path/approval escape or repeatable side effect blocks release.
+可重复的路径/审批逃逸、重复采购决定、Java/Python 双业务真值或未授权远程入口均阻断发布。

@@ -1,12 +1,13 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToString } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ComparisonView } from "./ComparisonView";
 import { NewProcurementConversation, ProcurementConversation } from "./ProcurementConversation";
 import { QuoteWorkspace } from "./QuoteWorkspace";
 import { RequirementReview } from "./RequirementReview";
 import { procurementReportMarkdown, ReportView } from "./ReportView";
+import { procurementApi } from "./api";
 import type {
   ProcurementAuditReport,
   ProcurementMeta,
@@ -177,6 +178,72 @@ function allExcluded(): ProcurementRequest {
 }
 
 describe("procurement workflow views", () => {
+  it("surfaces a failed durable conversation operation", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        operation_id: "operation",
+        purchase_request_id: "request",
+        session_id: null,
+        run_id: null,
+        status: "accepted",
+        location: "/api/procurement/operations/operation",
+      }), { status: 202, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        operation_id: "operation",
+        operation_type: "start_conversation",
+        aggregate_id: "request",
+        generation: 1,
+        expected_task_version: 0,
+        payload_sha256: "a".repeat(64),
+        status: "failed",
+        attempt_count: 1,
+        retryable: false,
+        last_error: "采购数量无法从采购描述中识别",
+        result: null,
+        accepted_at: "2026-08-04T00:00:00Z",
+        completed_at: "2026-08-04T00:00:01Z",
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(procurementApi.startConversation(
+      "采购封箱胶带",
+      [new File(["quote"], "quote.pdf", { type: "application/pdf" })]
+    )).rejects.toThrow("采购数量无法从采购描述中识别");
+    vi.unstubAllGlobals();
+  });
+
+  it("surfaces a failed durable analysis operation", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        operation_id: "operation",
+        purchase_request_id: "request",
+        session_id: "session",
+        run_id: "run",
+        status: "accepted",
+        location: "/api/procurement/operations/operation",
+      }), { status: 202, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        operation_id: "operation",
+        operation_type: "analyze",
+        aggregate_id: "request",
+        generation: 1,
+        expected_task_version: 1,
+        payload_sha256: "a".repeat(64),
+        status: "failed",
+        attempt_count: 1,
+        retryable: false,
+        last_error: "缺少 USD 汇率不是有效数值",
+        result: null,
+        accepted_at: "2026-08-04T00:00:00Z",
+        completed_at: "2026-08-04T00:00:01Z",
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(procurementApi.analyze("request"))
+      .rejects.toThrow("缺少 USD 汇率不是有效数值");
+    vi.unstubAllGlobals();
+  });
+
   it("uses the server quote limit for a 30-file blind-test batch", () => {
     const html = renderToString(
       <NewProcurementConversation
@@ -264,6 +331,63 @@ describe("procurement workflow views", () => {
     expect((html.match(/data-field="material"/g) || []).length).toBe(1);
     expect((html.match(/data-field="color"/g) || []).length).toBe(1);
     expect(html).toContain("报价字段与来源证据");
+  });
+
+  it("maps separate V2 width, length, and layers specs to standard parsed fields", () => {
+    const dynamicRequest: ProcurementRequest = {
+      ...request,
+      schema_version: 2,
+      specifications: {
+        width: { label: "宽度", type: "number", value: "48", unit: "mm", match: "exact", priority: "hard" },
+        length: { label: "长度", type: "number", value: "100", unit: "m", match: "exact", priority: "hard" },
+        layers: { label: "瓦楞层数", type: "number", value: "5", unit: "", match: "exact", priority: "hard" },
+      },
+      quotes: [{
+        ...request.quotes[0],
+        extracted: {
+          ...request.quotes[0].extracted,
+          fields: {
+            ...request.quotes[0].extracted.fields,
+            width_mm: {
+              value: "48",
+              confidence: 0.84,
+              status: "accepted",
+              source: { document_kind: "xlsx", locator: "产品规格!B3", excerpt: "48×100000 mm", method: "spec_pattern" },
+            },
+            length_mm: {
+              value: "100000",
+              confidence: 0.84,
+              status: "accepted",
+              source: { document_kind: "xlsx", locator: "产品规格!B3", excerpt: "48×100000 mm", method: "spec_pattern" },
+            },
+            layers: {
+              value: 5,
+              confidence: 0.84,
+              status: "accepted",
+              source: { document_kind: "xlsx", locator: "产品规格!B3", excerpt: "五层瓦楞纸箱", method: "spec_pattern" },
+            },
+          },
+        },
+      }],
+    };
+    const html = renderToString(
+      <QuoteWorkspace
+        request={dynamicRequest}
+        meta={meta}
+        busy={null}
+        onUpload={async () => undefined}
+        onCorrect={async () => undefined}
+        onAnalyze={async () => undefined}
+      />
+    );
+
+    expect(html).toContain('data-field="width"');
+    expect(html).toContain('value="48"');
+    expect(html).toContain('data-field="length"');
+    expect(html).toContain('value="100000"');
+    expect(html).toContain('data-field="layers"');
+    expect(html).toContain('value="5"');
+    expect(html).not.toContain("原文未找到");
   });
 
   it("shows V2 specs from standard quote fields and hides duplicated MOQ", () => {
@@ -446,6 +570,22 @@ describe("procurement workflow views", () => {
     expect(html).toContain("报价字段尚未全部确认，请在右侧复核后继续。");
     expect(html).not.toContain("verification requires human review");
     expect(html).not.toContain("【采购决策已验证】");
+  });
+
+  it("renders an accepted task before the Agent binds its session", () => {
+    const client = new QueryClient();
+    const html = renderToString(
+      <QueryClientProvider client={client}>
+        <ProcurementConversation
+          request={{ ...request, session_id: null, analysis_run_id: null, status: "draft" }}
+          onResume={async () => undefined}
+          onRecover={async () => undefined}
+          onOpenComparison={() => undefined}
+        />
+      </QueryClientProvider>
+    );
+    expect(html).toContain("SESSION");
+    expect(html).toContain("准备中");
   });
 
   it("explains deterministic cost ranking after excluding hard violations", () => {

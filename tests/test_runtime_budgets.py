@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import sys
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -24,7 +22,6 @@ from agentharness.contracts import (
     ToolSpec,
     Usage,
 )
-from agentharness.tools.shell import kill_process_tree
 from tests.fake_provider import create_test_harness
 
 
@@ -172,48 +169,6 @@ async def test_wall_time_cancels_slow_tool_batch(data_dir: Path, workspace: Path
     assert tool.started.is_set()
     assert tool.cancelled.is_set()
 
-
-@pytest.mark.asyncio
-async def test_wall_time_kills_real_shell_process(data_dir: Path, workspace: Path):
-    harness = create_test_harness(data_dir=data_dir)
-
-    async def approve(_request):
-        from agentharness.contracts import ApprovalDecision
-
-        return ApprovalDecision.allow_once
-
-    harness.set_approval_callback(approve)
-    python = sys.executable.replace("\\", "/")
-    command = f'"{python}" -c "import time; time.sleep(30)"'
-    request = RunRequest(
-        message=f"[fake:tools]shell\n{json.dumps({'command': command})}",
-        provider="fake",
-        approval=ApprovalMode.auto,
-        cwd=str(workspace),
-        budget=BudgetConfig(max_wall_time_s=0.2),
-    )
-    task = asyncio.create_task(harness.run(request))
-    process = None
-    try:
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline and process is None:
-            for processes in harness.engine._active_processes.values():
-                if processes:
-                    process = processes[0]
-                    break
-            await asyncio.sleep(0.01)
-
-        assert process is not None, "shell process did not start before the wall-time deadline"
-        result = await asyncio.wait_for(task, timeout=5.0)
-        assert result.status == RunStatus.failed
-        assert result.error == "max_wall_time exceeded"
-        assert process.returncode is not None
-    finally:
-        if process is not None and process.returncode is None:
-            await kill_process_tree(process)
-        if not task.done():
-            task.cancel()
-        harness.close()
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
-DIST = ROOT / "src" / "agentharness" / "web_dist"
+DIST = WEB / "dist"
 
 
 def _snapshot() -> dict[str, str]:

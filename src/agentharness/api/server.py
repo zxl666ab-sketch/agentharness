@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 from contextlib import asynccontextmanager, suppress
@@ -17,18 +18,9 @@ from fastapi.staticfiles import StaticFiles
 
 from agentharness import __version__
 from agentharness.api.compatibility import API_CAPABILITIES, API_SCHEMA_VERSION
-from agentharness.api.execution import (
-    ApprovalDecisionBody,
-    CreateRunBody,
-    ResumeRunBody,
-    ToolRecoveryDecisionBody,
-    WebRunSupervisor,
-)
-from agentharness.api.procurement import procurement_router
+from agentharness.api.internal_agent import internal_agent_router
 from agentharness.api.reporting import build_run_report
 from agentharness.harness import Harness
-from agentharness.procurement import ProcurementService
-from agentharness.procurement.agent import ProcurementAgent
 
 LEASE_SWEEP_INTERVAL_S = 30.0
 
@@ -79,11 +71,10 @@ def _dev_cors_origins() -> list[str]:
 
 
 def _resolve_web_dist(web_dist: Path | str | None) -> Path:
-    packaged = Path(__file__).resolve().parents[1] / "web_dist"
     source = Path(__file__).resolve().parents[3] / "web" / "dist"
     if web_dist:
         return Path(web_dist)
-    return packaged if (packaged / "index.html").is_file() else source
+    return source
 
 
 def _load_web_build_id(dist: Path) -> str | None:
@@ -102,21 +93,19 @@ def create_app(
     *,
     workspace_roots: list[str | Path] | None = None,
     execution_enabled: bool = True,
+    internal_only: bool | None = None,
 ) -> FastAPI:
     owns_harness = harness is None
     runtime = harness or Harness(data_dir=data_dir)
-    supervisor = WebRunSupervisor(
-        runtime,
-        workspace_roots=workspace_roots,
-        execution_enabled=execution_enabled,
+    internal_mode = (
+        os.environ.get("AGENTHARNESS_INTERNAL_ONLY", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+        if internal_only is None
+        else internal_only
     )
-    procurement = ProcurementService(runtime)
-    procurement_agent = ProcurementAgent(
-        runtime,
-        procurement,
-        approval_broker=supervisor.approvals,
+    internal_token = os.environ.get(
+        "AGENT_INTERNAL_TOKEN", "development-only-change-me"
     )
-
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         sweeper = asyncio.create_task(_sweep_expired_leases(runtime))
@@ -126,8 +115,6 @@ def create_app(
             sweeper.cancel()
             with suppress(asyncio.CancelledError):
                 await sweeper
-            await procurement_agent.aclose()
-            await supervisor.aclose()
             if owns_harness:
                 await runtime.aclose()
 
@@ -137,9 +124,6 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.harness = runtime
-    app.state.run_supervisor = supervisor
-    app.state.procurement_service = procurement
-    app.state.procurement_agent = procurement_agent
     redactor = runtime.redactor
     public_redact = redactor.redact_public_obj
     dist = _resolve_web_dist(web_dist)
@@ -157,52 +141,28 @@ def create_app(
 
     def allowed_write(request: Request) -> bool:
         path = request.url.path
-        if request.method == "PUT":
-            parts = path.removeprefix("/api/procurement/requests/").strip("/").split("/")
-            return (
-                path.startswith("/api/procurement/requests/")
-                and len(parts) == 2
-                and bool(parts[0])
-                and parts[1] == "requirement"
-            )
-        if request.method == "DELETE":
-            parts = path.removeprefix("/api/procurement/requests/").strip("/").split("/")
-            return (
-                path.startswith("/api/procurement/requests/")
-                and len(parts) == 1
-                and bool(parts[0])
-            )
-        if request.method != "POST":
-            return False
-        if path == "/api/procurement/conversations":
+        if path == "/internal/v1/commands":
             return True
-        if path == "/api/procurement/config":
+        if path == "/internal/v1/config":
             return True
-        if path == "/api/procurement/requests" or path.startswith("/api/procurement/requests/"):
-            return True
-        if path == "/api/runs":
-            return True
-        if path.startswith("/api/runs/"):
-            parts = path.removeprefix("/api/runs/").strip("/").split("/")
-            return len(parts) == 2 and parts[1] in {"cancel", "resume"}
-        if path.startswith("/api/approvals/"):
-            parts = path.removeprefix("/api/approvals/").strip("/").split("/")
-            return len(parts) == 2 and parts[1] == "decision"
-        if path.startswith("/api/tool-invocations/"):
-            parts = path.removeprefix("/api/tool-invocations/").strip("/").split("/")
-            return len(parts) == 2 and parts[1] == "resolution"
         return False
 
     @app.middleware("http")
     async def restrict_writes(request: Request, call_next):  # type: ignore[no-untyped-def]
-        if (
-            not supervisor.execution_enabled
-            and request.url.path.startswith("/api/")
-            and request.url.path != "/api/health"
+        path = request.url.path
+        needs_internal_token = path.startswith("/internal/v1/") or (
+            internal_mode and path != "/api/health"
+        )
+        if needs_internal_token and not hmac.compare_digest(
+            request.headers.get("X-Agent-Internal-Token", ""), internal_token
         ):
             return JSONResponse(
-                {"detail": "Web execution is disabled for this server"},
-                status_code=403,
+                {
+                    "code": "invalid_internal_token",
+                    "message": "X-Agent-Internal-Token is required",
+                    "status": 401,
+                },
+                status_code=401,
             )
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} and not allowed_write(request):
             return JSONResponse(
@@ -212,7 +172,7 @@ def create_app(
             )
         return await call_next(request)
 
-    app.include_router(procurement_router(procurement, procurement_agent))
+    app.include_router(internal_agent_router(runtime))
 
     @app.get("/api/health")
     async def health(response: Response) -> dict[str, Any]:
@@ -228,73 +188,22 @@ def create_app(
                 "server_started_at": server_started_at,
                 "data_dir": str(runtime.data_dir.resolve()),
                 "max_global_seq": runtime.storage.max_global_seq(),
+                "internal_only": internal_mode,
             }
         )
 
     @app.get("/api/runtime")
     async def runtime_info(response: Response) -> dict[str, Any]:
         response.headers["Cache-Control"] = "no-store"
-        return public_redact(supervisor.describe())
-
-    @app.post("/api/runs", status_code=202)
-    async def create_run(body: CreateRunBody) -> dict[str, Any]:
-        try:
-            return public_redact(await supervisor.start(body))
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-
-    @app.post("/api/runs/{run_id}/cancel")
-    async def cancel_run(run_id: str) -> dict[str, Any]:
-        try:
-            return public_redact(await supervisor.cancel(run_id))
-        except KeyError:
-            raise HTTPException(404, "run not found") from None
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(409, str(exc)) from exc
-
-    @app.post("/api/runs/{run_id}/resume", status_code=202)
-    async def resume_run(run_id: str, body: ResumeRunBody | None = None) -> dict[str, Any]:
-        try:
-            return public_redact(await supervisor.resume(run_id, body or ResumeRunBody()))
-        except KeyError:
-            raise HTTPException(404, "run not found") from None
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
-        except (RuntimeError, ValueError) as exc:
-            raise HTTPException(409, str(exc)) from exc
-
-    @app.post("/api/approvals/{approval_id}/decision")
-    async def decide_approval(
-        approval_id: str, body: ApprovalDecisionBody
-    ) -> dict[str, Any]:
-        try:
-            return public_redact(supervisor.decide(approval_id, body))
-        except KeyError:
-            raise HTTPException(409, "approval is not pending in this process") from None
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(409, str(exc)) from exc
-
-    @app.post("/api/tool-invocations/{invocation_id}/resolution")
-    async def resolve_tool_recovery(
-        invocation_id: str,
-        body: ToolRecoveryDecisionBody,
-    ) -> dict[str, Any]:
-        try:
-            return public_redact(supervisor.resolve_tool_recovery(invocation_id, body))
-        except KeyError:
-            raise HTTPException(404, "tool invocation not found") from None
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(409, str(exc)) from exc
+        return public_redact(
+            {
+                "mode": "procurement_control_plane",
+                "execution_enabled": False,
+                "providers": sorted(runtime.providers),
+                "tools": sorted(runtime.tools),
+                "runs": len(runtime.list_runs()),
+            }
+        )
 
     @app.get("/api/sessions")
     async def sessions(limit: int = Query(100, ge=1, le=500)) -> list[dict[str, Any]]:
@@ -478,7 +387,7 @@ def create_app(
             },
         )
 
-    if dist.is_dir() and (dist / "index.html").is_file():
+    if not internal_mode and dist.is_dir() and (dist / "index.html").is_file():
         assets = dist / "assets"
         if assets.is_dir():
             app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")

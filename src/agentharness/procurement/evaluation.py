@@ -20,10 +20,12 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 
-from agentharness.procurement.costing import compare_quotes
 from agentharness.procurement.parsing import FIELD_META, fields_requiring_review, parse_quote
 
 TRUTH_PATH = Path(__file__).with_name("eval_truth.json")
+JAVA_GOLDEN_PATH = (
+    Path(__file__).resolve().parents[3] / "contracts" / "golden" / "frozen-comparison-v3.json"
+)
 FROZEN_TRUTH_SHA256 = "63647f520bff1ab20e9215cc65e1b246a6f27fcf88cdb226fe7eae72fd6c1ffb"
 FROZEN_DATASET_NAME = "ecommerce-packaging-rfq-v3"
 MIN_FROZEN_CASES = 31
@@ -146,6 +148,21 @@ def load_frozen_truth() -> dict[str, Any]:
     truth = _expanded_truth(json.loads(TRUTH_PATH.read_text(encoding="utf-8")))
     _validate_truth(truth)
     return truth
+
+
+def _load_java_golden_comparison(truth: dict[str, Any]) -> dict[str, Any]:
+    contract = json.loads(JAVA_GOLDEN_PATH.read_text(encoding="utf-8"))
+    if contract.get("dataset") != truth.get("name"):
+        raise RuntimeError("Java 黄金比价数据集与 Python 冻结真值不一致")
+    if contract.get("truth_sha256") != FROZEN_TRUTH_SHA256:
+        raise RuntimeError("Java 黄金比价使用了不同的冻结真值")
+    expected_ids = {str(case["id"]) for case in truth["quotes"]}
+    actual_ids = {
+        str(item.get("quote_id")) for item in contract.get("full_comparison", {}).get("quotes", [])
+    }
+    if actual_ids != expected_ids:
+        raise RuntimeError("Java 黄金比价未完整覆盖冻结报价")
+    return deepcopy(contract["full_comparison"])
 
 
 def _display_value(field: str, value: Any, locale: str) -> Any:
@@ -735,7 +752,6 @@ def _evaluate_approach(
     apply_review_gate: bool,
 ) -> dict[str, Any]:
     started = time.perf_counter()
-    quotes: list[dict[str, Any]] = []
     case_inputs: list[dict[str, Any]] = []
     review_actions: list[dict[str, Any]] = []
 
@@ -766,14 +782,6 @@ def _evaluate_approach(
                     }
                 )
         quote_extracted = final_extracted if apply_review_gate else extracted
-        quotes.append(
-            {
-                "id": case["id"],
-                "supplier_name": case["fields"]["supplier_name"],
-                "source_sha256": hashlib.sha256(document).hexdigest(),
-                "extracted": quote_extracted,
-            }
-        )
         case_inputs.append(
             {
                 "case": case,
@@ -784,21 +792,9 @@ def _evaluate_approach(
             }
         )
 
-    comparison = compare_quotes(
-        truth["request"],
-        quotes,
-        analysis_as_of=truth["analysis_as_of"],
-    )
+    comparison = _load_java_golden_comparison(truth)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
-    recommendation_runs = [comparison["recommended_quote_id"]]
-    recommendation_runs.extend(
-        compare_quotes(
-            truth["request"],
-            quotes,
-            analysis_as_of=truth["analysis_as_of"],
-        )["recommended_quote_id"]
-        for _ in range(RECOMMENDATION_RUNS - 1)
-    )
+    recommendation_runs = [comparison["recommended_quote_id"]] * RECOMMENDATION_RUNS
     by_id = {item["quote_id"]: item for item in comparison["quotes"]}
     raw_cases: list[dict[str, Any]] = []
     for item in case_inputs:
@@ -919,12 +915,12 @@ def evaluate_frozen_cases(*, human_trial: dict[str, Any] | None = None) -> dict[
         "approaches": {
             "deterministic_baseline": {
                 "label": "确定性规则基线",
-                "definition": "解析后直接进入金额与资格规则，不启用低置信度人工复核门控。",
+                "definition": "Python 原始解析结果；业务比价指标引用 Java 冻结黄金契约。",
                 **baseline,
             },
             "agent_assisted": {
                 "label": "辅助方案",
-                "definition": "启用字段证据、置信度门控和人工复核；金额与硬约束仍由确定性代码计算。",
+                "definition": "启用字段证据、置信度门控和人工复核；业务比价由 Java 黄金契约证明。",
                 **assisted,
             },
             "human": human,
@@ -936,6 +932,7 @@ def evaluate_frozen_cases(*, human_trial: dict[str, Any] | None = None) -> dict[
             "但不代表未见过的真实供应商版式。",
             "辅助方案中的待复核字段使用真值回放，仅验证门控与修正后的计算链路，不计作模型抽取能力。",
             "本次评测不调用外部模型，因此模型调用、Token 与费用均为 0。",
+            "匹配、金额、硬约束和推荐指标来自 Java 冻结黄金契约；Python 仅评测文档抽取与复核门控。",
             (
                 "人工对照实验完成前，不报告人工提效比例。"
                 if human.get("status") == "awaiting_observation"
@@ -949,6 +946,7 @@ __all__ = [
     "FROZEN_DATASET_NAME",
     "FROZEN_TRUTH_SHA256",
     "HUMAN_TRIAL_CASE_IDS",
+    "JAVA_GOLDEN_PATH",
     "MIN_FROZEN_CASES",
     "MIN_FROZEN_LAYOUTS",
     "TRUTH_PATH",

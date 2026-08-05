@@ -270,6 +270,11 @@ class ToolResult(BaseModel):
     name: str
     content: str
     final_output: str | None = None
+    # A tool can deliberately suspend a Run without claiming the business job is
+    # complete.  Procurement uses this for persisted review and formal-approval
+    # gates; ordinary tools leave both fields empty.
+    pause_status: Literal["require_human", "waiting_approval"] | None = None
+    pause_reason: str | None = None
     invocation_id: str | None = None
     is_error: bool = False
     artifact_id: str | None = None

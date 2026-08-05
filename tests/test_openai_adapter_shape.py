@@ -41,6 +41,14 @@ def test_openai_custom_base_url_defaults_to_chat_mode():
     assert msgs[1]["role"] == "user"
 
 
+def test_openai_root_base_url_is_normalized_to_v1():
+    adapter = OpenAIResponsesAdapter(
+        api_key="test", base_url="https://api.muzeai.top", use_env=False
+    )
+
+    assert adapter.base_url == "https://api.muzeai.top/v1"
+
+
 def test_openai_client_uses_provider_neutral_user_agent():
     fake_client = MagicMock()
     with patch("openai.AsyncOpenAI", return_value=fake_client) as constructor:

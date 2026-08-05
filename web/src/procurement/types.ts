@@ -3,7 +3,9 @@ export type ProcurementStatus =
   | "collecting"
   | "review"
   | "ready"
+  | "analyzing"
   | "analyzed"
+  | "approval_pending"
   | "approved"
   | "no_award";
 
@@ -178,7 +180,8 @@ export type ProcurementRequestSummary = {
   specifications: Record<string, string | number | boolean | RequirementSpecification>;
   constraints: Record<string, unknown>;
   status: ProcurementStatus;
-  session_id: string;
+  requirement_confirmed: boolean;
+  session_id: string | null;
   analysis_run_id?: string | null;
   current_snapshot_id?: string | null;
   approved_quote_id?: string | null;
@@ -203,10 +206,26 @@ export type ProcurementRequest = ProcurementRequestSummary & {
 };
 
 export type ProcurementRunAccepted = {
+  operation_id: string;
   purchase_request_id: string;
-  session_id: string;
-  run_id: string;
+  session_id: string | null;
+  run_id: string | null;
   status: "accepted";
+  location: string;
+};
+
+export type ProcurementOperation = {
+  operation_id: string;
+  operation_type: string;
+  aggregate_id: string;
+  generation: number;
+  expected_task_version: number;
+  payload_sha256: string;
+  status: "pending" | "dispatching" | "accepted" | "completed" | "failed";
+  attempt_count: number;
+  retryable: boolean;
+  last_error?: string | null;
+  result?: Record<string, unknown> | null;
 };
 
 export type ProcurementMeta = {

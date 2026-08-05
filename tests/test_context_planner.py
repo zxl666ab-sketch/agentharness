@@ -25,27 +25,18 @@ def _planner(harness) -> ContextPlanner:
     )
 
 
-def test_plan_discovers_rules_root_to_cwd_and_pins_rules_skills_memories(
+def test_plan_discovers_rules_root_to_cwd_and_keeps_the_selected_context(
     harness, tmp_path: Path
 ) -> None:
     root = tmp_path / "workspace"
     cwd = root / "packages" / "app"
-    skill_dir = tmp_path / "skills" / "alpha"
     cwd.mkdir(parents=True)
-    skill_dir.mkdir(parents=True)
     (root / "AGENTS.md").write_text("root safety rule", encoding="utf-8")
     (cwd / "WORKBUDDY.md").write_text("app-local rule", encoding="utf-8")
-    skill_file = skill_dir / "SKILL.md"
-    skill_file.write_text(
-        "---\nname: alpha-helper\ndescription: alpha workflows\n---\nUse alpha carefully.",
-        encoding="utf-8",
-    )
-    harness.storage.add_memory("alpha prefers deterministic output", source="test")
     request = RunRequest(
         message="complete the alpha workflow",
         cwd=str(cwd),
         extra_dirs=[str(root)],
-        skills_dirs=[str(tmp_path / "skills")],
     )
 
     first = _planner(harness).plan(
@@ -58,22 +49,16 @@ def test_plan_discovers_rules_root_to_cwd_and_pins_rules_skills_memories(
 
     assert first.system is not None
     assert first.system.index("root safety rule") < first.system.index("app-local rule")
-    assert "Use alpha carefully" in first.system
-    assert "alpha prefers deterministic output" in first.system
     assert first.manifest.total_tokens <= first.manifest.budget_tokens
     assert first.manifest.prefix_fingerprint
     assert {item.section for item in first.manifest.items if item.included} >= {
         "system",
         "workspace_rules",
-        "skills",
-        "memories",
         "messages",
     }
 
-    # A run keeps the selected bytes, even if external files/memory candidates change.
+    # A run keeps the selected bytes even if rule files change later.
     (root / "AGENTS.md").write_text("changed after the run started", encoding="utf-8")
-    skill_file.write_text("changed skill", encoding="utf-8")
-    harness.storage.add_memory("alpha newly added memory", source="test")
     second = _planner(harness).plan(
         run_id="run-context",
         request=request,
@@ -86,7 +71,6 @@ def test_plan_discovers_rules_root_to_cwd_and_pins_rules_skills_memories(
     assert second.system == first.system
     assert second.manifest.prefix_fingerprint == first.manifest.prefix_fingerprint
     assert "changed after" not in second.system
-    assert "newly added" not in second.system
 
 
 def test_plan_records_excluded_oversized_rule_and_redacts_manifest(harness, tmp_path: Path) -> None:

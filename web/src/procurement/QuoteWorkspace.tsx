@@ -102,6 +102,12 @@ function dynamicFieldMeta(spec: RequirementSpecification): FieldMeta {
 }
 
 const DYNAMIC_STANDARD_FIELD_ALIASES: Record<string, string[]> = {
+  width: ["width_mm"],
+  宽度: ["width_mm"],
+  widthmm: ["width_mm"],
+  length: ["length_mm"],
+  长度: ["length_mm"],
+  lengthmm: ["length_mm"],
   size: ["width_mm", "length_mm"],
   尺寸: ["width_mm", "length_mm"],
   成品尺寸: ["width_mm", "length_mm"],
@@ -118,6 +124,10 @@ const DYNAMIC_STANDARD_FIELD_ALIASES: Record<string, string[]> = {
   底色: ["color"],
   printcolors: ["print_colors"],
   印刷色数: ["print_colors"],
+  layers: ["layers"],
+  layercount: ["layers"],
+  瓦楞层数: ["layers"],
+  瓦楞纸层数: ["layers"],
   moq: ["moq"],
   最小起订量: ["moq"],
 };
@@ -310,10 +320,25 @@ export function QuoteWorkspace({
     return [...fixedEntries, ...dynamicEntries];
   }, [meta.field_meta, onlyReview, request.schema_version, request.specifications, selected]);
   const canAnalyze =
+    request.requirement_confirmed &&
     request.quote_count >= 2 &&
     request.unresolved_field_count === 0 &&
     request.status !== "approved" &&
     request.status !== "no_award";
+  const reviewSummary = !request.requirement_confirmed
+    ? request.unresolved_field_count
+      ? `需求待人工确认，${request.unresolved_field_count} 项待复核`
+      : "需求待人工确认"
+    : request.unresolved_field_count
+      ? `${request.unresolved_field_count} 项待复核`
+      : "字段已就绪";
+  const reviewGuidance = !request.requirement_confirmed
+    ? request.unresolved_field_count
+      ? "请先保存采购需求人工确认，并逐项复核报价字段"
+      : "请先保存采购需求人工确认"
+    : request.quote_count < 2
+      ? "至少需要 2 家报价"
+      : "金额将由确定性规则核算";
 
   return (
     <div className="proc-workspace-grid">
@@ -370,8 +395,8 @@ export function QuoteWorkspace({
 
         <div className="proc-analysis-bar">
           <div>
-            <strong>{request.unresolved_field_count ? `${request.unresolved_field_count} 项待复核` : "字段已就绪"}</strong>
-              <span>{request.quote_count < 2 ? "至少需要 2 家报价" : "金额将由确定性规则核算"}</span>
+            <strong>{reviewSummary}</strong>
+            <span>{reviewGuidance}</span>
           </div>
           <button
             className="proc-button primary"

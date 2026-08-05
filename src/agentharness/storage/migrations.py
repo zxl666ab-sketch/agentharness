@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -369,6 +369,21 @@ MIGRATIONS: dict[int, str] = {
         ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1;
     ALTER TABLE procurement_requests
         ADD COLUMN quantity_decimal TEXT;
+    """,
+    11: """
+    CREATE TABLE IF NOT EXISTS internal_operations (
+        operation_id TEXT PRIMARY KEY,
+        payload_sha256 TEXT NOT NULL,
+        operation_type TEXT NOT NULL,
+        aggregate_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        result_json TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_internal_operations_status
+        ON internal_operations(status, updated_at);
     """,
 }
 

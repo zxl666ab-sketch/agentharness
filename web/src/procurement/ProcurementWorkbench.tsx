@@ -19,7 +19,7 @@ import {
   Wifi,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useAgentStream } from "../useAgentStream";
 import { AuditView } from "./AuditView";
@@ -53,7 +53,9 @@ const STATUS: Record<ProcurementStatus, { label: string; tone: string; step: num
   collecting: { label: "待上传报价", tone: "neutral", step: 1 },
   review: { label: "待复核", tone: "warning", step: 2 },
   ready: { label: "待比价", tone: "info", step: 3 },
+  analyzing: { label: "分析中", tone: "info", step: 3 },
   analyzed: { label: "待审批", tone: "warning", step: 4 },
+  approval_pending: { label: "等待审批", tone: "warning", step: 4 },
   approved: { label: "已批准", tone: "success", step: 5 },
   no_award: { label: "本轮流标", tone: "neutral", step: 5 },
 };
@@ -134,6 +136,12 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     queryKey: ["procurement-request", selectedId],
     queryFn: () => procurementApi.request(selectedId!),
     enabled: !!selectedId,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status && ["draft", "analyzing", "approval_pending"].includes(status)
+        ? 1_500
+        : false;
+    },
   });
   const reportQuery = useQuery({
     queryKey: ["procurement-report", selectedId],
@@ -141,6 +149,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     enabled: !!selectedId && activeTab === "report" && !!detailQuery.data?.decision,
   });
   const stream = useAgentStream(true, 0);
+  const disconnectPolls = useRef(0);
 
   const requests = useMemo(() => requestsQuery.data || [], [requestsQuery.data]);
   const filtered = useMemo(() => {
@@ -172,6 +181,25 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
       queryClient.invalidateQueries({ queryKey: ["run-checkpoint", currentRunId] }),
     ]);
   }, [currentRunId, latestEvent, queryClient, selectedId]);
+
+  useEffect(() => {
+    if (stream.status !== "error" || !selectedId) {
+      disconnectPolls.current = 0;
+      return;
+    }
+    const timer = window.setInterval(() => {
+      if (disconnectPolls.current >= 15) {
+        window.clearInterval(timer);
+        return;
+      }
+      disconnectPolls.current += 1;
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["procurement-request", selectedId] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-requests"] }),
+      ]);
+    }, 2_000);
+    return () => window.clearInterval(timer);
+  }, [queryClient, selectedId, stream.status]);
 
   async function commit(updated: ProcurementRequest) {
     queryClient.setQueryData(["procurement-request", updated.id], updated);
