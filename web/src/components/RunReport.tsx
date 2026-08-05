@@ -4,7 +4,6 @@ import {
   CheckCircle2,
   ChevronRight,
   Clock3,
-  FileDiff,
   Fingerprint,
   Gauge,
   History,
@@ -67,8 +66,6 @@ function validatorLabel(validator?: string | null) {
   if (!validator) return "验收规则";
   return {
     output: "输出内容",
-    file: "文件结果",
-    command: "验证命令",
     procurement_deterministic_rules: "采购确定性规则",
   }[validator] || validator;
 }
@@ -77,9 +74,6 @@ function toolLabel(tool?: string | null) {
   if (!tool) return "系统操作";
   return {
     "procurement.select_supplier": "选定供应商",
-    write_file: "写入文件",
-    read_file: "读取文件",
-    shell: "执行命令",
   }[tool] || tool;
 }
 
@@ -218,35 +212,6 @@ export function RunReport({ report, loading = false, error = null }: Props) {
                 </div>
               </details>
             ))}
-          </div>
-        </details>
-
-        <details className="report-section">
-          <summary>
-            <span><FileDiff size={15} />文件变更</span>
-            <span>{report.workspace_changes.length}</span>
-            <ChevronRight size={15} />
-          </summary>
-          <div className="report-section-body">
-            {report.workspace_changes.length ? (
-              <div className="report-records">
-                {report.workspace_changes.map((change) => (
-                  <div className="report-record" key={change.invocation_id}>
-                    <div>
-                      <strong>{change.path || change.tool}</strong>
-                      <span className={change.changed ? "record-success" : "record-danger"}>
-                        {statusText(change.status)}
-                      </span>
-                    </div>
-                    <code>变更前 {change.expected_version?.slice(0, 12) || "未知"}</code>
-                    <code>变更后 {change.resulting_version?.slice(0, 12) || "未知"}</code>
-                    <code>参数 {change.arguments_sha256.slice(0, 12)}</code>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="report-empty">没有持久化的工作区文件写入记录。</p>
-            )}
           </div>
         </details>
 

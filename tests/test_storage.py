@@ -249,16 +249,6 @@ def test_reads_use_readonly_connection_concurrent_with_writes(data_dir):
         store.close()
 
 
-def test_memory_fts(data_dir):
-    store = Storage(data_dir)
-    mid = store.add_memory("The sky is blue on earth", source="test", scope="global")
-    assert mid
-    hits = store.search_memories("sky blue")
-    assert hits
-    assert "sky" in hits[0]["content"]
-    store.close()
-
-
 def test_artifacts_sha(data_dir):
     store = Storage(data_dir)
     meta = store.artifacts.put("payload-data-12345", content_type="text/plain")

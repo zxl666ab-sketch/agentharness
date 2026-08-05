@@ -1,14 +1,12 @@
-"""Versioned contract shared by the Web API and its launch helpers."""
+"""Versioned procurement Web contract shared by the API and launch helpers."""
 
 from __future__ import annotations
 
-API_SCHEMA_VERSION = 9
+API_SCHEMA_VERSION = 11
 API_CAPABILITIES = (
-    "run_execution_v1",
-    "interactive_approval_v1",
-    "run_resume_v1",
-    "sse_events_v1",
-    "tool_execution_v2",
-    "verification_reports_v1",
     "procurement_sourcing_v1",
+    "procurement_approval_v1",
+    "procurement_no_award_v1",
+    "procurement_audit_v1",
+    "procurement_stream_v1",
 )

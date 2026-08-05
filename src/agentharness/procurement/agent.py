@@ -832,24 +832,42 @@ class ProcurementAgent:
         return payload if isinstance(payload, dict) else None
 
     def _profile_from_persisted_config(
-        self, payload: dict[str, Any]
+        self, payload: dict[str, Any], *, defaults: ProcurementRunProfile | None = None
     ) -> ProcurementRunProfile:
-        provider = str(payload.get("provider") or PROCUREMENT_LIVE_PROVIDER).strip().lower()
+        defaults = defaults or procurement_run_profile_from_env()
+        provider = str(payload.get("provider") or defaults.provider).strip().lower()
         if provider == PROCUREMENT_PROVIDER:
             return _fake_run_profile()
         if provider != PROCUREMENT_LIVE_PROVIDER:
             raise ValueError("本地采购模型配置的 Provider 不受支持")
-        model = str(payload.get("model") or "gpt-4o-mini").strip() or "gpt-4o-mini"
-        input_price = self._setting_number(payload.get("input_price_per_million_usd"), 0)
-        output_price = self._setting_number(payload.get("output_price_per_million_usd"), 0)
-        cached_price = self._setting_number(
-            payload.get("cached_input_price_per_million_usd"), input_price
+        model = str(payload.get("model") or defaults.model).strip() or defaults.model
+        input_price = self._setting_number(
+            payload.get("input_price_per_million_usd"),
+            defaults.pricing.input_per_million_usd,
         )
-        max_cost = self._setting_number(payload.get("max_cost_usd"))
-        reasoning_effort = str(payload.get("reasoning_effort") or "").strip().lower() or None
+        output_price = self._setting_number(
+            payload.get("output_price_per_million_usd"),
+            defaults.pricing.output_per_million_usd,
+        )
+        cached_price = self._setting_number(
+            payload.get("cached_input_price_per_million_usd"),
+            defaults.pricing.cached_input_per_million_usd,
+        )
+        max_cost = self._setting_number(
+            payload.get("max_cost_usd"), defaults.budget.max_cost_usd
+        )
+        reasoning_effort = str(
+            payload.get("reasoning_effort")
+            if "reasoning_effort" in payload
+            else (defaults.reasoning_effort or "")
+        ).strip().lower() or None
         if reasoning_effort == "auto":
             reasoning_effort = None
-        api_mode = str(payload.get("api_mode") or "auto").strip().lower() or "auto"
+        api_mode = str(
+            payload.get("api_mode")
+            if "api_mode" in payload
+            else (defaults.api_mode or "auto")
+        ).strip().lower() or "auto"
         if api_mode not in {"auto", "chat", "responses"}:
             api_mode = "auto"
         return ProcurementRunProfile(
@@ -861,27 +879,38 @@ class ProcurementAgent:
                 cached_input_per_million_usd=cached_price,
             ),
             budget=BudgetConfig(
-                max_steps=20,
-                max_wall_time_s=180,
-                max_tokens=50_000,
-                max_context_tokens=20_000,
-                max_output_length=20_000,
+                max_steps=defaults.budget.max_steps,
+                max_wall_time_s=defaults.budget.max_wall_time_s,
+                max_tokens=defaults.budget.max_tokens,
+                max_context_tokens=defaults.budget.max_context_tokens,
+                max_output_length=defaults.budget.max_output_length,
                 max_cost_usd=max_cost,
-                max_tool_calls=30,
-                max_tool_calls_per_turn=1,
+                max_tool_calls=defaults.budget.max_tool_calls,
+                max_tool_calls_per_turn=defaults.budget.max_tool_calls_per_turn,
             ),
             reasoning_effort=reasoning_effort,
-            base_url=str(payload.get("base_url") or "").strip() or None,
+            base_url=(
+                str(payload.get("base_url") or "").strip() or None
+                if "base_url" in payload
+                else defaults.base_url
+            ),
             api_mode=api_mode,
-            api_key=str(payload.get("api_key") or "").strip() or None,
+            api_key=(
+                str(payload.get("api_key") or "").strip() or defaults.api_key
+                if "api_key" in payload
+                else defaults.api_key
+            ),
         )
 
     def _restore_persisted_model_config(self) -> None:
         payload = self._read_persisted_model_config()
-        if payload is None:
+        # Only settings explicitly saved by the model-config drawer may
+        # override the process environment. Older files were also used for
+        # internal defaults and must not mask OPENAI_* / procurement env vars.
+        if payload is None or payload.get("source") != "ui":
             return
         try:
-            profile = self._profile_from_persisted_config(payload)
+            profile = self._profile_from_persisted_config(payload, defaults=self.run_profile)
             if profile.provider == PROCUREMENT_LIVE_PROVIDER:
                 from agentharness.providers.openai_adapter import OpenAIResponsesAdapter
 
@@ -909,6 +938,7 @@ class ProcurementAgent:
             else None
         )
         payload = {
+            "source": "ui",
             "provider": profile.provider,
             "model": profile.model,
             "base_url": profile.base_url,
@@ -946,8 +976,8 @@ class ProcurementAgent:
         """Analyze a request created through the structured compatibility API."""
 
         request = self.service.get_request(request_id)
-        if request.get("approved_quote_id"):
-            raise ProcurementError("该采购需求已经完成供应商审批")
+        if request.get("decision") is not None:
+            raise ProcurementError("该采购需求已经形成审批结论")
         if request["quote_count"] < 2:
             raise ProcurementError("至少上传 2 家供应商报价后才能比价")
         if request["unresolved_field_count"]:

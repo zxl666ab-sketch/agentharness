@@ -34,6 +34,7 @@ const EVENT_LABELS: Record<string, string> = {
   comparison_superseded: "旧比价快照审批已过期",
   supplier_selection_requested: "Agent 已请求人工选择供应商",
   supplier_approved: "供应商已人工批准",
+  procurement_no_award: "采购员确认无合格报价",
 };
 
 const FIELD_LABELS: Record<string, string> = {
@@ -73,6 +74,7 @@ function businessText(value: string) {
 }
 
 export function procurementReportMarkdown(report: ProcurementAuditReport) {
+  const noAward = report.decision?.decision === "no_award";
   const selected = report.comparison?.result.quotes.find(
     (quote) => quote.quote_id === report.decision?.quote_id
   );
@@ -99,6 +101,7 @@ export function procurementReportMarkdown(report: ProcurementAuditReport) {
     "",
     "## 审批结论",
     "",
+    `- 审批结论：${noAward ? "本轮无合格报价" : "选定供应商"}`,
     `- 选定供应商：${selected?.supplier_name || "-"}`,
     `- 总到货成本：${selected ? `${selected.cost.landed_total_base} ${selected.cost.base_currency}` : "-"}`,
     `- 到货单价：${selected ? `${selected.cost.landed_unit_base} ${selected.cost.base_currency}` : "-"}`,
@@ -156,20 +159,21 @@ export function ReportView({ request, report, loading, error = null }: Props) {
   const selected = request.comparison.result.quotes.find(
     (quote) => quote.quote_id === request.decision?.quote_id
   );
+  const noAward = request.decision.decision === "no_award";
 
   return (
     <div className="proc-report-view">
       <header className="proc-report-hero">
-        <div className="proc-report-verdict"><CheckCircle2 size={24} /><span><small>审批结论</small><strong>已选定 {selected?.supplier_name}</strong></span></div>
+        <div className="proc-report-verdict"><CheckCircle2 size={24} /><span><small>审批结论</small><strong>{noAward ? "本轮无合格报价" : `已选定 ${selected?.supplier_name}`}</strong></span></div>
         <div className="proc-report-actions">
           <button className="proc-icon-button" type="button" title="打印报告" aria-label="打印报告" onClick={() => window.print()}><Printer size={17} /></button>
           <button className="proc-icon-button" type="button" title="下载中文采购报告" aria-label="下载中文采购报告" disabled={!report} onClick={() => report && downloadReport(report)}><Download size={17} /></button>
         </div>
-        <p>{request.decision.note || "已核对报价原件、硬性条件与到货成本。"}</p>
+        <p>{request.decision.note || (noAward ? "全部报价未通过硬性条件，确认本轮不选定供应商。" : "已核对报价原件、硬性条件与到货成本。")}</p>
         <div className="proc-report-metrics">
-          <span><small>总到货成本</small><strong>{selected ? `${selected.cost.landed_total_base} ${selected.cost.base_currency}` : "-"}</strong></span>
-          <span><small>到货单价</small><strong>{selected ? `${selected.cost.landed_unit_base} ${selected.cost.base_currency}` : "-"}</strong></span>
-          <span><small>起订量 / 交期</small><strong>{selected ? `${selected.commercial.moq.toLocaleString("zh-CN")} / ${selected.commercial.lead_time_days} 天` : "-"}</strong></span>
+          <span><small>{noAward ? "合格报价" : "总到货成本"}</small><strong>{noAward ? "0 家" : selected ? `${selected.cost.landed_total_base} ${selected.cost.base_currency}` : "-"}</strong></span>
+          <span><small>{noAward ? "淘汰报价" : "到货单价"}</small><strong>{noAward ? `${request.comparison.result.excluded_count} 家` : selected ? `${selected.cost.landed_unit_base} ${selected.cost.base_currency}` : "-"}</strong></span>
+          <span><small>{noAward ? "后续动作" : "起订量 / 交期"}</small><strong>{noAward ? "重新询价" : selected ? `${selected.commercial.moq.toLocaleString("zh-CN")} / ${selected.commercial.lead_time_days} 天` : "-"}</strong></span>
           <span><small>审批人</small><strong>{request.decision.actor}</strong></span>
         </div>
       </header>

@@ -16,6 +16,7 @@ import {
 import { FormEvent, useMemo, useState } from "react";
 
 import { api, type ToolInvocationRow } from "../api/client";
+import { friendlyProcurementError } from "./api";
 import type { ProcurementRequest } from "./types";
 
 const TOOL_LABELS: Record<string, string> = {
@@ -252,7 +253,7 @@ export function ProcurementConversation({
   );
   const tools = toolsQuery.data || [];
   const status = runQuery.data?.status || (runId ? "pending" : "");
-  const needsClarification = status === "require_human" && !request.comparison && request.unresolved_field_count > 0;
+  const needsClarification = status === "require_human";
   const canRecover = status === "failed" || status === "cancelled" || status === "interrupted";
 
   async function submitReply(event: FormEvent) {
@@ -307,17 +308,17 @@ export function ProcurementConversation({
           </section>
         ) : null}
         {runQuery.isError ? <p className="proc-conversation-error" role="alert">运行状态读取失败</p> : null}
-        {canRecover && runQuery.data?.error ? <p className="proc-conversation-error" role="alert">{runQuery.data.error}</p> : null}
+        {canRecover && runQuery.data?.error ? <p className="proc-conversation-error" role="alert">{friendlyProcurementError(runQuery.data.error)}</p> : null}
         {actionError ? <p className="proc-conversation-error" role="alert">{actionError}</p> : null}
       </div>
       {needsClarification ? (
         <form className="proc-conversation-composer reply" onSubmit={(event) => void submitReply(event)}>
-          <textarea aria-label="补充澄清信息" value={reply} onChange={(event) => setReply(event.target.value)} placeholder="补充 Agent 请求的信息" maxLength={20_000} disabled={sending} />
+          <textarea aria-label="补充澄清信息" value={reply} onChange={(event) => setReply(event.target.value)} placeholder="补充或修正采购规格" maxLength={20_000} disabled={sending} />
           <button type="submit" title="提交澄清" aria-label="提交澄清" disabled={sending || !reply.trim()}>{sending ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button>
         </form>
       ) : null}
       {request.comparison && !request.decision ? (
-        <button className="proc-conversation-next" type="button" onClick={onOpenComparison}><CheckCircle2 size={15} />查看比价并选择供应商</button>
+        <button className="proc-conversation-next" type="button" onClick={onOpenComparison}><CheckCircle2 size={15} />{request.comparison.result.eligible_count ? "查看比价并选择供应商" : "查看淘汰原因并确认结论"}</button>
       ) : null}
       {canRecover ? (
         <button className="proc-conversation-next warning" type="button" onClick={() => void onRecover()}><RefreshCw size={15} />从持久化状态重新分析</button>

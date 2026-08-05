@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 11
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -333,6 +333,64 @@ MIGRATIONS: dict[int, str] = {
     );
     CREATE INDEX IF NOT EXISTS idx_procurement_audit_request
         ON procurement_audit_events(request_id, created_at);
+    """,
+    10: """
+    ALTER TABLE procurement_decisions RENAME TO procurement_decisions_v9;
+    CREATE TABLE procurement_decisions (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        snapshot_id TEXT NOT NULL,
+        quote_id TEXT,
+        run_id TEXT NOT NULL,
+        approval_id TEXT,
+        decision TEXT NOT NULL,
+        note TEXT,
+        actor TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(request_id),
+        FOREIGN KEY (request_id) REFERENCES procurement_requests(id),
+        FOREIGN KEY (snapshot_id) REFERENCES procurement_comparison_snapshots(id),
+        FOREIGN KEY (quote_id) REFERENCES procurement_quotes(id),
+        FOREIGN KEY (run_id) REFERENCES runs(id)
+    );
+    INSERT INTO procurement_decisions(
+        id, request_id, snapshot_id, quote_id, run_id, approval_id,
+        decision, note, actor, created_at
+    )
+    SELECT
+        id, request_id, snapshot_id, quote_id, run_id, approval_id,
+        decision, note, actor, created_at
+    FROM procurement_decisions_v9;
+    DROP TABLE procurement_decisions_v9;
+    """,
+    11: """
+    ALTER TABLE procurement_decisions RENAME TO procurement_decisions_v10;
+    CREATE TABLE procurement_decisions (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        snapshot_id TEXT NOT NULL,
+        quote_id TEXT,
+        run_id TEXT NOT NULL,
+        approval_id TEXT,
+        decision TEXT NOT NULL,
+        note TEXT,
+        actor TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(request_id),
+        FOREIGN KEY (request_id) REFERENCES procurement_requests(id),
+        FOREIGN KEY (snapshot_id) REFERENCES procurement_comparison_snapshots(id),
+        FOREIGN KEY (quote_id) REFERENCES procurement_quotes(id),
+        FOREIGN KEY (run_id) REFERENCES runs(id)
+    );
+    INSERT INTO procurement_decisions(
+        id, request_id, snapshot_id, quote_id, run_id, approval_id,
+        decision, note, actor, created_at
+    )
+    SELECT
+        id, request_id, snapshot_id, quote_id, run_id, approval_id,
+        decision, note, actor, created_at
+    FROM procurement_decisions_v10;
+    DROP TABLE procurement_decisions_v10;
     """,
 }
 

@@ -1,4 +1,4 @@
-"""Small public facade for the production Agent Runtime."""
+"""Small public facade for the procurement run runtime."""
 
 from __future__ import annotations
 
@@ -24,17 +24,14 @@ from agentharness.contracts import (
 from agentharness.engine.runtime import ApprovalCallback, RunEngine
 from agentharness.engine.tool_execution import validate_tool_spec
 from agentharness.providers.openai_adapter import OpenAIResponsesAdapter
-from agentharness.security.egress import EgressPolicy, default_policy
 from agentharness.security.redaction import Redactor, default_redactor
 from agentharness.storage.sqlite import Storage
-from agentharness.tools import create_default_tools
-from agentharness.tools.mcp_tool import MCPBridge
 
 EventCallback = Callable[[EventEnvelope], None]
 
 
 class Harness:
-    """Top-level runtime facade used directly by the Web control plane."""
+    """Runtime facade used by the procurement service and audit API."""
 
     def __init__(
         self,
@@ -44,7 +41,6 @@ class Harness:
         approval_callback: ApprovalCallback | None = None,
         providers: dict[str, Any] | None = None,
         tools: dict[str, Any] | None = None,
-        egress_policy: EgressPolicy | None = None,
         lease_owner_id: str | None = None,
         lease_ttl_s: float = 60.0,
         lease_heartbeat_s: float = 10.0,
@@ -52,16 +48,12 @@ class Harness:
         self.data_dir = Path(data_dir or Path.home() / ".agentharness").expanduser()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.redactor = redactor or default_redactor
-        self.egress_policy = egress_policy or default_policy()
         self.storage = Storage(self.data_dir, redactor=self.redactor)
         self.recovered_run_ids = self.storage.recover_expired_run_leases()
-        self.mcp_bridge = MCPBridge(redactor=self.redactor, policy=self.egress_policy)
-        self._process_registry: dict[str, list[Any]] = {}
-        self.tools: dict[str, Any] = tools or create_default_tools(
-            process_registry=self._process_registry,
-            mcp_bridge=self.mcp_bridge,
-            egress_policy=self.egress_policy,
-        )
+        # Procurement registers its four domain tools after constructing the
+        # shared runtime. Keeping the registry empty here prevents accidental
+        # non-procurement tools from entering the product boundary.
+        self.tools: dict[str, Any] = tools or {}
         for tool in self.tools.values():
             validate_tool_spec(tool.spec)
         self.providers: dict[str, Any] = providers or {
@@ -76,8 +68,6 @@ class Harness:
             redactor=self.redactor,
             approval_callback=approval_callback,
             on_events=self._notify_events,
-            mcp_bridge=self.mcp_bridge,
-            process_registry=self._process_registry,
             lease_owner_id=lease_owner_id,
             lease_ttl_s=lease_ttl_s,
             lease_heartbeat_s=lease_heartbeat_s,
@@ -222,18 +212,6 @@ class Harness:
     def unpin_run(self, run_id: str) -> bool:
         return self.storage.unpin_run(run_id)
 
-    def maintenance_stats(self) -> dict[str, Any]:
-        return self.storage.maintenance_stats()
-
-    def plan_gc(self, *, older_than_days: int = 30) -> dict[str, Any]:
-        return self.storage.plan_gc(older_than_days=older_than_days)
-
-    def apply_gc(self, *, older_than_days: int = 30) -> dict[str, Any]:
-        return self.storage.apply_gc(older_than_days=older_than_days)
-
-    def compact_storage(self) -> dict[str, int]:
-        return self.storage.compact()
-
     def get_session_transcript(self, session_id: str) -> list[ConversationTurn]:
         turns: list[ConversationTurn] = []
         for run in self.storage.list_top_level_runs(session_id):
@@ -296,19 +274,8 @@ class Harness:
                     pass
 
     def doctor(self) -> dict[str, Any]:
-        from agentharness.tools.shell import docker_diagnostics
-
         packaged_web = Path(__file__).resolve().parent / "web_dist" / "index.html"
         source_web = Path(__file__).resolve().parents[2] / "web" / "dist" / "index.html"
-        browser_runtime = "missing"
-        try:
-            from playwright.sync_api import sync_playwright
-
-            with sync_playwright() as playwright:
-                if Path(playwright.chromium.executable_path).is_file():
-                    browser_runtime = "ready"
-        except Exception:  # noqa: BLE001
-            pass
         return {
             "data_dir": str(self.data_dir),
             "db": str(self.storage.db_path),
@@ -316,9 +283,6 @@ class Harness:
             "sqlite_integrity": self.storage.integrity_check(),
             "schema_version": self.storage.schema_version(),
             "web_build": "ready" if packaged_web.is_file() or source_web.is_file() else "missing",
-            "browser_runtime": browser_runtime,
-            "shell_local": "ready (governed host execution; not container isolation)",
-            "shell_docker": docker_diagnostics(),
             "providers": list(self.providers),
             "tools": list(self.tools),
             "sessions": len(self.list_sessions()),
@@ -364,11 +328,6 @@ class Harness:
                         await result
                 except Exception as exc:  # noqa: BLE001
                     errors.append(exc)
-        try:
-            await self.mcp_bridge.close_all()
-        except Exception as exc:  # noqa: BLE001
-            errors.append(exc)
-
         with self._event_subs_lock:
             self._event_subs.clear()
         try:
@@ -380,15 +339,8 @@ class Harness:
             raise ExceptionGroup("Harness cleanup failed", errors)
 
     def _has_open_async_resources(self) -> bool:
-        if self.engine._active_run_ids or any(self._process_registry.values()):
+        if self.engine._active_run_ids:
             return True
-        if self.mcp_bridge._sessions:
-            return True
-        for tool in self.tools.values():
-            if getattr(tool, "_playwright", None) is not None:
-                return True
-            if getattr(tool, "_browsers", None):
-                return True
         return any(getattr(provider, "_client", None) is not None for provider in self.providers.values())
 
     def close(self) -> None:

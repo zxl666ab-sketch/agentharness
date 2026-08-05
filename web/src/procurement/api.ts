@@ -1,5 +1,4 @@
 import type {
-  CreateProcurementRequest,
   EvaluationResult,
   ProcurementAuditReport,
   ProcurementMeta,
@@ -31,6 +30,14 @@ const FIELD_LABELS: Record<string, string> = {
 };
 
 type ValidationIssue = { msg?: string; loc?: Array<string | number> };
+
+/** Convert provider gateway failures into an actionable message for buyers. */
+export function friendlyProcurementError(message: string): string {
+  if (message.trim().toLowerCase() === "your request was blocked.") {
+    return "模型网关拒绝了带工具调用的采购分析。请在模型配置中切换支持工具调用的模型或 API 模式，然后点击“从持久化状态重新分析”；采购需求和附件已保留。";
+  }
+  return message;
+}
 
 function validationMessage(issue: ValidationIssue) {
   const field = String(issue.loc?.at(-1) || "表单");
@@ -108,8 +115,6 @@ export const procurementApi = {
   requests: () => requestJson<ProcurementRequestSummary[]>("/api/procurement/requests?limit=200"),
   request: (requestId: string) =>
     requestJson<ProcurementRequest>(`/api/procurement/requests/${requestId}`),
-  createRequest: (input: CreateProcurementRequest) =>
-    postJson<ProcurementRequest>("/api/procurement/requests", input),
   async startConversation(message: string, files: File[]) {
     const attachments = await Promise.all(
       files.map(async (file) => ({
@@ -151,7 +156,8 @@ export const procurementApi = {
     input: {
       snapshot_id: string;
       input_sha256: string;
-      quote_id: string;
+      decision?: "approved" | "no_award";
+      quote_id?: string;
       confirmed: boolean;
       note?: string;
     }

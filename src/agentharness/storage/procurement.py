@@ -248,12 +248,15 @@ class ProcurementRepo:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 self._insert_decision(safe_decision)
+                decision_type = str(safe_decision["decision"])
+                status = "approved" if decision_type == "approved" else "no_award"
                 cursor = self._conn.execute(
                     """UPDATE procurement_requests
-                       SET status = 'approved', approved_quote_id = ?, updated_at = ?
-                       WHERE id = ? AND approved_quote_id IS NULL""",
+                       SET status = ?, approved_quote_id = ?, updated_at = ?
+                       WHERE id = ?""",
                     (
-                        safe_decision["quote_id"],
+                        status,
+                        safe_decision.get("quote_id"),
                         _utcnow(),
                         safe_decision["request_id"],
                     ),
@@ -276,9 +279,9 @@ class ProcurementRepo:
                 safe["id"],
                 safe["request_id"],
                 safe["snapshot_id"],
-                safe["quote_id"],
+                safe.get("quote_id"),
                 safe["run_id"],
-                safe["approval_id"],
+                safe.get("approval_id"),
                 safe["decision"],
                 safe.get("note"),
                 safe["actor"],

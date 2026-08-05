@@ -4,6 +4,7 @@ export type ProcurementStatus =
   | "review"
   | "ready"
   | "analyzed"
+  | "no_award"
   | "approved";
 
 export type FieldMeta = {
@@ -140,10 +141,10 @@ export type ProcurementDecision = {
   id: string;
   request_id: string;
   snapshot_id: string;
-  quote_id: string;
+  quote_id: string | null;
   run_id: string;
-  approval_id: string;
-  decision: "approved";
+  approval_id: string | null;
+  decision: "approved" | "no_award";
   note?: string | null;
   actor: string;
   created_at: string;

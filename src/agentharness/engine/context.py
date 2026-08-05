@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
-from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -21,12 +19,10 @@ from agentharness.contracts import (
     ToolSpec,
     Usage,
 )
-from agentharness.memory_scope import session_memory_scope, workspace_memory_scope
 from agentharness.security.redaction import Redactor, default_redactor
 
 _RULE_FILES = ("AGENTS.md", "WORKBUDDY.md")
 _MAX_RULE_BYTES = 64 * 1024
-_MAX_SKILL_BYTES = 64 * 1024
 
 
 class ContextBudgetError(ValueError):
@@ -101,8 +97,8 @@ class ContextPlanner:
     """Plan complete provider context behind one stable, testable interface.
 
     The caller supplies run lifecycle facts and persists the returned opaque state.
-    Rule discovery, skill/memory selection, deterministic ordering, compaction,
-    externalization, hashing, and manifest construction stay inside this module.
+    Workspace-rule discovery, deterministic ordering, compaction, externalization,
+    hashing, and manifest construction stay inside this module.
     """
 
     def __init__(
@@ -218,8 +214,6 @@ class ContextPlanner:
             )
         ]
         items.extend(self._discover_workspace_rules(request))
-        items.extend(self._select_skills(request))
-        items.extend(self._select_memories(request))
         return ContextState(items=items)
 
     def _pinned(
@@ -331,109 +325,12 @@ class ContextPlanner:
                 )
         return items
 
-    def _select_skills(self, request: RunRequest, limit: int = 3) -> list[ContextPinnedItem]:
-        try:
-            from agentharness.tools.skills import _load_skill_body, discover_skills
-
-            discovered = discover_skills(request.skills_dirs)
-        except Exception:  # noqa: BLE001
-            return []
-        task = request.message.lower()
-        scored: list[tuple[int, dict[str, str]]] = []
-        for skill in discovered:
-            score = 0
-            haystack = skill.get("name", "") + " " + skill.get("description", "")
-            for token in re.findall(r"[a-zA-Z0-9_\u4e00-\u9fff]+", haystack):
-                if token.lower() in task:
-                    score += 2
-                    if len(token) > 3:
-                        score += 1
-            scored.append((score, skill))
-        scored.sort(key=lambda pair: (-pair[0], pair[1].get("path", ""), pair[1].get("name", "")))
-
-        items: list[ContextPinnedItem] = []
-        selected_count = 0
-        for score, skill in scored:
-            path = Path(skill.get("path", ""))
-            source = str(path)
-            if score <= 0:
-                items.append(
-                    self._pinned("skills", source, "", "excluded: task did not match", selected=False)
-                )
-                continue
-            if selected_count >= limit:
-                items.append(
-                    self._pinned("skills", source, "", "excluded: lower-ranked match", selected=False)
-                )
-                continue
-            try:
-                if path.is_symlink() or path.stat().st_size > _MAX_SKILL_BYTES:
-                    raise OSError("unsafe or oversized skill")
-                skill_root = skill.get("root")
-                body = _load_skill_body(path, root=Path(skill_root) if skill_root else None)
-            except OSError as exc:
-                items.append(
-                    self._pinned(
-                        "skills",
-                        source,
-                        "",
-                        f"excluded: {exc}",
-                        selected=False,
-                    )
-                )
-                continue
-            selected_count += 1
-            content = f"### Skill: {skill.get('name') or path.parent.name}\n{body}"
-            items.append(self._pinned("skills", source, content, f"task match score={score}"))
-        return items
-
-    def _select_memories(self, request: RunRequest) -> list[ContextPinnedItem]:
-        query = request.message
-        if self.storage is None or not query.strip():
-            return []
-        scopes = [
-            scope
-            for scope in (
-                workspace_memory_scope(request.cwd),
-                session_memory_scope(request.session_id),
-                "global",
-            )
-            if scope
-        ]
-        try:
-            rows = self.storage.search_memories(query, limit=5, scopes=scopes)
-            if not rows:
-                terms = sorted(
-                    {
-                        token.lower()
-                        for token in re.findall(r"[a-zA-Z0-9_\u4e00-\u9fff]+", query)
-                        if len(token) >= 3
-                    }
-                )
-                if terms:
-                    rows = self.storage.search_memories(
-                        " OR ".join(terms), limit=5, scopes=scopes
-                    )
-        except Exception:  # noqa: BLE001
-            return []
-        return [
-            self._pinned(
-                "memories",
-                f"memory:{row.get('id', '')}",
-                str(row.get("content") or ""),
-                f"retrieved for initial goal; scope={row.get('scope') or 'global'}",
-            )
-            for row in rows
-        ]
-
     def _render_stable_prefix(self, state: ContextState) -> str | None:
         selected = [item for item in state.items if item.selected]
         system = next((item.content for item in selected if item.section == "system"), "")
         parts = [system] if system else []
         for section, title in (
             ("workspace_rules", "Workspace rules"),
-            ("skills", "Active skills"),
-            ("memories", "Retrieved memories"),
             ("history_summary", "Conversation summary"),
         ):
             section_items = [item for item in selected if item.section == section]
@@ -441,9 +338,7 @@ class ContextPlanner:
                 continue
             rendered = []
             for item in section_items:
-                if section == "memories":
-                    source = "memory"
-                elif section == "history_summary":
+                if section == "history_summary":
                     source = "summary of earlier conversation (auto-compacted)"
                 else:
                     source = item.source
@@ -721,91 +616,3 @@ def _stable_json(value: Any) -> str:
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-# Compatibility helpers kept for public callers while RunEngine migrates to ContextPlanner.
-def assemble_context(
-    *,
-    system: str | None,
-    skills: list[str],
-    memories: list[str],
-    summary: str | None,
-    messages: list[Message],
-    tools: list[ToolSpec],
-    max_tokens: int = 100_000,
-) -> tuple[str | None, list[Message], dict[str, Any]]:
-    request = RunRequest(message="", system=system)
-    state_items = [
-        ContextPinnedItem(
-            section="system",
-            source="legacy.system",
-            content=system or "",
-            content_hash=_sha256(system or ""),
-            token_estimate=estimate_tokens(system or ""),
-        )
-    ]
-    state_items.extend(
-        ContextPinnedItem(
-            section="skills",
-            source=f"legacy.skill:{index}",
-            content=value,
-            content_hash=_sha256(value),
-            token_estimate=estimate_tokens(value),
-        )
-        for index, value in enumerate(skills)
-    )
-    state_items.extend(
-        ContextPinnedItem(
-            section="memories",
-            source=f"legacy.memory:{index}",
-            content=value,
-            content_hash=_sha256(value),
-            token_estimate=estimate_tokens(value),
-        )
-        for index, value in enumerate(memories)
-    )
-    if summary:
-        state_items.append(
-            ContextPinnedItem(
-                section="memories",
-                source="legacy.summary",
-                content=summary,
-                content_hash=_sha256(summary),
-                token_estimate=estimate_tokens(summary),
-            )
-        )
-    bundle = ContextPlanner().plan(
-        run_id="legacy",
-        request=request,
-        messages=messages,
-        tools=tools,
-        model_turn=0,
-        state=ContextState(items=state_items),
-        max_tokens=max_tokens,
-    )
-    return (
-        bundle.system,
-        bundle.messages,
-        {
-            "token_estimate": bundle.manifest.total_tokens,
-            "token_method": bundle.manifest.token_method,
-            "compacted": bundle.manifest.compacted,
-            "prefix_fingerprint": bundle.manifest.prefix_fingerprint,
-        },
-    )
-
-
-def compact_messages(messages: list[Message]) -> list[Message]:
-    """Compatibility wrapper that retains only valid groups around the latest user."""
-    copied = deepcopy(messages)
-    groups = _message_groups(copied)
-    last_user = max(
-        (index for index, message in enumerate(copied) if message.role == MessageRole.user),
-        default=-1,
-    )
-    kept = [
-        group
-        for group in groups
-        if group["valid"] and (int(group["end"]) >= max(0, last_user - 4))
-    ]
-    return [message for group in kept for message in group["messages"]]

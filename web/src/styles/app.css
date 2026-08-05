@@ -16,10 +16,7 @@
   user-select: none;
 }
 .effect-badge.read { background: var(--effect-read-soft); color: var(--effect-read); }
-.effect-badge.write { background: var(--effect-write-soft); color: var(--effect-write); }
-.effect-badge.network { background: var(--effect-network-soft); color: var(--effect-network); }
 .effect-badge.danger { background: var(--effect-danger-soft); color: var(--effect-danger); }
-.effect-badge.external { background: var(--effect-external-soft); color: var(--effect-external); }
 
 /* ---------- Durable result report ---------- */
 .run-report {
@@ -188,7 +185,7 @@
   overflow-wrap: anywhere;
 }
 .report-empty { margin: 4px 0 0; color: var(--text-muted); font-size: var(--text-xs); }
-.report-records, .artifact-records { display: grid; gap: 7px; }
+.artifact-records { display: grid; gap: 7px; }
 .report-record {
   display: grid;
   min-width: 0;
@@ -204,8 +201,6 @@
 .report-record strong { overflow: hidden; font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 .report-record span { font-size: var(--text-xs); }
 .report-record code { color: var(--text-muted); font-size: var(--text-xs); white-space: nowrap; }
-.record-success { color: var(--accent); }
-.record-danger { color: var(--danger); }
 .report-audit-groups { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
 .report-audit-groups h3 { margin: 2px 0 7px; font-size: var(--text-xs); }
 .audit-record > summary {

@@ -1,8 +1,13 @@
 import { renderToString } from "react-dom/server";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 
 import { ComparisonView } from "./ComparisonView";
-import { NewProcurementConversation } from "./ProcurementConversation";
+import { friendlyProcurementError } from "./api";
+import {
+  NewProcurementConversation,
+  ProcurementConversation,
+} from "./ProcurementConversation";
 import { QuoteWorkspace } from "./QuoteWorkspace";
 import { procurementReportMarkdown, ReportView } from "./ReportView";
 import type {
@@ -150,6 +155,41 @@ function analyzed(): ProcurementRequest {
 }
 
 describe("procurement workflow views", () => {
+  it("explains a blocked model request and preserves the recovery path", () => {
+    expect(friendlyProcurementError("Your request was blocked.")).toContain("模型网关拒绝");
+    expect(friendlyProcurementError("Your request was blocked.")).toContain("从持久化状态重新分析");
+  });
+
+  it("keeps the reply composer available whenever the agent requires human input", () => {
+    const queryClient = new QueryClient();
+    const clarificationRequest: ProcurementRequest = {
+      ...request,
+      status: "collecting",
+      analysis_run_id: "run-needs-input",
+      unresolved_field_count: 0,
+    };
+    queryClient.setQueryData(["procurement-run", "run-needs-input"], {
+      id: "run-needs-input",
+      status: "require_human",
+      error: null,
+    });
+    queryClient.setQueryData(["procurement-messages", "run-needs-input"], []);
+    queryClient.setQueryData(["procurement-tools", "run-needs-input"], []);
+
+    const html = renderToString(
+      <QueryClientProvider client={queryClient}>
+        <ProcurementConversation
+          request={clarificationRequest}
+          onResume={async () => undefined}
+          onRecover={async () => undefined}
+          onOpenComparison={() => undefined}
+        />
+      </QueryClientProvider>
+    );
+
+    expect(html).toContain('aria-label="补充澄清信息"');
+  });
+
   it("uses the server quote limit for a 30-file blind-test batch", () => {
     const html = renderToString(
       <NewProcurementConversation
@@ -184,13 +224,48 @@ describe("procurement workflow views", () => {
 
   it("explains deterministic cost ranking after excluding hard violations", () => {
     const html = renderToString(
-      <ComparisonView request={analyzed()} busy={null} onAnalyze={async () => undefined} onApprove={async () => undefined} />
+      <ComparisonView request={analyzed()} busy={null} onAnalyze={async () => undefined} onApprove={async () => undefined} onNoAward={async () => undefined} />
     );
     expect(html).toContain("规则推荐");
     expect(html).toContain("起订量（MOQ）20000 高于采购量 10000");
     expect(html).toContain("总到货成本");
     expect(html).toContain("精确金额核算");
     expect(html).toContain("提交供应商审批");
+  });
+
+  it("allows the buyer to submit a no-award decision when every quote is excluded", () => {
+    const noAward: ProcurementRequest = analyzed();
+    noAward.comparison = {
+      ...noAward.comparison!,
+      result: {
+        ...noAward.comparison!.result,
+        eligible_count: 0,
+        excluded_count: noAward.comparison!.result.quotes.length,
+        recommended_quote_id: null,
+        recommendation_explanation: ["没有报价满足全部硬性条件"],
+        quotes: noAward.comparison!.result.quotes.map((quote) => ({
+          ...quote,
+          eligible: false,
+          rank: null,
+          score: null,
+          exclusion_reasons: quote.exclusion_reasons.length
+            ? quote.exclusion_reasons
+            : [{ code: "budget", message: "到货单价超过预算" }],
+        })),
+      },
+    };
+
+    const html = renderToString(
+      <ComparisonView
+        request={noAward}
+        busy={null}
+        onAnalyze={async () => undefined}
+        onApprove={async () => undefined}
+        onNoAward={async () => undefined}
+      />
+    );
+
+    expect(html).toContain("确认无合格报价");
   });
 
   it("renders a durable approved report with source and comparison hashes", () => {
