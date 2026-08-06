@@ -30,7 +30,6 @@ from agentharness.contracts import (
     VerificationPolicy,
     new_id,
 )
-from agentharness.engine.tool_execution import arguments_sha256
 from agentharness.harness import Harness
 from agentharness.procurement.service import (
     DEFAULT_SIZE_TOLERANCE_MM,
@@ -1423,14 +1422,24 @@ class ProcurementAgent:
                 pending = self.approval_broker.request(str(row["id"]))
                 if pending is None:
                     continue
-                # Bind verification to the SHA-256 of the complete arguments,
-                # never parse the possibly-truncated arguments_summary (long
-                # approval notes used to break JSON parsing of the summary).
+                # Verify the approval against the COMPLETE stored arguments
+                # (never the possibly-truncated arguments_summary). Only the
+                # decision-critical fields must match the buyer's selection:
+                # request/snapshot/input-hash/quote. A live model may fill in
+                # its own actor/note without invalidating the user's choice.
                 if not pending.arguments_sha256:
                     raise RuntimeError("采购审批参数不可验证")
-                expected_arguments = {"request_id": request_id, **selection}
-                if pending.arguments_sha256 != arguments_sha256(expected_arguments):
+                invocation = self.harness.get_tool_invocation(
+                    str(row.get("invocation_id") or "")
+                )
+                if invocation is None or not invocation.arguments:
+                    raise RuntimeError("采购审批参数不可验证")
+                arguments = invocation.arguments
+                if str(arguments.get("request_id") or "") != request_id:
                     raise RuntimeError("采购审批参数与用户选择不一致")
+                for key in ("snapshot_id", "input_sha256", "quote_id"):
+                    if arguments.get(key) != selection.get(key):
+                        raise RuntimeError("采购审批参数与用户选择不一致")
                 return pending
             await asyncio.sleep(0.01)
 
