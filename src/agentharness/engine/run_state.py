@@ -37,6 +37,12 @@ class RunContext:
     lease_heartbeat_task: asyncio.Task[Any] | None = None
     tool_call_count: int = 0
     indeterminate_reason: str | None = None
+    # Wall-clock budget: wall_started anchors active time; wall_paused_s
+    # accumulates time parked at a human approval gate (waiting_approval)
+    # so waiting for the buyer never consumes the run budget.
+    wall_started: float = 0.0
+    wall_paused_s: float = 0.0
+    wall_pause_started: float | None = None
 
 
 def ensure_ctx(runs: dict[str, RunContext], run_id: str) -> RunContext:
