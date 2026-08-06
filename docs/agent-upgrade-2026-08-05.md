@@ -89,18 +89,18 @@
 
 > 目标：每个决策可回溯、可解释。
 
-### 3.1 [x] 工具调用理由记录【已完成 · 2026-08-06 / d558cf7 / 证据 commit 待补 / docs/evidence/stage-3-governance-offline-2026-08-06.md】
+### 3.1 [x] 工具调用理由记录【已完成 · 2026-08-06 / d558cf7  / b6dd646 / docs/evidence/stage-3-governance-offline-2026-08-06.md】
 - 目标/做法：每回合记录模型“调用工具前的说明”作为 reason 存入事件流，并在报告展示。
 - 工作量：0.5 天
 - 验收：运行报告显示每次工具调用的理由文本。
 
-### 3.2 [x] 收敛指标进运行报告【已完成 · 2026-08-06 / d558cf7 / 证据 commit 待补 / docs/evidence/stage-3-governance-offline-2026-08-06.md】
+### 3.2 [x] 收敛指标进运行报告【已完成 · 2026-08-06 / d558cf7  / b6dd646 / docs/evidence/stage-3-governance-offline-2026-08-06.md】
 - 目标/做法：报告新增：模型回合数、每个工具调用次数、重复调用次数、越权调用次数、每次调用的理由。
 - 加分点：状态机 + 去重 + 跑批的可视化输出，面试直接翻报告说话。
 - 工作量：0.5 天
 - 验收：报告 JSON/页面含上述指标字段。
 
-### 3.3 [x] 独立评审最小版（启用现有 `_ai_check`）【已完成 · 2026-08-06 / d558cf7 / 证据 commit 待补 / docs/evidence/stage-3-governance-offline-2026-08-06.md】
+### 3.3 [x] 独立评审最小版（启用现有 `_ai_check`）【已完成 · 2026-08-06 / d558cf7  / b6dd646 / docs/evidence/stage-3-governance-offline-2026-08-06.md】
 - 目标/做法：审批前用第二个 provider/模型交叉验证推荐是否与确定性比价一致，输出 pass/fail + 理由；**不阻塞审批**，只作为证据。
 - 加分点：“可治理 agent”叙事的最强证据；代码已有 `_ai_check` 基础，工作量可控（配置化 + 一个演示场景）。
 - 工作量：1–1.5 天
