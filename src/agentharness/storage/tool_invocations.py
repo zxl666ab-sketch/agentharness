@@ -1,4 +1,4 @@
-"""Durable tool invocations and their per-attempt audit rows."""
+﻿"""Durable tool invocations and their per-attempt audit rows."""
 
 from __future__ import annotations
 
@@ -37,14 +37,15 @@ class ToolInvocationRepo:
                 """INSERT INTO tool_invocations(
                        id, run_id, session_id, step, ordinal, provider_call_id,
                        tool_name, tool_version, status, effect, replay_policy,
-                       arguments_json, arguments_sha256, approval_id, attempt_count,
+                       arguments_json, arguments_sha256, reason, approval_id, attempt_count,
                        result_json, error_code, error_category, created_at, updated_at,
                        started_at, finished_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET
                        status=excluded.status,
                        approval_id=excluded.approval_id,
                        attempt_count=excluded.attempt_count,
+                       reason=excluded.reason,
                        result_json=excluded.result_json,
                        error_code=excluded.error_code,
                        error_category=excluded.error_category,
@@ -65,6 +66,7 @@ class ToolInvocationRepo:
                     invocation.replay_policy.value,
                     _dumps(arguments),
                     invocation.arguments_sha256,
+                    self.redactor.redact_text(invocation.reason) if invocation.reason else None,
                     invocation.approval_id,
                     invocation.attempt_count,
                     _dumps(result) if result is not None else None,
@@ -125,6 +127,7 @@ class ToolInvocationRepo:
             replay_policy=row["replay_policy"],
             arguments=json.loads(row["arguments_json"] or "{}"),
             arguments_sha256=row["arguments_sha256"],
+            reason=row["reason"] if "reason" in row.keys() else None,
             approval_id=row["approval_id"],
             attempt_count=row["attempt_count"],
             result=(ToolResult.model_validate(json.loads(row["result_json"])) if row["result_json"] else None),

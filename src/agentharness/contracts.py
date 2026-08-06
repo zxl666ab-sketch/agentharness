@@ -261,8 +261,11 @@ class ToolCall(BaseModel):
     invocation_id: str = Field(default_factory=new_id)
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+    reason: str | None = None
     arguments_raw: str = ""
     ordinal: int = Field(default=0, ge=0)
+    # Model-visible explanation recorded right before the tool call.
+    reason: str | None = None
     status: Literal["pending", "running", "completed", "failed", "skipped"] = "pending"
 
 
@@ -317,6 +320,7 @@ class ToolInvocationRecord(BaseModel):
     effect: EffectKind = EffectKind.pure
     replay_policy: ReplayPolicy = ReplayPolicy.never
     arguments: dict[str, Any] = Field(default_factory=dict)
+    reason: str | None = None
     arguments_sha256: str = ""
     approval_id: str | None = None
     attempt_count: int = 0

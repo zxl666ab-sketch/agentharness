@@ -196,6 +196,45 @@ def _artifact_ids(value: Any, found: list[str]) -> None:
             _artifact_ids(item, found)
 
 
+def _convergence(
+    *,
+    run: dict[str, Any],
+    events: list[EventEnvelope],
+    tools: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Convergence and governance metrics for the run report (phase 3)."""
+    usage = _json_object(run.get("usage_json"))
+    model_turns = _integer(usage.get("model_turns")) or sum(
+        1 for event in events if _event_type(event) == "model_turn_end"
+    )
+    tool_call_counts: dict[str, int] = {}
+    tool_reasons: list[dict[str, Any]] = []
+    for invocation in tools:
+        name = str(invocation.get("tool_name") or "")
+        tool_call_counts[name] = tool_call_counts.get(name, 0) + 1
+        tool_reasons.append(
+            {
+                "tool_name": name,
+                "step": _integer(invocation.get("step")),
+                "status": invocation.get("status"),
+                "reason": invocation.get("reason"),
+            }
+        )
+    duplicate_calls = sum(
+        1 for event in events if _event_type(event) == "tool_call_duplicate"
+    )
+    unauthorized_calls = sum(
+        1 for event in events if _event_type(event) == "tool_stage_denied"
+    )
+    return {
+        "model_turns": model_turns,
+        "tool_call_counts": tool_call_counts,
+        "total_tool_calls": sum(tool_call_counts.values()),
+        "duplicate_calls": duplicate_calls,
+        "unauthorized_calls": unauthorized_calls,
+        "tool_reasons": tool_reasons,
+    }
+
 def _tool_payload(runtime: Harness, invocation: ToolInvocationRecord) -> dict[str, Any]:
     payload = invocation.model_dump(mode="json")
     payload["attempts_audit"] = runtime.list_tool_attempts(invocation.id)
@@ -268,6 +307,11 @@ def build_run_report(runtime: Harness, run_id: str) -> dict[str, Any] | None:
         "approvals": approvals,
         "artifacts": artifacts,
         "usage": _json_object(run.get("usage_json")),
+        "convergence": _convergence(
+            run=run,
+            events=all_events,
+            tools=tools,
+        ),
         "events": recent_events,
         "events_total": events_total,
         "events_truncated": events_truncated,

@@ -1,4 +1,4 @@
-export type ProcurementStatus =
+﻿export type ProcurementStatus =
   | "draft"
   | "collecting"
   | "review"
@@ -215,6 +215,9 @@ export type ProcurementModelConfig = {
   output_price_per_million_usd: number | null;
   cached_input_price_per_million_usd: number | null;
   max_cost_usd: number | null;
+  ai_review_enabled: boolean;
+  review_provider: string | null;
+  review_model: string | null;
 };
 
 export type ProcurementModelConfigUpdate = {
@@ -228,6 +231,9 @@ export type ProcurementModelConfigUpdate = {
   output_price_per_million_usd: number | null;
   cached_input_price_per_million_usd: number | null;
   max_cost_usd: number | null;
+  ai_review_enabled?: boolean;
+  review_provider?: string | null;
+  review_model?: string | null;
 };
 
 export type CreateProcurementRequest = {

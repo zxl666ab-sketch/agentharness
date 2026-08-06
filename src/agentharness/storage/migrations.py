@@ -1,8 +1,8 @@
-"""Versioned SQLite schema migrations."""
+﻿"""Versioned SQLite schema migrations."""
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -397,6 +397,9 @@ MIGRATIONS: dict[int, str] = {
     ALTER TABLE messages ADD COLUMN provider_run_id TEXT;
     ALTER TABLE messages ADD COLUMN provider_phase TEXT;
     """,
+    13: """
+    ALTER TABLE tool_invocations ADD COLUMN reason TEXT;
+    """,
 }
 
 
@@ -429,3 +432,4 @@ def apply_migrations(conn) -> int:
             raise
         current = version
     return current
+

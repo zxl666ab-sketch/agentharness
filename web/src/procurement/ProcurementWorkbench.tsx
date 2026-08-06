@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+﻿import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   AlertTriangle,
@@ -82,6 +82,9 @@ const DEFAULT_CONFIG_FORM: ProcurementModelConfigUpdate = {
   output_price_per_million_usd: 0,
   cached_input_price_per_million_usd: 0,
   max_cost_usd: null,
+  ai_review_enabled: false,
+  review_provider: "openai",
+  review_model: null,
 };
 
 function configFormFrom(config: ProcurementModelConfig): ProcurementModelConfigUpdate {
@@ -95,6 +98,9 @@ function configFormFrom(config: ProcurementModelConfig): ProcurementModelConfigU
     output_price_per_million_usd: config.output_price_per_million_usd,
     cached_input_price_per_million_usd: config.cached_input_price_per_million_usd,
     max_cost_usd: config.max_cost_usd,
+    ai_review_enabled: config.ai_review_enabled,
+    review_provider: config.review_provider || "openai",
+    review_model: config.review_model,
   };
 }
 
@@ -595,6 +601,21 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                     <label className="proc-field">
                       <span>单次 Run 费用上限（USD）</span>
                       <input type="number" min="0" step="0.01" disabled={configForm.provider === "procurement_fake"} value={configForm.max_cost_usd ?? ""} onChange={(event) => updateConfigField("max_cost_usd", event.target.value === "" ? null : Number(event.target.value))} placeholder="留空表示不限" />
+                    </label>
+                  </section>
+
+                  <section className="proc-config-section">
+                    <label className="proc-field proc-field-checkbox">
+                      <input type="checkbox" checked={configForm.ai_review_enabled ?? false} onChange={(event) => updateConfigField("ai_review_enabled", event.target.checked)} />
+                      <span>审批前启用独立评审（不阻塞审批，只记录证据）</span>
+                    </label>
+                    <label className="proc-field">
+                      <span>独立评审 Provider</span>
+                      <input value={configForm.review_provider || ""} onChange={(event) => updateConfigField("review_provider", event.target.value)} placeholder="例如 openai" />
+                    </label>
+                    <label className="proc-field">
+                      <span>独立评审模型（留空用主模型）</span>
+                      <input value={configForm.review_model || ""} onChange={(event) => updateConfigField("review_model", event.target.value)} placeholder="例如 deepseek-v4-flash" />
                     </label>
                   </section>
 

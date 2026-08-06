@@ -1567,6 +1567,7 @@ class RunEngine:
                 error_kind = "provider_protocol"
 
             text = "".join(text_parts)
+
             if not turn_usage.total_tokens and not turn_usage_charged:
                 # Deterministic estimate
                 turn_usage = Usage(
@@ -1603,6 +1604,11 @@ class RunEngine:
             usage.model_turns = step + 1
 
             tool_calls = [tool_acc[i] for i in order if i in tool_acc]
+            # Record the model explanation that preceded each tool call so the
+            # report can show why the agent invoked a tool (governance/audit).
+            if tool_calls and text.strip():
+                for call in tool_calls:
+                    call.reason = text[:500]
 
             if usage.total_tokens > budget.max_tokens and error_msg is None:
                 # A provider may ignore the requested output cap. Persist its partial
