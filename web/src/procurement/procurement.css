@@ -252,7 +252,7 @@
 .proc-field-conflicts strong { color: var(--warning); font-size: 10px; }
 .proc-field-conflicts span { overflow: hidden; color: var(--text-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .proc-field-evidence > span:nth-child(2) { overflow: hidden; color: var(--text-secondary); font-family: var(--mono); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.proc-field-evidence small { overflow: hidden; grid-column: 1 / -1; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.proc-field-evidence small { overflow: hidden; grid-column: 1 / -1; color: var(--text-muted); font-size: 10px; overflow-wrap: anywhere; white-space: normal; }
 .proc-confidence { display: inline-flex; min-height: 19px; align-items: center; padding: 0 6px; border-radius: 4px; font-size: 9px; font-weight: 750; }
 .proc-confidence.high { background: var(--accent-soft); color: var(--accent); }
 .proc-confidence.low { background: var(--warning-soft); color: var(--warning); }
