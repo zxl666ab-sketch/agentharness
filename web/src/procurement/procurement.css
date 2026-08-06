@@ -229,7 +229,7 @@
 .proc-source-strip code { overflow: hidden; max-width: 220px; color: var(--text-secondary); text-overflow: ellipsis; white-space: nowrap; }
 .proc-source-strip > span:last-child { margin-left: auto; }
 .proc-field-table { min-width: 0; }
-.proc-field-table-head, .proc-field-row { display: grid; grid-template-columns: 100px minmax(110px, .9fr) minmax(130px, 1.1fr); }
+.proc-field-table-head, .proc-field-row { display: grid; grid-template-columns: 90px minmax(100px, .9fr) minmax(120px, 1.1fr); }
 .proc-field-table-head { position: sticky; z-index: 2; top: 0; min-height: 34px; align-items: center; border-bottom: 1px solid var(--border); background: var(--surface); color: var(--text-muted); font-size: 10px; font-weight: 700; }
 .proc-field-table-head span, .proc-field-row > div { min-width: 0; padding: 7px 12px; border-right: 1px solid var(--border); }
 .proc-field-table-head span:last-child, .proc-field-row > div:last-child { border-right: 0; }
