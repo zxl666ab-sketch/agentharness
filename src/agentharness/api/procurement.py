@@ -225,6 +225,20 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
         except (ProcurementError, QuoteParseError) as exc:
             raise HTTPException(400, str(exc)) from exc
 
+    @router.post("/requests/{request_id}/cancel-run", status_code=200)
+    async def cancel_run(request_id: str) -> dict[str, Any]:
+        """Let the buyer stop a stuck procurement Agent run (e.g. gateway retry loop)."""
+        request = service.get_request(request_id)
+        run_id = str(request.get("analysis_run_id") or "")
+        if not run_id:
+            raise HTTPException(409, "采购任务还没有关联的 Agent 运行")
+        run = agent.harness.get_run(run_id)
+        status = str(run.get("status") or "") if run else ""
+        if status not in {"pending", "running", "waiting_approval"}:
+            raise HTTPException(409, f"运行当前状态不可停止：{status or '未知'}")
+        await agent.harness.cancel(run_id)
+        return {"request_id": request_id, "run_id": run_id, "status": "cancelled"}
+
     @router.get("/meta")
     async def meta() -> dict[str, Any]:
         return {

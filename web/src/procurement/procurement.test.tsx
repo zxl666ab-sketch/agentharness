@@ -180,6 +180,7 @@ describe("procurement workflow views", () => {
       <QueryClientProvider client={queryClient}>
         <ProcurementConversation
           request={clarificationRequest}
+          streamLive
           onResume={async () => undefined}
           onRecover={async () => undefined}
           onOpenComparison={() => undefined}

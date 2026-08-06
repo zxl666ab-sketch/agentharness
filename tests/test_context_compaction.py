@@ -15,7 +15,7 @@ from agentharness.contracts import (
     ToolCall,
 )
 from agentharness.engine.compaction import plan_compaction, render_transcript
-from agentharness.engine.context import ContextPlanner
+from agentharness.engine.context import ContextBudgetError, ContextPlanner
 from agentharness.harness import Harness
 from tests.fake_provider import FakeModelAdapter
 
@@ -145,6 +145,33 @@ def test_render_transcript_truncates_and_chains_prior_summary() -> None:
     assert "read_file" in text
     # Big tool payloads are truncated per message.
     assert "x" * 901 not in text
+
+
+def test_failed_tool_result_externalization_preserves_budget_failure() -> None:
+    class FailingArtifacts:
+        def put_json(self, *args, **kwargs):
+            del args, kwargs
+            raise OSError("artifact store unavailable")
+
+    call = ToolCall(id="call-1", name="read_file", arguments={"path": "large.txt"})
+    messages = [
+        Message(role=MessageRole.user, content="read the file"),
+        Message(role=MessageRole.assistant, content="reading", tool_calls=[call]),
+        Message(role=MessageRole.tool, tool_call_id=call.id, content="x" * 4000),
+    ]
+    planner = ContextPlanner(artifacts=FailingArtifacts())
+
+    with pytest.raises(ContextBudgetError):
+        planner.plan(
+            run_id="run-1",
+            request=RunRequest(message="read the file", cwd="."),
+            messages=messages,
+            tools=[],
+            model_turn=1,
+            max_tokens=100,
+        )
+
+    assert messages[-1].content == "x" * 4000
 
 
 @pytest.mark.asyncio

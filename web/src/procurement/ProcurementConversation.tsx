@@ -10,13 +10,14 @@ import {
   Paperclip,
   RefreshCw,
   Send,
+  Square,
   UserRound,
   X,
 } from "lucide-react";
 import { FormEvent, useMemo, useState } from "react";
 
 import { api, type ToolInvocationRow } from "../api/client";
-import { friendlyProcurementError } from "./api";
+import { friendlyProcurementError, procurementApi } from "./api";
 import type { ProcurementRequest } from "./types";
 
 const TOOL_LABELS: Record<string, string> = {
@@ -208,6 +209,7 @@ export function NewProcurementConversation({
 
 type ConversationProps = {
   request: ProcurementRequest;
+  streamLive: boolean;
   actionError?: string | null;
   onResume: (message: string) => Promise<void>;
   onRecover: () => Promise<void>;
@@ -216,6 +218,7 @@ type ConversationProps = {
 
 export function ProcurementConversation({
   request,
+  streamLive,
   actionError,
   onResume,
   onRecover,
@@ -224,24 +227,26 @@ export function ProcurementConversation({
   const runId = request.analysis_run_id || null;
   const [reply, setReply] = useState("");
   const [sending, setSending] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const runQuery = useQuery({
     queryKey: ["procurement-run", runId],
     queryFn: () => api.run(runId!),
     enabled: !!runId,
-    refetchInterval: (query) => working(query.state.data?.status) ? 750 : false,
+    refetchInterval: (query) => !streamLive && working(query.state.data?.status) ? 750 : false,
   });
   const active = working(runQuery.data?.status);
   const messagesQuery = useQuery({
     queryKey: ["procurement-messages", runId],
     queryFn: () => api.messages(runId!),
     enabled: !!runId,
-    refetchInterval: active ? 750 : false,
+    refetchInterval: !streamLive && active ? 750 : false,
   });
   const toolsQuery = useQuery({
     queryKey: ["procurement-tools", runId],
     queryFn: () => api.toolInvocations(runId!),
     enabled: !!runId,
-    refetchInterval: active ? 750 : false,
+    refetchInterval: !streamLive && active ? 750 : false,
   });
   const messages = useMemo(
     () => (messagesQuery.data || []).filter((item) =>
@@ -255,6 +260,7 @@ export function ProcurementConversation({
   const status = runQuery.data?.status || (runId ? "pending" : "");
   const needsClarification = status === "require_human";
   const canRecover = status === "failed" || status === "cancelled" || status === "interrupted";
+  const canStop = status === "pending" || status === "running";
 
   async function submitReply(event: FormEvent) {
     event.preventDefault();
@@ -270,12 +276,41 @@ export function ProcurementConversation({
     }
   }
 
+  async function stopAgent() {
+    if (!runId) return;
+    setCancelling(true);
+    setCancelError(null);
+    try {
+      await procurementApi.cancelRun(request.id);
+      await Promise.all([runQuery.refetch(), messagesQuery.refetch(), toolsQuery.refetch()]);
+    } catch (err) {
+      setCancelError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCancelling(false);
+    }
+  }
+
   return (
     <aside className="proc-conversation" aria-label="采购 Agent 对话">
       <header className="proc-conversation-head">
         <div><Bot size={17} /><strong>采购 Agent</strong></div>
-        <span className={`proc-run-state ${status}`}>{active ? <LoaderCircle className="spin" size={13} /> : <Circle size={10} fill="currentColor" />}{RUN_LABELS[status] || "准备中"}</span>
+        <div className="proc-conversation-head-actions">
+          {canStop ? (
+            <button
+              type="button"
+              className="proc-button"
+              disabled={cancelling}
+              onClick={stopAgent}
+              title="停止当前 Agent 运行（例如卡在网关重试时）"
+            >
+              {cancelling ? <LoaderCircle className="spin" size={12} /> : <Square size={11} />}
+              停止
+            </button>
+          ) : null}
+          <span className={`proc-run-state ${status}`}>{active ? <LoaderCircle className="spin" size={13} /> : <Circle size={10} fill="currentColor" />}{RUN_LABELS[status] || "准备中"}</span>
+        </div>
       </header>
+      {cancelError ? <p className="proc-conversation-error" role="alert">{cancelError}</p> : null}
       <div className="proc-conversation-ids">
         <span><small>SESSION</small><code title={request.session_id}>{request.session_id.slice(0, 10)}</code></span>
         <span><small>REQUEST</small><code title={request.id}>{request.id.slice(0, 10)}</code></span>

@@ -151,6 +151,25 @@ class ProcurementRepo:
         ).fetchall()
         return [item for row in rows if (item := _decode_row(row, "extracted_json"))]
 
+    def list_quotes_for_requests(
+        self, request_ids: list[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        grouped = {request_id: [] for request_id in request_ids}
+        if not request_ids:
+            return grouped
+        placeholders = ",".join("?" for _ in request_ids)
+        rows = self._reader().execute(
+            f"""SELECT * FROM procurement_quotes
+                WHERE request_id IN ({placeholders})
+                ORDER BY created_at ASC""",
+            request_ids,
+        ).fetchall()
+        for row in rows:
+            item = _decode_row(row, "extracted_json")
+            if item is not None:
+                grouped[str(item["request_id"])].append(item)
+        return grouped
+
     def update_quote(
         self,
         quote_id: str,
@@ -294,6 +313,49 @@ class ProcurementRepo:
             "SELECT * FROM procurement_decisions WHERE request_id = ?", (request_id,)
         ).fetchone()
         return dict(row) if row else None
+
+    def list_decisions_for_requests(
+        self, request_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        if not request_ids:
+            return {}
+        placeholders = ",".join("?" for _ in request_ids)
+        rows = self._reader().execute(
+            f"SELECT * FROM procurement_decisions WHERE request_id IN ({placeholders})",
+            request_ids,
+        ).fetchall()
+        return {str(row["request_id"]): dict(row) for row in rows}
+
+    def list_supplier_decision_history(
+        self,
+        *,
+        exclude_request_id: str,
+        supplier_names: list[str],
+        request_limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        if not supplier_names:
+            return []
+        placeholders = ",".join("?" for _ in supplier_names)
+        rows = self._reader().execute(
+            f"""WITH recent_requests AS (
+                    SELECT id, reference, updated_at
+                    FROM procurement_requests
+                    WHERE id != ?
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                )
+                SELECT q.supplier_name,
+                       r.reference AS request_reference,
+                       d.created_at AS decision_at,
+                       d.decision
+                FROM recent_requests AS r
+                JOIN procurement_decisions AS d ON d.request_id = r.id
+                JOIN procurement_quotes AS q ON q.id = d.quote_id
+                WHERE q.supplier_name IN ({placeholders})
+                ORDER BY r.updated_at DESC, d.created_at DESC""",
+            [exclude_request_id, request_limit, *supplier_names],
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def add_audit_event(self, event: dict[str, Any]) -> None:
         safe = self.redactor.redact_obj(event)

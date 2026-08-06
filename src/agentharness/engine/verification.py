@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from typing import Any
 
 from agentharness.contracts import (
@@ -12,7 +11,6 @@ from agentharness.contracts import (
     MessageRole,
     ModelRequest,
     StreamItemType,
-    ToolResult,
     VerificationCandidate,
     VerificationCheck,
     VerificationDecision,
@@ -22,7 +20,6 @@ from agentharness.contracts import (
 from agentharness.security.redaction import Redactor, default_redactor
 from agentharness.security.sandbox import SandboxError, assert_in_workspace
 
-CommandRunner = Callable[[VerificationCandidate, str], Awaitable[ToolResult]]
 EvaluatorResolver = Callable[[str], Any | None]
 
 
@@ -33,11 +30,9 @@ class VerificationLoop:
         self,
         *,
         redactor: Redactor | None = None,
-        command_runner: CommandRunner | None = None,
         evaluator_resolver: EvaluatorResolver | None = None,
     ) -> None:
         self.redactor = redactor or default_redactor
-        self.command_runner = command_runner
         self.evaluator_resolver = evaluator_resolver
 
     async def evaluate(
@@ -113,8 +108,6 @@ class VerificationLoop:
             return self._output_check(candidate, check)
         if check.kind == "file":
             return self._file_check(candidate, check)
-        if check.kind == "command":
-            return await self._command_check(candidate, check)
         return await self._ai_check(candidate, policy, check)
 
     def _output_check(
@@ -295,57 +288,6 @@ class VerificationLoop:
                 evidence,
             )
         return None, evidence
-
-    async def _command_check(
-        self, candidate: VerificationCandidate, check: VerificationCheck
-    ) -> tuple[VerificationFailure | None, dict[str, Any]]:
-        if not check.command:
-            failure = VerificationFailure(
-                validator="command",
-                error_code="invalid_command_check",
-                message="Command validator requires a command.",
-                retryable=False,
-                recovery_hint="Add a command to the Verification Policy.",
-            )
-            return failure, {}
-        if self.command_runner is None:
-            failure = VerificationFailure(
-                validator="command",
-                error_code="governed_runner_unavailable",
-                message="Governed command runner is unavailable.",
-                retryable=False,
-                recovery_hint="Enable the shell tool and its Approval/Sandbox path.",
-            )
-            return failure, {"command": check.command}
-        started = time.monotonic()
-        result = await self.command_runner(candidate, check.command)
-        evidence = {
-            "command": check.command,
-            "is_error": result.is_error,
-            "output": self.redactor.redact_text(result.content[:2000]),
-            "duration_ms": result.duration_ms or (time.monotonic() - started) * 1000,
-            "error_code": result.error_code,
-            "error_category": result.error_category,
-        }
-        missing = [needle for needle in check.contains if needle not in result.content]
-        if not result.is_error and not missing:
-            return None, evidence
-        code = result.error_code or ("command_output_failed" if missing else "command_failed")
-        return (
-            VerificationFailure(
-                validator="command",
-                error_code=code,
-                message=(
-                    f"Command output is missing {missing}"
-                    if missing
-                    else self.redactor.redact_text(result.content[:1000]) or "Command failed."
-                ),
-                evidence=evidence,
-                retryable=result.retryable if result.error_code else True,
-                recovery_hint=result.recovery_hint or "Inspect the output and correct the failing code.",
-            ),
-            evidence,
-        )
 
     async def _ai_check(
         self,

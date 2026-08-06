@@ -445,7 +445,9 @@ class ContextPlanner:
                     if message.role != MessageRole.tool or len(message.content) < 160:
                         continue
                     artifact_id = self._externalize_messages([message])
-                    pointer = f"[tool result externalized as artifact:{artifact_id or 'unavailable'}]"
+                    if not artifact_id:
+                        continue
+                    pointer = f"[tool result externalized as artifact:{artifact_id}]"
                     old_tokens = estimate_tokens(message.content)
                     message.content = pointer
                     total -= max(0, old_tokens - estimate_tokens(pointer))

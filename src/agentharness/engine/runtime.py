@@ -57,6 +57,7 @@ from agentharness.engine.tool_execution import (
     ApprovalCallback,
     ToolInvocationExecutor,
     canonical_arguments,
+    enabled_tool_names,
     tool_call_completed,
 )
 from agentharness.engine.verification import VerificationLoop
@@ -875,7 +876,7 @@ class RunEngine:
         self._ctx(run_id).run_messages = messages
 
         while True:
-            tool_specs = self._tool_specs(request)
+            tool_specs = self._tool_specs(request, run_id=run_id)
             if cancel.is_set():
                 stop = self._stop_status(run_id)
                 return self.lifecycle.finish(
@@ -1070,6 +1071,7 @@ class RunEngine:
                     parallel_tool_calls=(
                         False if budget.max_tool_calls_per_turn == 1 else None
                     ),
+                    metadata={"run_id": run_id},
                 )
                 text_parts = []
                 tool_acc = {}
@@ -1082,6 +1084,8 @@ class RunEngine:
                 retry_after_s: float | None = None
                 streamed_length = 0
                 had_provider_output = False
+                provider_response_id: str | None = None
+                provider_phase: str | None = None
                 stream: Any = None
                 provider_owner = asyncio.current_task()
                 if provider_owner is not None:
@@ -1220,6 +1224,13 @@ class RunEngine:
                                 turn_usage.input_tokens + turn_usage.output_tokens
                             )
                             turn_usage.estimated = item.usage.estimated
+                        elif item.type == StreamItemType.provider_context:
+                            if item.provider_response_id:
+                                provider_response_id = item.provider_response_id
+                                had_provider_output = True
+                            if item.provider_phase:
+                                provider_phase = item.provider_phase
+                                had_provider_output = True
                         elif item.type == StreamItemType.error:
                             error_msg = item.error or "provider error"
                             error_kind = item.error_kind or "provider"
@@ -1392,6 +1403,9 @@ class RunEngine:
                 role=MessageRole.assistant,
                 content=text,
                 tool_calls=tool_calls or None,
+                provider_response_id=provider_response_id,
+                provider_run_id=(run_id if provider_response_id else None),
+                provider_phase=provider_phase,
             )
             messages.append(assistant_msg)
             self.storage.save_message(run_id, session_id, assistant_msg, seq=len(messages))
@@ -1926,103 +1940,10 @@ class RunEngine:
             ],
         )
 
-        existing_ordinals = [
-            invocation.ordinal
-            for invocation in self.storage.list_tool_invocations(run_id)
-            if invocation.step == step
-        ]
-        next_verification_ordinal = max(existing_ordinals, default=-1) + 1
-        command_calls_this_turn = 0
-
-        async def governed_command(
-            candidate: VerificationCandidate, command: str
-        ) -> ToolResult:
-            nonlocal command_calls_this_turn, next_verification_ordinal
-            if request.tools is not None and "shell" not in request.tools:
-                return ToolResult(
-                    tool_call_id="",
-                    name="verification_command",
-                    content="Command verification is not available in the procurement run",
-                    is_error=True,
-                    error_code="tool_disabled",
-                    error_category="configuration",
-                    retryable=False,
-                    recovery_hint="Use the procurement output verification policy.",
-                )
-            run_context = self._ctx(run_id)
-            if command_calls_this_turn >= request.budget.max_tool_calls_per_turn:
-                return ToolResult(
-                    tool_call_id="",
-                    name="shell",
-                    content="Verification command budget for this turn was exceeded",
-                    is_error=True,
-                    error_code="max_tool_calls_per_turn",
-                    error_category="budget",
-                    retryable=False,
-                    recovery_hint="Reduce command validators or split verification across runs.",
-                    attempts=0,
-                )
-            if run_context.tool_call_count >= request.budget.max_tool_calls:
-                return ToolResult(
-                    tool_call_id="",
-                    name="shell",
-                    content="Run tool-call budget was exceeded during verification",
-                    is_error=True,
-                    error_code="max_tool_calls",
-                    error_category="budget",
-                    retryable=False,
-                    recovery_hint="Start a new run with a smaller verification policy.",
-                    attempts=0,
-                )
-            ordinal = next_verification_ordinal
-            next_verification_ordinal += 1
-            command_calls_this_turn += 1
-            run_context.tool_call_count += 1
-            call = ToolCall(
-                id=new_id(),
-                name="shell",
-                arguments={"command": command},
-                arguments_raw=json.dumps({"command": command}, ensure_ascii=False),
-                ordinal=ordinal,
-            )
-            call_message = Message(
-                role=MessageRole.assistant,
-                content="[verification command validator]",
-                tool_calls=[call],
-            )
-            messages.append(call_message)
-            self.storage.save_message(run_id, session_id, call_message, seq=len(messages))
-            results = await self.tool_executor.execute_batch(
-                run_id=run_id,
-                session_id=session_id,
-                root_run_id=root_run_id,
-                parent_run_id=parent_run_id,
-                request=request,
-                messages=messages,
-                tool_calls=[call],
-                completed_tool_ids=self._ctx(run_id).completed_tool_ids,
-                usage=usage,
-                step=step,
-                cancel=cancel,
-            )
-            if results:
-                return results[0]
-            return ToolResult(
-                tool_call_id=call.id,
-                name="shell",
-                content="Verification command was cancelled",
-                is_error=True,
-                error_code="cancelled",
-                error_category="cancellation",
-                retryable=True,
-                recovery_hint="Resume the run and retry verification.",
-            )
-
         tools_ordered = [
             call.name
             for message in messages
             for call in (message.tool_calls or [])
-            if message.content != "[verification command validator]"
         ]
         tools_succeeded = [
             str(message.name)
@@ -2057,7 +1978,6 @@ class RunEngine:
         )
         loop = VerificationLoop(
             redactor=self.redactor,
-            command_runner=governed_command,
             evaluator_resolver=lambda name: self.providers.get(name),
         )
         decision = await loop.evaluate(candidate, policy, attempt=attempt)
@@ -2176,11 +2096,15 @@ class RunEngine:
             root_run_id=root_run_id,
         )
 
-    def _tool_specs(self, request: RunRequest) -> list[ToolSpec]:
-        names = request.tools
+    def _tool_specs(self, request: RunRequest, *, run_id: str) -> list[ToolSpec]:
+        names = enabled_tool_names(
+            request,
+            self.storage.list_tool_invocations(run_id),
+            set(self.tools),
+        )
         specs: list[ToolSpec] = []
         for name, tool in self.tools.items():
-            if names is not None and name not in names:
+            if name not in names:
                 continue
             # Child readonly: still expose write tools but engine will deny
             specs.append(tool.spec)

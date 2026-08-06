@@ -50,6 +50,55 @@ def test_sqlite_wal_and_events(data_dir):
     store.close()
 
 
+def test_message_provider_response_state_round_trips(data_dir):
+    store = Storage(data_dir)
+    try:
+        sid = store.create_session()
+        store.create_run(run_id="run", session_id=sid, root_run_id="run")
+        message = Message(
+            role=MessageRole.assistant,
+            content="tool preamble",
+            provider_response_id="resp_123",
+            provider_run_id="run",
+            provider_phase="commentary",
+        )
+
+        store.save_message("run", sid, message, 1)
+        restored = store.get_messages("run")
+
+        assert restored[0].provider_response_id == "resp_123"
+        assert restored[0].provider_run_id == "run"
+        assert restored[0].provider_phase == "commentary"
+    finally:
+        store.close()
+
+
+def test_append_events_assigns_sequences_per_run_in_one_batch(data_dir):
+    store = Storage(data_dir)
+    try:
+        events = [
+            EventEnvelope(
+                session_id="session",
+                root_run_id=run_id,
+                run_id=run_id,
+                type=EventType.run_status,
+                payload={"index": index},
+            )
+            for index, run_id in enumerate(("run-a", "run-b", "run-a", "run-b"))
+        ]
+
+        assigned = store.append_events(events)
+
+        assert [(event.run_id, event.run_seq) for event in assigned] == [
+            ("run-a", 1),
+            ("run-b", 1),
+            ("run-a", 2),
+            ("run-b", 2),
+        ]
+    finally:
+        store.close()
+
+
 def test_get_events_query_plans_use_indexes_no_full_scan(data_dir):
     """Goal 1: both get_events paths must be index-driven, never a full table scan."""
     store = Storage(data_dir)

@@ -179,6 +179,9 @@ class Harness:
             limit=limit,
         )
 
+    def count_events(self, run_id: str) -> int:
+        return self.storage.count_events(run_id)
+
     def get_run_tree(self, run_id: str) -> list[dict[str, Any]]:
         return self.storage.get_run_tree(run_id)
 

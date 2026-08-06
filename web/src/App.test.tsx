@@ -9,6 +9,8 @@ import { REQUIRED_API_SCHEMA_VERSION } from "./api/compatibility";
 describe("采购工作台入口", () => {
   it("只暴露采购运行所需的只读 API", () => {
     expect(Object.keys(api).sort()).toEqual([
+      "checkpoint",
+      "events",
       "health",
       "messages",
       "report",

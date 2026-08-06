@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
@@ -27,6 +28,7 @@ from agentharness.procurement import ProcurementService
 from agentharness.procurement.agent import ProcurementAgent
 
 LEASE_SWEEP_INTERVAL_S = 30.0
+logger = logging.getLogger(__name__)
 
 
 async def _sweep_expired_leases(harness: Harness, interval_s: float | None = None) -> None:
@@ -38,6 +40,7 @@ async def _sweep_expired_leases(harness: Harness, interval_s: float | None = Non
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - a failed sweep cannot stop the Web process
+            logger.warning("Failed to sweep expired run leases", exc_info=True)
             continue
         if recovered:
             harness.recovered_run_ids = list(
@@ -164,6 +167,17 @@ def create_app(
         return False
 
     @app.middleware("http")
+    async def security_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault(
+            "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
+        )
+        return response
+
+    @app.middleware("http")
     async def restrict_writes(request: Request, call_next):  # type: ignore[no-untyped-def]
         if (
             request.method == "POST"
@@ -216,12 +230,42 @@ def create_app(
             raise HTTPException(404, "run not found")
         return public_redact(report)
 
+    @app.get("/api/runs/{run_id}/events")
+    async def run_events(
+        run_id: str,
+        offset: int = Query(0, ge=0),
+        limit: int = Query(500, ge=1, le=2_000),
+    ) -> dict[str, Any]:
+        """Paginated timeline used when a run has more events than the report window."""
+        if runtime.get_run(run_id) is None:
+            raise HTTPException(404, "run not found")
+        items = runtime.get_events(run_id=run_id, limit=offset + limit)[offset:]
+        total = runtime.count_events(run_id)
+        return public_redact(
+            {
+                "items": [item.model_dump(mode="json") for item in items],
+                "total": total,
+                "offset": offset,
+                "has_more": offset + len(items) < total,
+            }
+        )
+
     @app.get("/api/runs/{run_id}/messages")
     async def messages(run_id: str) -> list[dict[str, Any]]:
         if runtime.get_run(run_id) is None:
             raise HTTPException(404, "run not found")
         return public_redact(
-            [item.model_dump(mode="json") for item in runtime.get_run_messages(run_id)]
+            [
+                item.model_dump(
+                    mode="json",
+                    exclude={
+                        "provider_response_id",
+                        "provider_run_id",
+                        "provider_phase",
+                    },
+                )
+                for item in runtime.get_run_messages(run_id)
+            ]
         )
 
     @app.get("/api/runs/{run_id}/tool-invocations")

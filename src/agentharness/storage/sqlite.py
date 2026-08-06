@@ -241,6 +241,9 @@ class Storage:
     ) -> list[EventEnvelope]:
         return self.events.get_events(run_id, after_global_seq, limit)
 
+    def count_events(self, run_id: str) -> int:
+        return self.events.count_events(run_id)
+
     def get_context_manifests(self, run_id: str) -> list[dict[str, Any]]:
         return self.events.get_context_manifests(run_id)
 

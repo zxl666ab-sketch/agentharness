@@ -30,8 +30,14 @@ from agentharness.contracts import (
     VerificationPolicy,
     new_id,
 )
+from agentharness.engine.tool_execution import arguments_sha256
 from agentharness.harness import Harness
-from agentharness.procurement.service import ProcurementError, ProcurementService
+from agentharness.procurement.service import (
+    DEFAULT_SIZE_TOLERANCE_MM,
+    DEFAULT_THICKNESS_TOLERANCE_UM,
+    ProcurementError,
+    ProcurementService,
+)
 
 PROCUREMENT_PROVIDER = "procurement_fake"
 PROCUREMENT_LIVE_PROVIDER = "openai"
@@ -165,14 +171,18 @@ def procurement_run_profile_from_env() -> ProcurementRunProfile:
         or os.environ.get("OPENAI_MODEL", "").strip()
         or "gpt-4o-mini"
     )
+    # Real-provider pricing is only known when the operator configures a rate.
+    # Leaving the fields as None makes PricingConfig.known false, so cost tracking
+    # reports "unknown" instead of a misleading $0.0000. The fake provider, by
+    # contrast, is genuinely free and keeps an explicit zero pricing (known=true).
     input_price = _env_optional_number(
         "AGENTHARNESS_PROCUREMENT_INPUT_PER_MILLION_USD",
-        default=0,
+        default=None,
         maximum=1_000,
     )
     output_price = _env_optional_number(
         "AGENTHARNESS_PROCUREMENT_OUTPUT_PER_MILLION_USD",
-        default=0,
+        default=None,
         maximum=1_000,
     )
     cached_price = _env_optional_number(
@@ -439,8 +449,16 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
                         "exclusiveMinimum": 0,
                     },
                     "invoice_required": {"type": "boolean"},
-                    "size_tolerance_mm": {"type": ["string", "number"]},
-                    "thickness_tolerance_um": {"type": ["string", "number"]},
+                    "size_tolerance_mm": {
+                        "type": ["string", "number"],
+                        "default": str(DEFAULT_SIZE_TOLERANCE_MM),
+                        "description": "可选；未说明时使用业务默认值 2 mm。",
+                    },
+                    "thickness_tolerance_um": {
+                        "type": ["string", "number"],
+                        "default": str(DEFAULT_THICKNESS_TOLERANCE_UM),
+                        "description": "可选；未说明时使用业务默认值 3 μm。",
+                    },
                     "destination": {"type": "string", "maxLength": 300},
                 },
                 "required": [
@@ -448,8 +466,6 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
                     "fx_rates",
                     "max_lead_days",
                     "invoice_required",
-                    "size_tolerance_mm",
-                    "thickness_tolerance_um",
                 ],
                 "additionalProperties": False,
             },
@@ -1240,6 +1256,9 @@ class ProcurementAgent:
                 "报价解析、物料匹配、供应商历史、Decimal 到货成本、硬约束、排序、复算和人工选择准备。"
                 "发现缺失、低置信度或跨文档冲突时必须停止；报价事实只能由采购员通过结构化复核接口修正，"
                 "Agent 禁止代写、计算或改写金额，也不得把后端确定性步骤拆成额外模型回合。"
+                "每次调用工具前先用一句简短中文说明正在执行的步骤，但不得提前声称分析或审批成功。"
+                "尺寸公差和厚度公差是可选项；用户未说明时分别使用业务默认值 2 mm 和 3 μm，"
+                "并在说明中告知采购员，不得仅因缺少这两个公差而停止或追问。"
                 "fx_rates 的键必须是相对本位币的三位 ISO 货币代码（例如 USD），不要写 USD/CNY；"
                 "必须忠实保留用户明确说出的颜色、印刷色数和开票要求。"
                 "只有收到 [procurement_supplier_selection] JSON 后才能调用审批工具；审批成功后最终回复"
@@ -1273,6 +1292,20 @@ class ProcurementAgent:
                 "source": source,
                 "procurement_request_id": request_id,
                 "procurement_provider_mode": self.run_profile.mode,
+                **(
+                    {
+                        "tool_prerequisites": {
+                            "procurement_execute_analysis": [
+                                "procurement_capture_requirement"
+                            ],
+                            "procurement_approve_supplier": [
+                                "procurement_capture_requirement"
+                            ],
+                        }
+                    }
+                    if source == "procurement_conversation"
+                    else {}
+                ),
             },
         )
 
@@ -1327,7 +1360,7 @@ class ProcurementAgent:
         self._track(run_id, task)
         owned_tasks = [task]
         try:
-            approval = await self._wait_for_approval(run_id, task, selection)
+            approval = await self._wait_for_approval(run_id, task, request_id, selection)
             self.approval_broker.resolve(approval.id, ApprovalDecision.allow_once)
             result = await task
             if (
@@ -1365,6 +1398,7 @@ class ProcurementAgent:
         self,
         run_id: str,
         task: asyncio.Task[Any],
+        request_id: str,
         selection: dict[str, Any],
     ) -> Any:
         while True:
@@ -1377,13 +1411,14 @@ class ProcurementAgent:
                 pending = self.approval_broker.request(str(row["id"]))
                 if pending is None:
                     continue
-                try:
-                    arguments = json.loads(pending.arguments_summary)
-                except json.JSONDecodeError as exc:
-                    raise RuntimeError("采购审批参数不可验证") from exc
-                for key in ("snapshot_id", "input_sha256", "quote_id", "actor"):
-                    if arguments.get(key) != selection.get(key):
-                        raise RuntimeError("采购审批参数与用户选择不一致")
+                # Bind verification to the SHA-256 of the complete arguments,
+                # never parse the possibly-truncated arguments_summary (long
+                # approval notes used to break JSON parsing of the summary).
+                if not pending.arguments_sha256:
+                    raise RuntimeError("采购审批参数不可验证")
+                expected_arguments = {"request_id": request_id, **selection}
+                if pending.arguments_sha256 != arguments_sha256(expected_arguments):
+                    raise RuntimeError("采购审批参数与用户选择不一致")
                 return pending
             await asyncio.sleep(0.01)
 

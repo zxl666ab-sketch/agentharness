@@ -27,6 +27,8 @@ from agentharness.procurement.parsing import (
 )
 
 MAX_QUOTES_PER_REQUEST = 50
+DEFAULT_SIZE_TOLERANCE_MM = Decimal("2")
+DEFAULT_THICKNESS_TOLERANCE_UM = Decimal("3")
 
 
 class ProcurementError(ValueError):
@@ -138,8 +140,6 @@ def _validated_requirement(payload: dict[str, Any]) -> dict[str, Any]:
         "fx_rates",
         "max_lead_days",
         "invoice_required",
-        "size_tolerance_mm",
-        "thickness_tolerance_um",
     }
     missing_constraints = sorted(required_constraints - raw_constraints.keys())
     if missing_constraints:
@@ -183,13 +183,15 @@ def _validated_requirement(payload: dict[str, Any]) -> dict[str, Any]:
         ),
         "invoice_required": invoice_required,
         "size_tolerance_mm": _domain_decimal(
-            raw_constraints["size_tolerance_mm"],
+            raw_constraints.get("size_tolerance_mm", DEFAULT_SIZE_TOLERANCE_MM),
             "尺寸公差",
             minimum=Decimal("0"),
             maximum=Decimal("100"),
         ),
         "thickness_tolerance_um": _domain_decimal(
-            raw_constraints["thickness_tolerance_um"],
+            raw_constraints.get(
+                "thickness_tolerance_um", DEFAULT_THICKNESS_TOLERANCE_UM
+            ),
             "厚度公差",
             minimum=Decimal("0"),
             maximum=Decimal("100"),
@@ -404,7 +406,18 @@ class ProcurementService:
         return self.get_request(request_id)
 
     def list_requests(self, limit: int = 100) -> list[dict[str, Any]]:
-        return [self._summary(item) for item in self.repo.list_requests(limit)]
+        requests = self.repo.list_requests(limit)
+        request_ids = [str(item["id"]) for item in requests]
+        quotes = self.repo.list_quotes_for_requests(request_ids)
+        decisions = self.repo.list_decisions_for_requests(request_ids)
+        return [
+            self._summary(
+                item,
+                quotes=quotes[str(item["id"])],
+                decision=decisions.get(str(item["id"])),
+            )
+            for item in requests
+        ]
 
     def get_request(self, request_id: str) -> dict[str, Any]:
         request = self.repo.get_request(request_id)
@@ -628,31 +641,29 @@ class ProcurementService:
         if self.repo.get_request(request_id) is None:
             raise KeyError(request_id)
         current_quotes = self.repo.list_quotes(request_id)
+        supplier_names = list(dict.fromkeys(str(item["supplier_name"]) for item in current_quotes))
+        records_by_supplier = {supplier_name: [] for supplier_name in supplier_names}
+        for record in self.repo.list_supplier_decision_history(
+            exclude_request_id=request_id,
+            supplier_names=supplier_names,
+        ):
+            records_by_supplier[str(record["supplier_name"])].append(
+                {
+                    "request_reference": record["request_reference"],
+                    "decision_at": record["decision_at"],
+                    "decision": record["decision"],
+                }
+            )
         history: list[dict[str, Any]] = []
         for current in current_quotes:
             supplier_name = str(current["supplier_name"])
-            approved_records: list[dict[str, Any]] = []
-            for request in self.repo.list_requests(limit=500):
-                if request["id"] == request_id:
-                    continue
-                decision = self.repo.get_decision(str(request["id"]))
-                if not decision:
-                    continue
-                selected = self.repo.get_quote(str(decision["quote_id"]))
-                if selected and str(selected["supplier_name"]) == supplier_name:
-                    approved_records.append(
-                        {
-                            "request_reference": request["reference"],
-                            "decision_at": decision["created_at"],
-                            "decision": decision["decision"],
-                        }
-                    )
+            approved_records = records_by_supplier[supplier_name]
             history.append(
                 {
                     "quote_id": current["id"],
                     "supplier_name": supplier_name,
                     "approved_purchase_count": len(approved_records),
-                    "records": approved_records[-5:],
+                    "records": approved_records[:5],
                     "evidence": "本地历史采购决策" if approved_records else "暂无本地历史记录",
                 }
             )
@@ -1285,15 +1296,20 @@ class ProcurementService:
         report["evidence_sha256"] = _canonical_sha256(report)
         return report
 
-    def _summary(self, request: dict[str, Any]) -> dict[str, Any]:
-        quotes = self.repo.list_quotes(request["id"])
+    def _summary(
+        self,
+        request: dict[str, Any],
+        *,
+        quotes: list[dict[str, Any]],
+        decision: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         return {
             **request,
             "quote_count": len(quotes),
             "unresolved_field_count": sum(
                 len(fields_requiring_review(item["extracted"])) for item in quotes
             ),
-            "decision": self.repo.get_decision(request["id"]),
+            "decision": decision,
         }
 
     def _staged_attachments(self, request_id: str) -> list[dict[str, Any]]:
