@@ -1280,6 +1280,10 @@ class ProcurementAgent:
                 "必须忠实保留用户明确说出的颜色、印刷色数和开票要求。"
                 "只有收到 [procurement_supplier_selection] JSON 后才能调用审批工具；审批成功后最终回复"
                 "必须包含【采购决策已验证】。审批工具成功前严禁输出、引用、解释或复述该验证标记。"
+                "理想工具序列（few-shot）：①新对话：先 procurement_capture_requirement（一次调用内完成需求结构化与确定性比价）；"
+                "②已结构化/已复核：procurement_execute_analysis（执行确定性比价并准备人工选择）；"
+                "③收到 [procurement_supplier_selection] JSON：procurement_approve_supplier（采购员已确认，完成审批）。"
+                "不要在前一步完成前调用后续工具，也不要在同一状态下重复调用同一工具。"
             ),
             provider=self.run_profile.provider,
             model=self.run_profile.model,

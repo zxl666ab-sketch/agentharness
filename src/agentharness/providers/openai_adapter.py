@@ -1,4 +1,4 @@
-"""OpenAI provider adapter: Responses API + Chat Completions (OpenAI-compatible).
+﻿"""OpenAI provider adapter: Responses API + Chat Completions (OpenAI-compatible).
 
 Official OpenAI defaults to the Responses API. Custom ``base_url`` gateways
 (ModelScope, vLLM, OneAPI, etc.) usually only expose Chat Completions and are
@@ -659,7 +659,7 @@ class OpenAIResponsesAdapter:
                         yield ModelStreamItem(
                             type=StreamItemType.error,
                             error=_event_error_message(event),
-                            error_kind="provider",
+                            error_kind="length",
                         )
                         return
                     elif etype == "response.cancelled":
@@ -804,7 +804,7 @@ class OpenAIResponsesAdapter:
                 yield ModelStreamItem(
                     type=StreamItemType.error,
                     error=f"OpenAI Chat completion ended with {finish_reason}",
-                    error_kind="provider",
+                    error_kind="length",
                 )
                 return
             for normalized in calls.complete_buffered():

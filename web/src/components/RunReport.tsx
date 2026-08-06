@@ -55,6 +55,7 @@ function statusText(status?: string | null) {
     failed: "失败",
     cancelled: "已停止",
     interrupted: "已中断",
+    budget_stopped: "已停在安全边界",
     indeterminate: "结果待确认",
     allow_once: "已允许一次",
     allow_run: "本次运行已允许",

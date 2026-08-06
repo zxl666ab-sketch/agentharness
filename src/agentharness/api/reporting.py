@@ -165,6 +165,13 @@ def _conclusion(
             "verified": False,
             "reason": failure_reasons[-1] if failure_reasons else "任务已中断，可恢复后继续。",
         }
+    if run_status == "budget_stopped":
+        return {
+            "status": "budget_stopped",
+            "label": "已停在安全边界",
+            "verified": False,
+            "reason": failure_reasons[-1] if failure_reasons else "预算用尽，已停在安全边界；可调整预算后恢复继续。",
+        }
     return {
         "status": "unverified",
         "label": "运行结束",

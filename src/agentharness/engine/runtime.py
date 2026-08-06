@@ -1,4 +1,4 @@
-"""Asyncio run engine for procurement model turns, tools, checkpoints and recovery."""
+﻿"""Asyncio run engine for procurement model turns, tools, checkpoints and recovery."""
 
 from __future__ import annotations
 
@@ -979,7 +979,8 @@ class RunEngine:
             if step >= budget.max_steps:
                 return self.lifecycle.finish(
                     run_id, session_id, root_run_id, parent_run_id,
-                    RunStatus.failed, "".join(output_parts), usage, step, "max_steps exceeded",
+                    RunStatus.budget_stopped, "".join(output_parts), usage, step,
+                    "回合数预算已用尽，已停在安全边界；可调整预算后恢复继续",
                     messages=messages,
                 )
             if self._wall_active_seconds(run_id, started) > budget.max_wall_time_s:
@@ -989,9 +990,19 @@ class RunEngine:
                     messages=messages,
                 )
             if usage.total_tokens >= budget.max_tokens:
+                if await self._degrade_budget_once(
+                    run_id=run_id,
+                    request=request,
+                    messages=messages,
+                    tool_specs=tool_specs,
+                    step=step,
+                    budget=budget,
+                ):
+                    continue
                 return self.lifecycle.finish(
                     run_id, session_id, root_run_id, parent_run_id,
-                    RunStatus.failed, "".join(output_parts), usage, step, "max_tokens exceeded",
+                    RunStatus.budget_stopped, "".join(output_parts), usage, step,
+                    "已达到 Token 预算上限，已停在安全边界；可调整预算后恢复继续",
                     messages=messages,
                 )
             if budget.max_cost_usd is not None:
@@ -1009,16 +1020,25 @@ class RunEngine:
                         messages=messages,
                     )
                 if usage.estimated_cost_usd >= budget.max_cost_usd:
+                    if await self._degrade_budget_once(
+                        run_id=run_id,
+                        request=request,
+                        messages=messages,
+                        tool_specs=tool_specs,
+                        step=step,
+                        budget=budget,
+                    ):
+                        continue
                     return self.lifecycle.finish(
                         run_id,
                         session_id,
                         root_run_id,
                         parent_run_id,
-                        RunStatus.failed,
+                        RunStatus.budget_stopped,
                         "".join(output_parts),
                         usage,
                         step,
-                        "max_cost_usd exceeded",
+                        "已达到成本预算上限，已停在安全边界；可调整预算后恢复继续",
                         messages=messages,
                     )
             if output_length >= budget.max_output_length:
@@ -1117,6 +1137,7 @@ class RunEngine:
             target_attempt = 1
             turn_usage_charged = False
             context_shrunk = False
+            length_retried = False
 
             while True:
                 provider = self.providers[request.provider]
@@ -1480,8 +1501,59 @@ class RunEngine:
                         await asyncio.sleep(delay)
                     continue
 
-                break
+                # finish_reason=length with zero output: retry once with a
+                # widened output budget (gateway intermittent truncation)
+                # before giving up with an actionable Chinese message.
+                if (
+                    can_replay
+                    and error_kind == "length"
+                    and not length_retried
+                ):
+                    length_retried = True
+                    relaxed_limit = max(output_token_limit * 2, output_token_limit + 512)
+                    output_token_limit = max(
+                        1,
+                        min(budget.max_tokens - usage.total_tokens, relaxed_limit),
+                    )
+                    usage.input_tokens += attempt_input
+                    usage.output_tokens += attempt_output
+                    usage.total_tokens += attempt_input + attempt_output
+                    usage.cached_input_tokens += attempt_cached
+                    usage.estimated = usage.estimated or not turn_usage.total_tokens
+                    _update_usage_cost(usage, request.pricing)
+                    turn_usage_charged = True
+                    self.events.emit_and_update(
+                        run_id,
+                        events=[
+                            self.events.event(
+                                run_row,
+                                EventType.provider_retry,
+                                {
+                                    "provider": request.provider,
+                                    "model": request.model,
+                                    "attempt": target_attempt,
+                                    "next_attempt": target_attempt + 1,
+                                    "error_kind": error_kind,
+                                    "delay_s": 0.0,
+                                    "retry_after_s": None,
+                                    "output_budget_relaxed_to": output_token_limit,
+                                },
+                                span_id=span_id,
+                            )
+                        ],
+                    )
+                    target_attempt += 1
+                    continue
 
+                # Remaining finish_reason=length failures get an actionable
+                # Chinese hint instead of a raw gateway error.
+                if error_kind == "length":
+                    error_msg = (
+                        "模型输出被截断（finish_reason=length），自动放宽输出预算后仍失败。"
+                        "请调高输出预算或精简上下文后重试。"
+                    )
+
+                break
             await self.events.flush_delta(run_id, run_row, span_id)
 
             unfinished_tool_ids = [
@@ -1534,18 +1606,36 @@ class RunEngine:
 
             if usage.total_tokens > budget.max_tokens and error_msg is None:
                 # A provider may ignore the requested output cap. Persist its partial
-                # response as evidence, but never report an over-budget run as complete.
-                error_msg = "max_tokens exceeded"
-                error_kind = "budget"
+                # response as evidence, but first try budget-aware degradation:
+                # shrink the context once and continue before stopping safely.
+                degraded = await self._degrade_budget_once(
+                    run_id=run_id,
+                    request=request,
+                    messages=messages,
+                    tool_specs=tool_specs,
+                    step=step,
+                    budget=budget,
+                )
+                if not degraded:
+                    error_msg = "max_tokens exceeded"
+                    error_kind = "budget"
             if (
                 budget.max_cost_usd is not None
                 and usage.estimated_cost_usd is not None
                 and usage.estimated_cost_usd > budget.max_cost_usd
                 and error_msg is None
             ):
-                error_msg = "max_cost_usd exceeded"
-                error_kind = "budget"
-
+                degraded = await self._degrade_budget_once(
+                    run_id=run_id,
+                    request=request,
+                    messages=messages,
+                    tool_specs=tool_specs,
+                    step=step,
+                    budget=budget,
+                )
+                if not degraded:
+                    error_msg = "max_cost_usd exceeded"
+                    error_kind = "budget"
             assistant_msg = Message(
                 role=MessageRole.assistant,
                 content=text,
@@ -1602,6 +1692,11 @@ class RunEngine:
                     status = self._stop_status(run_id)
                 elif error_kind == "timeout":
                     status = RunStatus.interrupted
+                elif error_kind == "budget":
+                    # Budget exhaustion is a safe boundary stop, not a red-screen
+                    # failure: the run keeps its checkpoint and can be resumed.
+                    status = RunStatus.budget_stopped
+                    error_msg = "预算已用尽，已停在安全边界；可调整预算后恢复继续"
                 else:
                     status = RunStatus.failed
                 return self.lifecycle.finish(
@@ -1609,7 +1704,6 @@ class RunEngine:
                     status, "".join(output_parts), usage, step, error_msg,
                     messages=messages,
                 )
-
             if not tool_calls:
                 policy = self._verification_policy(request)
                 if policy is not None:
@@ -1904,6 +1998,61 @@ class RunEngine:
                     "max_output_length exceeded",
                     messages=messages,
                 )
+
+    async def _degrade_budget_once(
+        self,
+        *,
+        run_id: str,
+        request: RunRequest,
+        messages: list[Message],
+        tool_specs: list[ToolSpec],
+        step: int,
+        budget: BudgetConfig,
+    ) -> bool:
+        """Halve the context budget once when token/cost budgets are exhausted.
+
+        Budget-aware degradation: before stopping at the safe boundary, try to
+        compact the context (planner externalization) so the run can continue.
+        Returns True to continue with the shrunk context, False to stop.
+        """
+        ctx = self._ctx(run_id)
+        if ctx.budget_degraded:
+            return False
+        if budget.max_context_tokens <= _CONTEXT_SHRINK_FLOOR:
+            return False
+        shrunk = max(_CONTEXT_SHRINK_FLOOR, budget.max_context_tokens // 2)
+        try:
+            bundle = self.context_planner.plan(
+                run_id=run_id,
+                request=request,
+                messages=messages,
+                tools=tool_specs,
+                model_turn=step,
+                state=ctx.context_state,
+                max_tokens=shrunk,
+            )
+        except ContextBudgetError:
+            return False
+        budget.max_context_tokens = shrunk
+        ctx.budget_degraded = True
+        ctx.context_state = bundle.state
+        run_row = self.storage.get_run(run_id)
+        if run_row is not None:
+            self.events.emit_and_update(
+                run_id,
+                events=[
+                    self.events.event(
+                        run_row,
+                        EventType.budget_warning,
+                        {
+                            "reason": "budget_exhausted",
+                            "context_shrunk_to": shrunk,
+                            "step": step,
+                        },
+                    )
+                ],
+            )
+        return True
 
     async def _maybe_compact(
         self,
