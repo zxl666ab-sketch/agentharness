@@ -1412,7 +1412,7 @@ class ProcurementService:
             order.get("evidence_sha256") or "",
         ])
         filename = f'{order["po_number"]}.csv'
-        return filename, "\\ufeff" + buffer.getvalue()
+        return filename, "\ufeff" + buffer.getvalue()
 
     def audit_report(self, request_id: str) -> dict[str, Any]:
         request = self.get_request(request_id)

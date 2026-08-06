@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from agentharness.api.server import create_app
 from agentharness.harness import Harness
 from agentharness.procurement.evaluation import build_case_document, load_frozen_truth
+from agentharness.procurement.service import ProcurementService
 
 
 def _upload(case):
@@ -106,6 +107,8 @@ async def test_purchase_order_export_after_approval(data_dir, workspace) -> None
             assert "text/csv" in csv_response.headers["content-type"]
             assert "attachment" in csv_response.headers["content-disposition"]
             body = csv_response.text
+            assert body.startswith("\ufeff"), "CSV 必须以真实 UTF-8 BOM 开头"
+            assert "\\ufeff" not in body, "CSV 不能包含字面量反斜杠 ufeff"
             assert "采购订单号" in body
             assert order["po_number"] in body
             assert order["supplier_name"] in body
@@ -173,3 +176,35 @@ async def test_purchase_order_rejected_before_decision(data_dir, workspace) -> N
         await app.state.procurement_agent.aclose()
         await app.state.run_supervisor.aclose()
         await harness.aclose()
+
+
+def test_purchase_order_csv_starts_with_real_utf8_bom(data_dir, monkeypatch) -> None:
+    """Regression: the CSV must start with the real U+FEFF BOM, not literal text."""
+    harness = Harness(data_dir=data_dir)
+    try:
+        service = ProcurementService(harness)
+        order = {
+            "po_number": "PO-RFQ-20260806-ABCDEF",
+            "reference": "RFQ-20260806-ABCDEF",
+            "title": "测试订单",
+            "item_name": "快递袋",
+            "quantity": 10000,
+            "unit": "piece",
+            "supplier_name": "测试供应商",
+            "unit_price_base": "0.3100",
+            "total_amount_base": "3100.00",
+            "currency": "CNY",
+            "snapshot_id": "s" * 32,
+            "snapshot_version": 1,
+            "approval_id": "a" * 32,
+            "created_at": "2026-08-06T00:00:00+00:00",
+            "evidence_sha256": "e" * 64,
+        }
+        monkeypatch.setattr(service, "purchase_order", lambda request_id: order)
+        filename, content = service.purchase_order_csv("request-1")
+        assert filename == f'{order["po_number"]}.csv'
+        assert content.startswith("\ufeff")
+        assert "\\ufeff" not in content
+        assert content[1:].lstrip().startswith("采购订单号")
+    finally:
+        harness.close()
