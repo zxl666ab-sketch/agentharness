@@ -23,14 +23,20 @@ class EventRepo:
 
     def append_unlocked(self, events: list[EventEnvelope]) -> list[EventEnvelope]:
         assigned: list[EventEnvelope] = []
+        run_sequences: dict[str, int] = {}
+        run_ids = list(dict.fromkeys(event.run_id for event in events))
+        if run_ids:
+            placeholders = ",".join("?" for _ in run_ids)
+            rows = self._conn.execute(
+                f"""SELECT run_id, COALESCE(MAX(run_seq), 0) AS max_run_seq
+                    FROM events WHERE run_id IN ({placeholders}) GROUP BY run_id""",
+                run_ids,
+            ).fetchall()
+            run_sequences = {str(row["run_id"]): int(row["max_run_seq"]) for row in rows}
         for ev in events:
             payload = self.redactor.redact_obj(ev.payload)
-            # next run_seq
-            row = self._conn.execute(
-                "SELECT COALESCE(MAX(run_seq), 0) FROM events WHERE run_id = ?",
-                (ev.run_id,),
-            ).fetchone()
-            run_seq = int(row[0]) + 1
+            run_seq = run_sequences.get(ev.run_id, 0) + 1
+            run_sequences[ev.run_id] = run_seq
             cur = self._conn.execute(
                 """INSERT INTO events(
                     event_id, run_seq, session_id, root_run_id, run_id,
@@ -98,6 +104,13 @@ class EventRepo:
                 (after_global_seq, limit),
             ).fetchall()
         return [self._row_to_event(r) for r in rows]
+
+    def count_events(self, run_id: str) -> int:
+        """True per-run event count, independent of any read limit."""
+        row = self._reader().execute(
+            "SELECT COUNT(*) FROM events WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        return int(row[0])
 
     def get_context_manifests(self, run_id: str) -> list[dict[str, Any]]:
         """Return redacted, ordered per-model-turn context manifests."""

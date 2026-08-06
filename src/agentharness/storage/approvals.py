@@ -78,11 +78,10 @@ class ApprovalRepo:
         return cursor.rowcount
 
     def list_approvals(self, run_id: str) -> list[dict[str, Any]]:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM approvals WHERE run_id = ? ORDER BY created_at ASC",
-                (run_id,),
-            ).fetchall()
+        rows = self._reader().execute(
+            "SELECT * FROM approvals WHERE run_id = ? ORDER BY created_at ASC",
+            (run_id,),
+        ).fetchall()
         approvals = [dict(row) for row in rows]
         for approval in approvals:
             approval["requires_confirmation"] = bool(

@@ -166,6 +166,8 @@ export type RunReport = {
   }>;
   usage: Record<string, unknown>;
   events: EventRow[];
+  events_total: number;
+  events_truncated: boolean;
   source: {
     run_updated_at?: string | null;
     max_global_seq: number;
@@ -196,6 +198,15 @@ export const api = {
   health: () => requestJson<HealthResponse>("/api/health"),
   run: (runId: string) => requestJson<RunRow>(`/api/runs/${runId}`),
   report: (runId: string) => requestJson<RunReport>(`/api/runs/${runId}/report`),
+  events: (runId: string, offset = 0, limit = 500) =>
+    requestJson<{
+      items: EventRow[];
+      total: number;
+      offset: number;
+      has_more: boolean;
+    }>(`/api/runs/${runId}/events?offset=${offset}&limit=${limit}`),
+  checkpoint: (runId: string) =>
+    requestJson<Record<string, unknown> | null>(`/api/runs/${runId}/checkpoint`),
   messages: (runId: string) =>
     requestJson<MessageRow[]>(`/api/runs/${runId}/messages`),
   toolInvocations: (runId: string) =>

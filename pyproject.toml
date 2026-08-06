@@ -13,7 +13,6 @@ dependencies = [
     "openpyxl>=3.1",
     "pypdf>=5",
     "reportlab>=4.2",
-    "defusedxml>=0.7",
 ]
 
 [project.optional-dependencies]
@@ -51,7 +50,7 @@ filterwarnings = ["ignore::DeprecationWarning"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
-exclude = ["output", ".venv", "web/node_modules", "web/dist"]
+exclude = ["output", ".venv", "web/node_modules", "web/dist", ".claude", "dist"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B"]

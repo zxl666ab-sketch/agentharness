@@ -10,7 +10,7 @@ All notable changes are documented here. The project follows semantic versioning
 - Deterministic Decimal landed-cost normalization, hard-constraint qualification, immutable supplier-comparison snapshots and mandatory one-time human supplier approval.
 - Procurement analysis linkage to Harness runs, terminal checkpoints, approvals, original/snapshot artifacts, event evidence and restart-stable audit reports.
 - Frozen 31-quote truth set spanning six independent XLSX/PDF layouts and 22 anomaly or boundary combinations, plus reproducible demo generation and extraction/matching/cost/constraint/recommendation/time/model-cost metrics.
-- Controlled one-tester blind comparison with server-derived assisted evidence, and isolated real-model acceptance evidence for complete quotes, human clarification recovery, and deterministic rejection of ineligible quotes.
+- Controlled one-tester blind comparison with server-derived assisted evidence. A single real-model full-chain run record exists in the workspace (screenshots under `docs/evidence/`), but it is not yet organized into a reproducible public evaluation, so no real-model accuracy or cost claim is made; the 617/620 frozen metrics are deterministic and call no model.
 - Procurement approval recovery that resumes the public Harness run once when a successful approval lacks the exact verification marker, plus a guard that blocks supplier selection until the current run has successfully verified the comparison.
 
 ### Changed

@@ -59,6 +59,36 @@ def tool_call_completed(tool_call: ToolCall, completed: set[str]) -> bool:
     return tool_call.invocation_id in completed or tool_call.id in completed
 
 
+def enabled_tool_names(
+    request: RunRequest,
+    invocations: list[ToolInvocationRecord],
+    registered_names: set[str],
+) -> set[str]:
+    """Resolve static allowlists plus optional successful-tool prerequisites."""
+    enabled = set(registered_names)
+    if request.tools is not None:
+        enabled.intersection_update(request.tools)
+    raw_prerequisites = request.metadata.get("tool_prerequisites")
+    if not isinstance(raw_prerequisites, dict):
+        return enabled
+    succeeded = {
+        invocation.tool_name
+        for invocation in invocations
+        if invocation.status == ToolInvocationStatus.succeeded
+    }
+    for tool_name, raw_required in raw_prerequisites.items():
+        if tool_name not in enabled:
+            continue
+        if not isinstance(raw_required, list) or not all(
+            isinstance(item, str) for item in raw_required
+        ):
+            enabled.discard(tool_name)
+            continue
+        if not set(raw_required).issubset(succeeded):
+            enabled.discard(tool_name)
+    return enabled
+
+
 def canonical_arguments(arguments: dict[str, Any]) -> str:
     return json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -327,9 +357,21 @@ class ToolInvocationExecutor:
         # Approval gating
         allowed: list[tuple[ToolCall, ToolInvocationRecord]] = []
         recovering_invocations: set[str] = set()
+        enabled_names = enabled_tool_names(
+            request,
+            self.storage.list_tool_invocations(run_id),
+            set(self.tools),
+        )
         for tc in pending:
             tool = self.tools.get(tc.name)
-            if tool is None:
+            if tool is None or tc.name not in enabled_names:
+                error_code = "unknown_tool" if tool is None else "tool_disabled"
+                disabled_effect = tool.spec.effect if tool is not None else EffectKind.destructive
+                error_message = (
+                    f"Unknown tool: {tc.name}"
+                    if tool is None
+                    else f"Tool is not enabled in the current run stage: {tc.name}"
+                )
                 invocation = ToolInvocationRecord(
                     id=tc.invocation_id,
                     run_id=run_id,
@@ -339,12 +381,16 @@ class ToolInvocationExecutor:
                     provider_call_id=tc.id,
                     tool_name=tc.name,
                     status=ToolInvocationStatus.failed,
-                    effect=EffectKind.destructive,
-                    replay_policy=ReplayPolicy.never,
+                    effect=disabled_effect,
+                    replay_policy=(
+                        resolved_replay_policy(tool.spec, disabled_effect)
+                        if tool is not None
+                        else ReplayPolicy.never
+                    ),
                     arguments=tc.arguments,
                     arguments_sha256=arguments_sha256(tc.arguments),
                     attempt_count=0,
-                    error_code="unknown_tool",
+                    error_code=error_code,
                     error_category="configuration",
                     finished_at=datetime.now(UTC),
                 )
@@ -352,12 +398,16 @@ class ToolInvocationExecutor:
                     tool_call_id=tc.id,
                     invocation_id=tc.invocation_id,
                     name=tc.name,
-                    content=f"Unknown tool: {tc.name}",
+                    content=error_message,
                     is_error=True,
-                    error_code="unknown_tool",
+                    error_code=error_code,
                     error_category="configuration",
-                    retryable=False,
-                    recovery_hint="Choose one of the enabled tool schemas.",
+                    retryable=tool is not None,
+                    recovery_hint=(
+                        "Choose one of the enabled tool schemas."
+                        if tool is None
+                        else "Complete the required earlier tool successfully, then retry."
+                    ),
                     attempts=0,
                 )
                 invocation.result = result

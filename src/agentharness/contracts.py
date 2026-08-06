@@ -95,6 +95,7 @@ class StreamItemType(StrEnum):
     usage = "usage"
     error = "error"
     done = "done"
+    provider_context = "provider_context"
 
 
 class EventType(StrEnum):
@@ -244,6 +245,9 @@ class Message(BaseModel):
     name: str | None = None
     tool_calls: list[ToolCall] | None = None
     tool_result: ToolResult | None = None
+    provider_response_id: str | None = None
+    provider_run_id: str | None = None
+    provider_phase: Literal["commentary", "final_answer"] | None = None
     created_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -287,7 +291,6 @@ class ToolSpec(BaseModel):
     description: str
     parameters: dict[str, Any] = Field(default_factory=dict)
     effect: EffectKind = EffectKind.pure
-    requires_approval: bool = False
     version: str = "1"
     timeout_s: float = Field(default=60.0, gt=0, le=3600)
     max_attempts: int = Field(default=1, ge=1, le=5)
@@ -334,6 +337,8 @@ class ModelStreamItem(BaseModel):
     error: str | None = None
     error_kind: str | None = None  # rate_limit | timeout | cancelled | provider | unknown
     retry_after_s: float | None = Field(default=None, ge=0, le=86_400)
+    provider_response_id: str | None = None
+    provider_phase: Literal["commentary", "final_answer"] | None = None
 
 
 class ModelTurn(BaseModel):
@@ -427,12 +432,11 @@ class VerificationFailure(BaseModel):
 
 
 class VerificationCheck(BaseModel):
-    kind: Literal["output", "file", "command", "ai"]
+    kind: Literal["output", "file", "ai"]
     assertions: dict[str, Any] = Field(default_factory=dict)
     path: str | None = None
     exists: bool = True
     contains: list[str] = Field(default_factory=list)
-    command: str | None = None
     min_score: float = 0.8
 
 

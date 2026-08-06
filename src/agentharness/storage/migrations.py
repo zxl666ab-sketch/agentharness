@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -391,6 +391,11 @@ MIGRATIONS: dict[int, str] = {
         decision, note, actor, created_at
     FROM procurement_decisions_v10;
     DROP TABLE procurement_decisions_v10;
+    """,
+    12: """
+    ALTER TABLE messages ADD COLUMN provider_response_id TEXT;
+    ALTER TABLE messages ADD COLUMN provider_run_id TEXT;
+    ALTER TABLE messages ADD COLUMN provider_phase TEXT;
     """,
 }
 

@@ -267,6 +267,12 @@ def _stream_options_unsupported(exc: BaseException) -> bool:
     )
 
 
+def _uses_max_completion_tokens(model: str) -> bool:
+    """Modern reasoning/chat models reject the legacy ``max_tokens`` field."""
+    normalized = model.strip().lower().split(":", 1)[0]
+    return normalized.startswith(("gpt-5", "o1", "o3", "o4"))
+
+
 def _attr_or_key(raw: Any, name: str) -> Any:
     if raw is None:
         return None
@@ -292,17 +298,17 @@ def _usage_item(raw: Any) -> Usage | None:
     if raw is None:
         return None
     input_tokens = int(
-        getattr(raw, "input_tokens", 0)
-        or getattr(raw, "prompt_tokens", 0)
+        _attr_or_key(raw, "input_tokens")
+        or _attr_or_key(raw, "prompt_tokens")
         or 0
     )
     output_tokens = int(
-        getattr(raw, "output_tokens", 0)
-        or getattr(raw, "completion_tokens", 0)
+        _attr_or_key(raw, "output_tokens")
+        or _attr_or_key(raw, "completion_tokens")
         or 0
     )
     total_tokens = int(
-        getattr(raw, "total_tokens", 0) or input_tokens + output_tokens
+        _attr_or_key(raw, "total_tokens") or input_tokens + output_tokens
     )
     if not (input_tokens or output_tokens or total_tokens):
         return None
@@ -420,7 +426,7 @@ class OpenAIResponsesAdapter:
     ) -> AsyncIterator[ModelStreamItem]:
         client = self._get_client()
         model = request.model or self.default_model
-        input_items = self._to_input(request)
+        input_items, previous_response_id = self._responses_context(request)
         tools = self._to_tools_responses(request)
         kwargs: dict[str, Any] = {
             "model": model,
@@ -431,8 +437,12 @@ class OpenAIResponsesAdapter:
             kwargs["tools"] = tools
             if request.parallel_tool_calls is not None:
                 kwargs["parallel_tool_calls"] = request.parallel_tool_calls
+        if previous_response_id:
+            kwargs["previous_response_id"] = previous_response_id
         if request.reasoning_effort:
             kwargs["reasoning"] = {"effort": request.reasoning_effort}
+        if request.temperature is not None:
+            kwargs["temperature"] = request.temperature
         if request.max_tokens:
             kwargs["max_output_tokens"] = request.max_tokens
         try:
@@ -440,13 +450,29 @@ class OpenAIResponsesAdapter:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            if _is_not_found(exc):
+            if previous_response_id and _is_not_found(exc):
+                kwargs.pop("previous_response_id", None)
+                kwargs["input"] = self._to_input(request)
+                try:
+                    stream = await client.responses.create(**kwargs)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as retry_exc:  # noqa: BLE001
+                    if _is_not_found(retry_exc):
+                        raise
+                    yield _error_item(retry_exc)
+                    return
+            elif _is_not_found(exc):
                 # Only endpoint discovery may switch the adapter to Chat mode.
                 raise
-            yield _error_item(exc)
-            return
+            else:
+                yield _error_item(exc)
+                return
 
         calls = _ToolCallAccumulator()
+        output_text_seen = False
+        refusal_seen = False
+        phases_seen: set[str] = set()
         try:
             async for event in stream:
                 etype = getattr(event, "type", "") or ""
@@ -454,12 +480,29 @@ class OpenAIResponsesAdapter:
                     if etype == "response.output_text.delta":
                         delta = getattr(event, "delta", "") or ""
                         if delta:
+                            output_text_seen = True
+                            yield ModelStreamItem(
+                                type=StreamItemType.text_delta, text=delta
+                            )
+                    elif etype == "response.refusal.delta":
+                        delta = getattr(event, "delta", "") or ""
+                        if delta:
+                            refusal_seen = True
                             yield ModelStreamItem(
                                 type=StreamItemType.text_delta, text=delta
                             )
                     elif etype == "response.output_item.added":
                         item = getattr(event, "item", None)
-                        if item is not None and getattr(item, "type", "") == "function_call":
+                        item_type = getattr(item, "type", "") if item is not None else ""
+                        if item_type == "message":
+                            phase = getattr(item, "phase", None)
+                            if phase in {"commentary", "final_answer"} and phase not in phases_seen:
+                                phases_seen.add(phase)
+                                yield ModelStreamItem(
+                                    type=StreamItemType.provider_context,
+                                    provider_phase=phase,
+                                )
+                        elif item_type == "function_call":
                             item_id = str(getattr(item, "id", "") or "").strip()
                             if not item_id:
                                 raise _ProviderProtocolError(
@@ -501,7 +544,16 @@ class OpenAIResponsesAdapter:
                             yield normalized
                     elif etype == "response.output_item.done":
                         item = getattr(event, "item", None)
-                        if item is not None and getattr(item, "type", "") == "function_call":
+                        item_type = getattr(item, "type", "") if item is not None else ""
+                        if item_type == "message":
+                            phase = getattr(item, "phase", None)
+                            if phase in {"commentary", "final_answer"} and phase not in phases_seen:
+                                phases_seen.add(phase)
+                                yield ModelStreamItem(
+                                    type=StreamItemType.provider_context,
+                                    provider_phase=phase,
+                                )
+                        elif item_type == "function_call":
                             item_id = str(getattr(item, "id", "") or "").strip()
                             if not item_id:
                                 raise _ProviderProtocolError(
@@ -520,9 +572,68 @@ class OpenAIResponsesAdapter:
                             ):
                                 yield normalized
                     elif etype == "response.completed":
+                        response = getattr(event, "response", None)
+                        # A few compatible gateways only expose ``response.output``
+                        # on the terminal event. Recover omitted message/function
+                        # items before finalizing the normalized stream.
+                        for output in getattr(response, "output", None) or []:
+                            output_type = str(getattr(output, "type", "") or "")
+                            if output_type == "function_call":
+                                item_id = str(
+                                    getattr(output, "id", None)
+                                    or getattr(output, "call_id", None)
+                                    or ""
+                                ).strip()
+                                if not item_id:
+                                    raise _ProviderProtocolError(
+                                        "completed function call item is missing id"
+                                    )
+                                raw = getattr(output, "arguments", None)
+                                if raw is None:
+                                    raise _ProviderProtocolError(
+                                        "completed function call item is missing arguments"
+                                    )
+                                for normalized in calls.arguments_done(
+                                    item_id,
+                                    str(raw),
+                                    call_id=getattr(output, "call_id", None),
+                                    name=getattr(output, "name", None),
+                                ):
+                                    yield normalized
+                            elif output_type == "message":
+                                phase = getattr(output, "phase", None)
+                                if phase in {"commentary", "final_answer"} and phase not in phases_seen:
+                                    phases_seen.add(phase)
+                                    yield ModelStreamItem(
+                                        type=StreamItemType.provider_context,
+                                        provider_phase=phase,
+                                    )
+                                if not output_text_seen and not refusal_seen:
+                                    for part in getattr(output, "content", None) or []:
+                                        part_type = str(getattr(part, "type", "") or "")
+                                        text = getattr(part, "text", None)
+                                        if part_type in {"output_text", "text"} and text:
+                                            output_text_seen = True
+                                            yield ModelStreamItem(
+                                                type=StreamItemType.text_delta,
+                                                text=str(text),
+                                            )
+                                        elif part_type == "refusal" and text:
+                                            refusal_seen = True
+                                            yield ModelStreamItem(
+                                                type=StreamItemType.text_delta,
+                                                text=str(text),
+                                            )
                         for normalized in calls.finalize():
                             yield normalized
-                        response = getattr(event, "response", None)
+                        response_id = str(
+                            getattr(response, "id", "") if response else ""
+                        ).strip()
+                        if response_id:
+                            yield ModelStreamItem(
+                                type=StreamItemType.provider_context,
+                                provider_response_id=response_id,
+                            )
                         usage = _usage_item(
                             getattr(response, "usage", None) if response else None
                         )
@@ -594,8 +705,17 @@ class OpenAIResponsesAdapter:
             kwargs["tools"] = tools
             if request.parallel_tool_calls is not None:
                 kwargs["parallel_tool_calls"] = request.parallel_tool_calls
+        if request.reasoning_effort:
+            kwargs["reasoning_effort"] = request.reasoning_effort
+        if request.temperature is not None:
+            kwargs["temperature"] = request.temperature
+        if request.stop:
+            kwargs["stop"] = request.stop
         if request.max_tokens:
-            kwargs["max_tokens"] = request.max_tokens
+            if _uses_max_completion_tokens(model):
+                kwargs["max_completion_tokens"] = request.max_tokens
+            else:
+                kwargs["max_tokens"] = request.max_tokens
         # Best-effort usage on stream; retry without it only when the gateway
         # explicitly rejects this field.
         kwargs["stream_options"] = {"include_usage": True}
@@ -642,6 +762,9 @@ class OpenAIResponsesAdapter:
                 content = getattr(delta, "content", None)
                 if content:
                     yield ModelStreamItem(type=StreamItemType.text_delta, text=content)
+                refusal = getattr(delta, "refusal", None)
+                if refusal:
+                    yield ModelStreamItem(type=StreamItemType.text_delta, text=refusal)
                 tool_calls = getattr(delta, "tool_calls", None) or []
                 for tc in tool_calls:
                     idx = int(getattr(tc, "index", 0) or 0)
@@ -718,14 +841,42 @@ class OpenAIResponsesAdapter:
                             "type": "function_call",
                             "call_id": tc.id,
                             "name": tc.name,
-                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                            "arguments": tc.arguments_raw
+                            or json.dumps(tc.arguments, ensure_ascii=False),
                         }
                     )
                 if m.content:
-                    items.append({"role": "assistant", "content": m.content})
+                    item = {"role": "assistant", "content": m.content}
+                    if m.provider_phase:
+                        item["phase"] = m.provider_phase
+                    items.append(item)
             else:
-                items.append({"role": role, "content": m.content})
+                item = {"role": role, "content": m.content}
+                if role == "assistant" and m.provider_phase:
+                    item["phase"] = m.provider_phase
+                items.append(item)
         return items
+
+    def _responses_context(
+        self, request: ModelRequest
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Continue an official Responses conversation inside one Harness run."""
+        run_id = str(request.metadata.get("run_id") or "")
+        if run_id:
+            for index in range(len(request.messages) - 1, -1, -1):
+                message = request.messages[index]
+                if (
+                    message.provider_response_id
+                    and message.provider_run_id == run_id
+                ):
+                    continuation = request.model_copy(
+                        update={
+                            "messages": request.messages[index + 1 :],
+                            "system": None,
+                        }
+                    )
+                    return self._to_input(continuation), message.provider_response_id
+        return self._to_input(request), None
 
     def _to_chat_messages(self, request: ModelRequest) -> list[dict[str, Any]]:
         """Chat Completions messages array."""
@@ -751,9 +902,8 @@ class OpenAIResponsesAdapter:
                             "type": "function",
                             "function": {
                                 "name": tc.name,
-                                "arguments": json.dumps(
-                                    tc.arguments, ensure_ascii=False
-                                ),
+                                "arguments": tc.arguments_raw
+                                or json.dumps(tc.arguments, ensure_ascii=False),
                             },
                         }
                     )

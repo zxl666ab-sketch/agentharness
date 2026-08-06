@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -17,6 +18,7 @@ from agentharness.contracts import (
     RunRequest,
     RunStatus,
     StreamItemType,
+    ToolCall,
     ToolSpec,
 )
 from agentharness.harness import Harness
@@ -98,6 +100,425 @@ async def test_openai_stream_text_usage_done():
     assert client.responses.create.await_args.kwargs["reasoning"] == {"effort": "max"}
     for i in items:
         assert "choices" not in i.model_dump()
+
+
+@pytest.mark.asyncio
+async def test_responses_chains_official_response_state_after_tool_call():
+    events = [
+        SimpleNamespace(
+            type="response.completed",
+            response=SimpleNamespace(
+                id="resp_next",
+                usage=SimpleNamespace(input_tokens=3, output_tokens=2),
+            ),
+        )
+    ]
+    client = MagicMock()
+    client.responses.create = AsyncMock(return_value=_AsyncIter(events))
+    adapter = OpenAIResponsesAdapter(api_key="test", api_mode="responses")
+    request = ModelRequest(
+        messages=[
+            Message(role=MessageRole.user, content="read the file"),
+            Message(
+                role=MessageRole.assistant,
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="read_file",
+                        arguments={"path": "a.txt"},
+                        arguments_raw='{"path":"a.txt"}',
+                    )
+                ],
+                provider_response_id="resp_previous",
+                provider_run_id="run-1",
+            ),
+            Message(
+                role=MessageRole.tool,
+                tool_call_id="call_1",
+                content="alpha",
+            ),
+        ],
+        metadata={"run_id": "run-1"},
+    )
+
+    with patch.object(adapter, "_get_client", return_value=client):
+        items = await _collect(adapter, request)
+
+    kwargs = client.responses.create.await_args.kwargs
+    assert kwargs["previous_response_id"] == "resp_previous"
+    assert kwargs["input"] == [
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "alpha",
+        }
+    ]
+    contexts = [
+        item for item in items if item.type == StreamItemType.provider_context
+    ]
+    assert [item.provider_response_id for item in contexts] == ["resp_next"]
+
+
+@pytest.mark.asyncio
+async def test_expired_previous_response_replays_local_transcript_in_responses():
+    expired = type("NotFound", (Exception,), {"status_code": 404})("response expired")
+    completed = _AsyncIter(
+        [
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(id="resp_recovered", usage=None),
+            )
+        ]
+    )
+    client = MagicMock()
+    client.responses.create = AsyncMock(side_effect=[expired, completed])
+    client.chat.completions.create = AsyncMock()
+    adapter = OpenAIResponsesAdapter(api_key="test", api_mode="responses")
+    request = ModelRequest(
+        messages=[
+            Message(role=MessageRole.user, content="question"),
+            Message(
+                role=MessageRole.assistant,
+                content="answer",
+                provider_response_id="resp_expired",
+                provider_run_id="run-1",
+            ),
+            Message(role=MessageRole.user, content="follow up"),
+        ],
+        metadata={"run_id": "run-1"},
+    )
+
+    with patch.object(adapter, "_get_client", return_value=client):
+        items = await _collect(adapter, request)
+
+    assert client.responses.create.await_count == 2
+    first, second = client.responses.create.await_args_list
+    assert first.kwargs["previous_response_id"] == "resp_expired"
+    assert "previous_response_id" not in second.kwargs
+    assert second.kwargs["input"] == [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "answer"},
+        {"role": "user", "content": "follow up"},
+    ]
+    assert adapter.api_mode == "responses"
+    client.chat.completions.create.assert_not_called()
+    assert any(item.type == StreamItemType.done for item in items)
+
+
+@pytest.mark.asyncio
+async def test_harness_persists_response_id_between_real_model_tool_turns(
+    data_dir, workspace
+):
+    first = _AsyncIter(
+        [
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(
+                    type="function_call",
+                    id="fc_1",
+                    call_id="call_1",
+                    name="read_file",
+                ),
+            ),
+            SimpleNamespace(
+                type="response.function_call_arguments.done",
+                item_id="fc_1",
+                arguments='{"path":"a.txt"}',
+            ),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(id="resp_1", usage=None),
+            ),
+        ]
+    )
+    second = _AsyncIter(
+        [
+            SimpleNamespace(type="response.output_text.delta", delta="done"),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(id="resp_2", usage=None),
+            ),
+        ]
+    )
+    client = MagicMock()
+    client.responses.create = AsyncMock(side_effect=[first, second])
+    adapter = OpenAIResponsesAdapter(api_key="test", api_mode="responses")
+    harness = Harness(data_dir=data_dir, providers={"openai": adapter})
+
+    try:
+        with patch.object(adapter, "_get_client", return_value=client):
+            result = await harness.run(
+                RunRequest(
+                    message="read a.txt",
+                    provider="openai",
+                    approval=ApprovalMode.auto,
+                    cwd=str(workspace),
+                    tools=["read_file"],
+                )
+            )
+    finally:
+        await harness.aclose()
+
+    assert result.status == RunStatus.completed
+    assert result.output == "done"
+    assert client.responses.create.await_count == 2
+    second_kwargs = client.responses.create.await_args_list[1].kwargs
+    assert second_kwargs["previous_response_id"] == "resp_1"
+    assert second_kwargs["input"][0]["type"] == "function_call_output"
+    assert second_kwargs["input"][0]["call_id"] == "call_1"
+    assert json.loads(second_kwargs["input"][0]["output"]) == {
+        "ok": False,
+        "error": {
+            "code": "unknown_tool",
+            "category": "configuration",
+            "message": "Unknown tool: read_file",
+            "retryable": False,
+            "recovery_hint": "Choose one of the enabled tool schemas.",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_chat_forwards_supported_generation_controls():
+    chunks = [
+        SimpleNamespace(
+            usage=None,
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    delta=SimpleNamespace(content="ok", tool_calls=None),
+                )
+            ],
+        )
+    ]
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(return_value=_AsyncIter(chunks))
+    adapter = OpenAIResponsesAdapter(api_key="test", api_mode="chat")
+    request = _req().model_copy(
+        update={
+            "reasoning_effort": "high",
+            "temperature": 0.2,
+            "stop": ["END"],
+        }
+    )
+
+    with patch.object(adapter, "_get_client", return_value=client):
+        await _collect(adapter, request)
+
+    kwargs = client.chat.completions.create.await_args.kwargs
+    assert kwargs["reasoning_effort"] == "high"
+    assert kwargs["temperature"] == 0.2
+    assert kwargs["stop"] == ["END"]
+
+
+@pytest.mark.asyncio
+async def test_chat_uses_max_completion_tokens_for_modern_models():
+    chunks = [
+        SimpleNamespace(
+            usage=None,
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    delta=SimpleNamespace(content="ok", tool_calls=None),
+                )
+            ],
+        )
+    ]
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(return_value=_AsyncIter(chunks))
+    adapter = OpenAIResponsesAdapter(api_key="test", api_mode="chat")
+    request = _req().model_copy(update={"model": "gpt-5-mini", "max_tokens": 321})
+
+    with patch.object(adapter, "_get_client", return_value=client):
+        await _collect(adapter, request)
+
+    kwargs = client.chat.completions.create.await_args.kwargs
+    assert kwargs["max_completion_tokens"] == 321
+    assert "max_tokens" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_responses_completed_output_recovers_omitted_stream_items():
+    events = [
+        SimpleNamespace(
+            type="response.completed",
+            response=SimpleNamespace(
+                id="resp_terminal",
+                usage=None,
+                output=[
+                    SimpleNamespace(
+                        type="message",
+                        phase="final_answer",
+                        content=[SimpleNamespace(type="output_text", text="done")],
+                    ),
+                    SimpleNamespace(
+                        type="function_call",
+                        id="fc_1",
+                        call_id="call_1",
+                        name="read_file",
+                        arguments='{"path":"a.txt"}',
+                    ),
+                ],
+            ),
+        )
+    ]
+    client = MagicMock()
+    client.responses.create = AsyncMock(return_value=_AsyncIter(events))
+    adapter = OpenAIResponsesAdapter(api_key="test", api_mode="responses")
+    with patch.object(adapter, "_get_client", return_value=client):
+        items = await _collect(adapter, _req(tools=True))
+
+    assert "done" == "".join(i.text or "" for i in items if i.type == StreamItemType.text_delta)
+    assert any(i.provider_phase == "final_answer" for i in items)
+    ends = [i for i in items if i.type == StreamItemType.tool_call_end]
+    assert len(ends) == 1
+    assert ends[0].tool_call_id == "call_1"
+    assert ends[0].arguments == {"path": "a.txt"}
+
+
+@pytest.mark.asyncio
+async def test_responses_preserves_assistant_phase_for_local_replay():
+    events = [
+        SimpleNamespace(
+            type="response.output_item.added",
+            item=SimpleNamespace(
+                type="message",
+                id="msg_1",
+                phase="commentary",
+            ),
+        ),
+        SimpleNamespace(
+            type="response.completed",
+            response=SimpleNamespace(id="resp_1", usage=None),
+        ),
+    ]
+    client = MagicMock()
+    client.responses.create = AsyncMock(return_value=_AsyncIter(events))
+    adapter = OpenAIResponsesAdapter(api_key="test", api_mode="responses")
+
+    with patch.object(adapter, "_get_client", return_value=client):
+        items = await _collect(adapter, _req())
+
+    phases = [
+        item.provider_phase
+        for item in items
+        if item.type == StreamItemType.provider_context and item.provider_phase
+    ]
+    assert phases == ["commentary"]
+    replay = ModelRequest(
+        messages=[
+            Message(
+                role=MessageRole.assistant,
+                content="I will inspect the quote.",
+                provider_phase="commentary",
+            )
+        ]
+    )
+    assert adapter._to_input(replay) == [
+        {
+            "role": "assistant",
+            "content": "I will inspect the quote.",
+            "phase": "commentary",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_mode", ["responses", "chat"])
+async def test_refusal_deltas_are_not_silently_dropped(api_mode: str):
+    client = MagicMock()
+    if api_mode == "responses":
+        client.responses.create = AsyncMock(
+            return_value=_AsyncIter(
+                [
+                    SimpleNamespace(
+                        type="response.refusal.delta",
+                        delta="I cannot perform that request.",
+                    ),
+                    SimpleNamespace(
+                        type="response.completed",
+                        response=SimpleNamespace(id="resp_refusal", usage=None),
+                    ),
+                ]
+            )
+        )
+    else:
+        client.chat.completions.create = AsyncMock(
+            return_value=_AsyncIter(
+                [
+                    SimpleNamespace(
+                        usage=None,
+                        choices=[
+                            SimpleNamespace(
+                                finish_reason="stop",
+                                delta=SimpleNamespace(
+                                    content=None,
+                                    refusal="I cannot perform that request.",
+                                    tool_calls=None,
+                                ),
+                            )
+                        ],
+                    )
+                ]
+            )
+        )
+    adapter = OpenAIResponsesAdapter(api_key="test", api_mode=api_mode)
+
+    with patch.object(adapter, "_get_client", return_value=client):
+        items = await _collect(adapter, _req())
+
+    assert "".join(
+        item.text or "" for item in items if item.type == StreamItemType.text_delta
+    ) == "I cannot perform that request."
+
+
+def test_manual_tool_call_replay_preserves_official_raw_arguments():
+    adapter = OpenAIResponsesAdapter(api_key="test", api_mode="responses")
+    call = ToolCall(
+        id="call_1",
+        name="read_file",
+        arguments={"path": "a.txt", "line": 1},
+        arguments_raw='{ "path": "a.txt", "line": 1 }',
+    )
+    request = ModelRequest(
+        messages=[Message(role=MessageRole.assistant, tool_calls=[call])]
+    )
+
+    assert adapter._to_input(request)[0]["arguments"] == call.arguments_raw
+    adapter.api_mode = "chat"
+    assert (
+        adapter._to_chat_messages(request)[0]["tool_calls"][0]["function"][
+            "arguments"
+        ]
+        == call.arguments_raw
+    )
+
+
+def test_responses_replay_preserves_phase_on_assistant_tool_preamble():
+    adapter = OpenAIResponsesAdapter(api_key="test", api_mode="responses")
+    call = ToolCall(
+        id="call_1",
+        name="read_file",
+        arguments={"path": "a.txt"},
+        arguments_raw='{"path":"a.txt"}',
+    )
+    request = ModelRequest(
+        messages=[
+            Message(
+                role=MessageRole.assistant,
+                content="I will inspect the quote.",
+                tool_calls=[call],
+                provider_phase="commentary",
+            )
+        ]
+    )
+
+    items = adapter._to_input(request)
+    assert items[-1] == {
+        "role": "assistant",
+        "content": "I will inspect the quote.",
+        "phase": "commentary",
+    }
 
 
 @pytest.mark.asyncio

@@ -118,6 +118,12 @@ export function RunReport({ report, loading = false, error = null }: Props) {
   const { conclusion, verification, usage, source } = report;
   const validators = verification.policy?.validators || [];
   const cost = usage.estimated_cost_usd;
+  const costStatus = usage.cost_status;
+  const costLabel = costStatus === "estimated" && typeof cost === "number"
+    ? ` · $${cost.toFixed(4)}`
+    : costStatus === "unknown"
+      ? " · 成本未知"
+      : "";
 
   return (
     <section className={`run-report ${conclusion.status}`} aria-label="结果证据报告">
@@ -285,7 +291,7 @@ export function RunReport({ report, loading = false, error = null }: Props) {
         <details className="report-section">
           <summary>
             <span><Gauge size={15} />资源消耗</span>
-            <span>{formatNumber(usage.total_tokens)} Token{typeof cost === "number" ? ` · $${cost.toFixed(4)}` : ""}</span>
+            <span>{formatNumber(usage.total_tokens)} Token{costLabel}</span>
             <ChevronRight size={15} />
           </summary>
           <div className="report-section-body">
@@ -312,6 +318,11 @@ export function RunReport({ report, loading = false, error = null }: Props) {
               </details>
             ))}
           </div>
+          {report.events_truncated ? (
+            <p className="report-empty">
+              事件过多，仅显示最近 {report.events.length} 条（共 {report.events_total} 条）。
+            </p>
+          ) : null}
         </details>
       </div>
     </section>

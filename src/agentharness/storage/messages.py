@@ -33,8 +33,9 @@ class MessageRepo:
             self._conn.execute(
                 """INSERT OR REPLACE INTO messages(
                     id, run_id, session_id, role, content, tool_call_id, name,
-                    tool_calls_json, tool_result_json, seq, created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    tool_calls_json, tool_result_json, seq, created_at,
+                    provider_response_id, provider_run_id, provider_phase
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     message.id,
                     run_id,
@@ -49,6 +50,9 @@ class MessageRepo:
                     message.created_at.isoformat()
                     if hasattr(message.created_at, "isoformat")
                     else str(message.created_at),
+                    message.provider_response_id,
+                    message.provider_run_id,
+                    message.provider_phase,
                 ),
             )
 
@@ -64,11 +68,10 @@ class MessageRepo:
         return cursor.rowcount
 
     def get_messages(self, run_id: str) -> list[Message]:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM messages WHERE run_id = ? ORDER BY seq ASC",
-                (run_id,),
-            ).fetchall()
+        rows = self._reader().execute(
+            "SELECT * FROM messages WHERE run_id = ? ORDER BY seq ASC",
+            (run_id,),
+        ).fetchall()
         result: list[Message] = []
         for r in rows:
             tcs = None
@@ -88,6 +91,17 @@ class MessageRepo:
                     ToolResult.model_validate(json.loads(r["tool_result_json"]))
                     if "tool_result_json" in r.keys() and r["tool_result_json"]
                     else None
+                ),
+                provider_response_id=(
+                    r["provider_response_id"]
+                    if "provider_response_id" in r.keys()
+                    else None
+                ),
+                provider_run_id=(
+                    r["provider_run_id"] if "provider_run_id" in r.keys() else None
+                ),
+                provider_phase=(
+                    r["provider_phase"] if "provider_phase" in r.keys() else None
                 ),
             )
             if created:

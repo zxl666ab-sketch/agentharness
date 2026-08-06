@@ -113,6 +113,9 @@ async def test_app_lifespan_starts_and_stops_the_sweeper(data_dir):
             assert during > before
             response = await client.get("/api/health")
             assert response.status_code == 200
+            assert response.headers["x-content-type-options"] == "nosniff"
+            assert response.headers["x-frame-options"] == "DENY"
+            assert response.headers["referrer-policy"] == "no-referrer"
         await asyncio.sleep(0)
         assert len(asyncio.all_tasks()) <= during
     harness.close()

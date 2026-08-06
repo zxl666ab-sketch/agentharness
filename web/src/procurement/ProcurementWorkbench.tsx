@@ -18,7 +18,7 @@ import {
   Wifi,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useAgentStream } from "../useAgentStream";
 import { AuditView } from "./AuditView";
@@ -44,6 +44,13 @@ type Props = {
 };
 
 type Tab = "quotes" | "compare" | "report" | "audit";
+type BusyAction =
+  | "conversation"
+  | "upload"
+  | "analyze"
+  | "approve"
+  | "no_award"
+  | `field:${string}:${string}`;
 
 const STATUS: Record<ProcurementStatus, { label: string; tone: string; step: number }> = {
   draft: { label: "Agent 读取中", tone: "info", step: 1 },
@@ -98,7 +105,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   const [showCreate, setShowCreate] = useState(false);
   const [pendingRunId, setPendingRunId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [busy, setBusy] = useState<string | null>(null);
+  const [busy, setBusy] = useState<BusyAction | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [showConfig, setShowConfig] = useState(false);
   const [configForm, setConfigForm] = useState<ProcurementModelConfigUpdate>(DEFAULT_CONFIG_FORM);
@@ -120,6 +127,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     enabled: !!selectedId && activeTab === "report" && !!detailQuery.data?.decision,
   });
   const stream = useAgentStream(true, 0);
+  const streamRefreshTimer = useRef<number | null>(null);
 
   const requests = useMemo(() => requestsQuery.data || [], [requestsQuery.data]);
   const filtered = useMemo(() => {
@@ -141,16 +149,24 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   const latestEvent = stream.events.at(-1);
   useEffect(() => {
     if (!latestEvent || latestEvent.run_id !== currentRunId || !selectedId) return;
-    void Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["procurement-request", selectedId] }),
-      queryClient.invalidateQueries({ queryKey: ["procurement-requests"] }),
-      queryClient.invalidateQueries({ queryKey: ["procurement-run", currentRunId] }),
-      queryClient.invalidateQueries({ queryKey: ["procurement-messages", currentRunId] }),
-      queryClient.invalidateQueries({ queryKey: ["procurement-tools", currentRunId] }),
-      queryClient.invalidateQueries({ queryKey: ["run-report", currentRunId] }),
-      queryClient.invalidateQueries({ queryKey: ["run-checkpoint", currentRunId] }),
-    ]);
+    if (streamRefreshTimer.current !== null) return;
+    streamRefreshTimer.current = window.setTimeout(() => {
+      streamRefreshTimer.current = null;
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["procurement-request", selectedId] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-requests"] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-run", currentRunId] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-messages", currentRunId] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-tools", currentRunId] }),
+        queryClient.invalidateQueries({ queryKey: ["run-report", currentRunId] }),
+        queryClient.invalidateQueries({ queryKey: ["run-checkpoint", currentRunId] }),
+      ]);
+    }, 500);
   }, [currentRunId, latestEvent, queryClient, selectedId]);
+
+  useEffect(() => () => {
+    if (streamRefreshTimer.current !== null) window.clearTimeout(streamRefreshTimer.current);
+  }, []);
 
   async function commit(updated: ProcurementRequest) {
     queryClient.setQueryData(["procurement-request", updated.id], updated);
@@ -429,6 +445,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
               <div className="proc-task-body">
                 <ProcurementConversation
                   request={detail}
+                  streamLive={stream.status === "live"}
                   actionError={actionError}
                   onResume={resume}
                   onRecover={analyze}

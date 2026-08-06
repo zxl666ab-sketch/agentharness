@@ -28,7 +28,10 @@ class SessionRepo:
         return sid
 
     def session_exists(self, session_id: str) -> bool:
-        return self.get_session(session_id) is not None
+        row = self._reader().execute(
+            "SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (session_id,)
+        ).fetchone()
+        return row is not None
 
     def update_session(
         self,
@@ -99,33 +102,30 @@ class SessionRepo:
         return [dict(r) for r in rows]
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM sessions WHERE id = ?", (session_id,)
-            ).fetchone()
+        row = self._reader().execute(
+            "SELECT * FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
         return dict(row) if row else None
 
     def list_top_level_runs(self, session_id: str) -> list[dict[str, Any]]:
         """Top-level runs for a session ordered by created_at ascending."""
-        with self._lock:
-            rows = self._conn.execute(
-                """SELECT * FROM runs
-                   WHERE session_id = ?
-                     AND (parent_run_id IS NULL OR parent_run_id = '')
-                   ORDER BY created_at ASC, rowid ASC""",
-                (session_id,),
-            ).fetchall()
+        rows = self._reader().execute(
+            """SELECT * FROM runs
+               WHERE session_id = ?
+                 AND (parent_run_id IS NULL OR parent_run_id = '')
+               ORDER BY created_at ASC, rowid ASC""",
+            (session_id,),
+        ).fetchall()
         return [dict(r) for r in rows]
 
     def list_completed_top_level_runs(self, session_id: str) -> list[dict[str, Any]]:
         """Completed top-level runs only (eligible for multi-turn context history)."""
-        with self._lock:
-            rows = self._conn.execute(
-                """SELECT * FROM runs
-                   WHERE session_id = ?
-                     AND (parent_run_id IS NULL OR parent_run_id = '')
-                     AND status = 'completed'
-                   ORDER BY created_at ASC, rowid ASC""",
-                (session_id,),
-            ).fetchall()
+        rows = self._reader().execute(
+            """SELECT * FROM runs
+               WHERE session_id = ?
+                 AND (parent_run_id IS NULL OR parent_run_id = '')
+                 AND status = 'completed'
+               ORDER BY created_at ASC, rowid ASC""",
+            (session_id,),
+        ).fetchall()
         return [dict(r) for r in rows]

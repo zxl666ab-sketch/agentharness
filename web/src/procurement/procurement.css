@@ -502,6 +502,8 @@
 .proc-conversation-head > div { display: flex; align-items: center; gap: 7px; }
 .proc-conversation-head > div svg { color: var(--accent); }
 .proc-conversation-head strong { font-size: var(--text-xs); }
+.proc-conversation-head-actions { gap: 10px; }
+.proc-conversation-head-actions .proc-button { min-height: 26px; padding: 0 10px; font-size: 11px; }
 .proc-run-state {
   display: inline-flex;
   min-width: 0;

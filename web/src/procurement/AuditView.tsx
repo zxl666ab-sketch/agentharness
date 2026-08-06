@@ -8,12 +8,6 @@ import type { ProcurementRequest } from "./types";
 
 type Props = { request: ProcurementRequest };
 
-async function checkpoint(runId: string): Promise<Record<string, unknown> | null> {
-  const response = await fetch(`/api/runs/${runId}/checkpoint`);
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-  return response.json() as Promise<Record<string, unknown> | null>;
-}
-
 function percent(value: number) {
   return `${(value * 100).toFixed(value === 1 ? 0 : 1)}%`;
 }
@@ -27,7 +21,7 @@ export function AuditView({ request }: Props) {
   });
   const checkpointQuery = useQuery({
     queryKey: ["run-checkpoint", runId],
-    queryFn: () => checkpoint(runId!),
+    queryFn: () => api.checkpoint(runId!),
     enabled: !!runId,
   });
   const evaluation = useQuery({
@@ -38,6 +32,10 @@ export function AuditView({ request }: Props) {
   const usage = runReport.data?.usage;
   const modelTurns = Number(usage?.model_turns || 0);
   const estimatedCost = usage?.estimated_cost_usd;
+  const costStatus = usage?.cost_status;
+  const costLabel = costStatus === "estimated" && typeof estimatedCost === "number"
+    ? `$${estimatedCost.toFixed(4)}`
+    : "成本未知";
   const checkpointStatus = String(checkpointQuery.data?.status || "");
   const checkpointLabel = checkpointStatus === "completed"
     ? "已完成并持久化"
@@ -48,6 +46,11 @@ export function AuditView({ request }: Props) {
         : checkpointQuery.isError
           ? "读取失败"
           : "读取中";
+  const approvalLabel = request.decision
+    ? request.decision.decision === "no_award"
+      ? "已确认无合格报价"
+      : "供应商已批准"
+    : "待审批";
 
   return (
     <div className="proc-audit-view">
@@ -59,7 +62,7 @@ export function AuditView({ request }: Props) {
               <span><small>辅助方案字段抽取</small><strong>{percent(evaluation.data.metrics.field_extraction.accuracy)}</strong></span>
               <span><small>物料匹配</small><strong>{percent(evaluation.data.metrics.item_matching.accuracy)}</strong></span>
               <span><small>金额计算</small><strong>{percent(evaluation.data.metrics.cost_calculation.accuracy)}</strong></span>
-              <span><small>硬约束漏检</small><strong>{percent(evaluation.data.metrics.hard_constraint_miss.miss_rate)}</strong></span>
+              <span><small>硬约束漏检 ↓</small><strong title="漏检率越低越好">{percent(evaluation.data.metrics.hard_constraint_miss.miss_rate)}</strong></span>
               <span><small>不合格报价错误入选</small><strong>{evaluation.data.metrics.incorrect_eligible_selection.count}</strong></span>
               <span><small>推荐准确率</small><strong>{percent(evaluation.data.metrics.recommendation_accuracy.rate)}</strong></span>
               <span><small>推荐稳定率</small><strong>{percent(evaluation.data.metrics.recommendation_consistency.rate)}</strong></span>
@@ -67,6 +70,7 @@ export function AuditView({ request }: Props) {
             </div>
             <div className="proc-eval-table-wrap">
               <table className="proc-eval-table">
+                <caption>冻结真值集评测：方案对比</caption>
                 <thead>
                   <tr>
                     <th>方案</th><th>字段抽取</th><th>物料匹配</th><th>金额计算</th><th>硬约束漏检</th><th>错误入选</th><th>报价复核率</th><th>程序平均耗时</th><th>模型成本</th>
@@ -102,6 +106,16 @@ export function AuditView({ request }: Props) {
           <div className="proc-loading-line">
             {evaluation.isError ? <AlertTriangle size={15} /> : <Clock3 size={15} />}
             {evaluation.isError ? "冻结评测加载失败" : "正在运行冻结评测"}
+            {evaluation.isError ? (
+              <button
+                type="button"
+                className="proc-button"
+                style={{ marginLeft: 10 }}
+                onClick={() => evaluation.refetch()}
+              >
+                重试
+              </button>
+            ) : null}
           </div>
         )}
       </section>
@@ -111,8 +125,8 @@ export function AuditView({ request }: Props) {
           <section className="proc-runtime-links">
             <div><Activity size={17} /><span><small>分析运行 ID</small><code>{runId}</code></span></div>
             <div><Database size={17} /><span><small>持久化检查点</small><strong>{checkpointLabel}</strong></span></div>
-            <div><ShieldCheck size={17} /><span><small>人工审批</small><strong>{request.decision ? "已允许一次" : "待审批"}</strong></span></div>
-            <div><Gauge size={17} /><span><small>模型回合 / 成本</small><strong>{modelTurns} · {typeof estimatedCost === "number" ? `$${estimatedCost.toFixed(4)}` : "成本未知"}</strong></span></div>
+            <div><ShieldCheck size={17} /><span><small>人工审批</small><strong>{approvalLabel}</strong></span></div>
+            <div><Gauge size={17} /><span><small>模型回合 / 成本</small><strong>{modelTurns} · {costLabel}</strong></span></div>
           </section>
           <div className="proc-runtime-report">
             <RunReport

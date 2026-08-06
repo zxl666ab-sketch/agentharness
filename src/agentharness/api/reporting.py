@@ -11,6 +11,10 @@ from agentharness.harness import Harness
 
 _ACTIVE_STATUSES = {"pending", "running", "waiting_approval"}
 
+# The report carries the most recent event window for the timeline; verification
+# attempts, artifact discovery and the evidence hash still derive from the full log.
+_RECENT_EVENTS_LIMIT = 200
+
 
 def _event_type(event: EventEnvelope) -> str:
     return event.type.value if isinstance(event.type, EventType) else str(event.type)
@@ -201,13 +205,19 @@ def build_run_report(runtime: Harness, run_id: str) -> dict[str, Any] | None:
     policy = metadata.get("_agentharness_verification_policy")
     if not isinstance(policy, dict):
         policy = None
-    events = runtime.get_events(run_id=run_id, limit=10_000)
-    attempts = _verification_attempts(events)
+    all_events = runtime.get_events(run_id=run_id, limit=10_000)
+    attempts = _verification_attempts(all_events)
     configured = bool(policy) or bool(attempts)
     failures = _failure_reasons(attempts, run.get("error"))
     tools = [_tool_payload(runtime, item) for item in runtime.list_tool_invocations(run_id)]
     approvals = runtime.list_approvals(run_id)
-    event_payloads = [event.model_dump(mode="json") for event in events]
+    event_payloads = [event.model_dump(mode="json") for event in all_events]
+    events_total = runtime.count_events(run_id)
+    # The timeline only carries a bounded window; evidence derivation above still
+    # uses the full event list, so truncation never weakens verification results,
+    # artifact discovery or the canonical report hash.
+    recent_events = event_payloads[-_RECENT_EVENTS_LIMIT:]
+    events_truncated = events_total > len(recent_events)
 
     artifact_ids: list[str] = []
     _artifact_ids(event_payloads, artifact_ids)
@@ -251,11 +261,13 @@ def build_run_report(runtime: Harness, run_id: str) -> dict[str, Any] | None:
         "approvals": approvals,
         "artifacts": artifacts,
         "usage": _json_object(run.get("usage_json")),
-        "events": event_payloads,
+        "events": recent_events,
+        "events_total": events_total,
+        "events_truncated": events_truncated,
         "source": {
             "run_updated_at": run.get("updated_at"),
-            "max_global_seq": max((event.global_seq for event in events), default=0),
-            "event_count": len(events),
+            "max_global_seq": max((event.global_seq for event in all_events), default=0),
+            "event_count": events_total,
             "tool_count": len(tools),
             "approval_count": len(approvals),
             "artifact_count": len(artifacts),

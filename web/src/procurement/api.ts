@@ -151,6 +151,10 @@ export const procurementApi = {
     ),
   analyze: (requestId: string) =>
     postJson<ProcurementRunAccepted>(`/api/procurement/requests/${requestId}/analyze`),
+  cancelRun: (requestId: string) =>
+    postJson<{ request_id: string; run_id: string; status: string }>(
+      `/api/procurement/requests/${requestId}/cancel-run`
+    ),
   approve: (
     requestId: string,
     input: {

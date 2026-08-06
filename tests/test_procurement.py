@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import sqlite3
+from collections.abc import AsyncIterator
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,12 +20,20 @@ from scripts import generate_procurement_demo as demo_script
 from scripts.evaluate_procurement import _controlled_experiment, _load_manifest
 
 from agentharness.api.server import create_app
+from agentharness.contracts import (
+    MessageRole,
+    ModelRequest,
+    ModelStreamItem,
+    ToolInvocationStatus,
+)
+from agentharness.engine.tool_execution import arguments_sha256, enabled_tool_names
 from agentharness.harness import Harness
 from agentharness.procurement.agent import (
     PROCUREMENT_PROVIDER,
     PROCUREMENT_TOOL_NAMES,
     ProcurementAgent,
     ProcurementFakeProvider,
+    _fake_run_profile,
     procurement_run_profile_from_env,
 )
 from agentharness.procurement.costing import CostingError, compare_quotes
@@ -76,7 +85,9 @@ def test_procurement_profile_defaults_to_openai_and_is_priced_and_budgeted(
 
     assert default_profile.provider == "openai"
     assert default_profile.model == "configured-model-must-not-opt-in"
-    assert default_profile.pricing.input_per_million_usd == 0
+    # Unconfigured live-provider rates are unknown (not silently zero), so cost
+    # tracking reports "unknown" instead of a misleading $0.0000.
+    assert default_profile.pricing.input_per_million_usd is None
     assert default_profile.budget.max_cost_usd is None
 
     monkeypatch.setenv("AGENTHARNESS_PROCUREMENT_PROVIDER", "openai")
@@ -355,6 +366,92 @@ async def test_procurement_live_profile_flows_through_api_with_fake_transport(
         assert report["approvals"][-1]["tool_name"] == "procurement_approve_supplier"
         assert provider.requests
         assert all(request.parallel_tool_calls is False for request in provider.requests)
+
+    await app.state.procurement_agent.aclose()
+    await app.state.run_supervisor.aclose()
+    await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_procurement_approval_with_long_note_does_not_rely_on_truncated_summary(
+    data_dir: Path,
+    workspace: Path,
+) -> None:
+    """Regression: approval verification must bind the full arguments_sha256.
+
+    A note longer than the 500-char arguments_summary truncation used to make
+    json.loads(arguments_summary) fail with "采购审批参数不可验证" and break the
+    human-in-the-loop approval path.
+    """
+    truth = load_frozen_truth()
+    cases = [
+        next(item for item in truth["quotes"] if item["id"] == case_id)
+        for case_id in ("q-alpha", "q-beta")
+    ]
+    note = "长备注：" + "确认该供应商报价与比价快照一致，且交期与开票要求均满足本次采购计划。" * 20
+
+    harness = Harness(data_dir=data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        started = await client.post(
+            "/api/procurement/conversations",
+            json={
+                "message": (
+                    "采购10000个PE白色快递袋，规格250x350mm、厚60微米、单色印刷，"
+                    "15天内交付上海松江，必须开票；USD/CNY按7.2，尺寸公差2mm、"
+                    "厚度公差3微米。请比较附件报价并推荐供应商。"
+                ),
+                "attachments": [_upload(case) for case in cases],
+            },
+        )
+        assert started.status_code == 202
+        accepted = started.json()
+        request_id = accepted["purchase_request_id"]
+        run_id = accepted["run_id"]
+        detail = await _wait_for_comparison(client, request_id, run_id=run_id)
+        await _wait_for_run_status(client, run_id, {"require_human"})
+
+        snapshot = detail["comparison"]
+        selected_quote_id = snapshot["result"]["recommended_quote_id"]
+        actor = "长备注回归测试员"
+        approved = await client.post(
+            f"/api/procurement/requests/{request_id}/decision",
+            json={
+                "snapshot_id": snapshot["id"],
+                "input_sha256": snapshot["input_sha256"],
+                "quote_id": selected_quote_id,
+                "confirmed": True,
+                "actor": actor,
+                "note": note,
+            },
+        )
+        assert approved.status_code == 200, approved.text
+        await _wait_for_run_status(client, run_id, {"completed"})
+
+        report = (await client.get(f"/api/runs/{run_id}/report")).json()
+        assert report["conclusion"]["status"] == "passed"
+        assert report["approvals"][-1]["tool_name"] == "procurement_approve_supplier"
+
+        stored = [
+            row
+            for row in reversed(harness.list_approvals(run_id))
+            if row["tool_name"] == "procurement_approve_supplier"
+        ][0]
+        expected = arguments_sha256(
+            {
+                "request_id": request_id,
+                "snapshot_id": snapshot["id"],
+                "input_sha256": snapshot["input_sha256"],
+                "quote_id": selected_quote_id,
+                "actor": actor,
+                "note": note,
+            }
+        )
+        assert stored["arguments_sha256"] == expected
+        # The stored summary is still truncated, but nothing may parse it back.
+        assert len(stored["arguments_summary"]) <= 500
 
     await app.state.procurement_agent.aclose()
     await app.state.run_supervisor.aclose()
@@ -1074,6 +1171,81 @@ def test_service_rejects_invalid_requirement_before_persisting(
     harness.close()
 
     assert stored == []
+
+
+def test_request_list_uses_batched_related_rows(data_dir: Path, monkeypatch) -> None:
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    created = service.create_request(_request_body(load_frozen_truth()))
+
+    def reject_n_plus_one(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("request list must not load related rows one request at a time")
+
+    monkeypatch.setattr(service.repo, "list_quotes", reject_n_plus_one)
+    monkeypatch.setattr(service.repo, "get_decision", reject_n_plus_one)
+    try:
+        rows = service.list_requests()
+    finally:
+        harness.close()
+
+    assert [row["id"] for row in rows] == [created["id"]]
+    assert rows[0]["quote_count"] == 0
+    assert rows[0]["decision"] is None
+
+
+def test_agent_requirement_defaults_optional_tolerances(data_dir: Path) -> None:
+    payload = json.loads(json.dumps(_request_body(load_frozen_truth())))
+    payload["constraints"].pop("size_tolerance_mm")
+    payload["constraints"].pop("thickness_tolerance_um")
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    draft = service.create_draft("缺少公差也应使用业务默认值")
+    run_id = "default-tolerance-run"
+    harness.storage.create_run(
+        run_id=run_id,
+        session_id=str(draft["session_id"]),
+        root_run_id=run_id,
+    )
+
+    stored = service.capture_requirement(str(draft["id"]), payload, run_id=run_id)
+    harness.close()
+
+    assert stored["constraints"]["size_tolerance_mm"] == "2"
+    assert stored["constraints"]["thickness_tolerance_um"] == "3"
+
+
+def test_procurement_tool_prerequisites_hide_analysis_until_capture() -> None:
+    request = SimpleNamespace(
+        tools=[
+            "procurement_read_request",
+            "procurement_capture_requirement",
+            "procurement_execute_analysis",
+            "procurement_approve_supplier",
+        ],
+        metadata={
+            "tool_prerequisites": {
+                "procurement_execute_analysis": ["procurement_capture_requirement"],
+                "procurement_approve_supplier": ["procurement_capture_requirement"],
+            }
+        },
+    )
+    initial = enabled_tool_names(request, [], set(request.tools))
+    after_capture = enabled_tool_names(
+        request,
+        [
+            SimpleNamespace(
+                tool_name="procurement_capture_requirement",
+                status=ToolInvocationStatus.succeeded,
+            )
+        ],
+        set(request.tools),
+    )
+
+    assert "procurement_execute_analysis" not in initial
+    assert "procurement_approve_supplier" not in initial
+    assert "procurement_execute_analysis" in after_capture
+    assert "procurement_approve_supplier" in after_capture
 
 
 def test_agent_requirement_validation_leaves_draft_unchanged(data_dir: Path) -> None:
@@ -3031,3 +3203,177 @@ async def test_procurement_flow_requires_review_and_survives_restart(data_dir, w
     await restored_app.state.procurement_agent.aclose()
     await restored_app.state.run_supervisor.aclose()
     await restored.aclose()
+
+
+class _WrongToolFirstProvider(ProcurementFakeProvider):
+    """Deviant offline provider that deliberately calls the gated analysis tool first.
+
+    Mirrors the real-model failure in evidence run 1f9ebe (proc-review-runtime),
+    where a fresh conversation jumped straight to ``procurement_execute_analysis`` on
+    a draft request. The tool is in the run allowlist, so only tool_prerequisites
+    gating can stop it — the model never calls it again by itself.
+    """
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[ModelStreamItem]:
+        request_id = self._request_id(request.system or "")
+        if not any(message.role == MessageRole.tool for message in request.messages):
+            async for item in self._tool_call(
+                "procurement_execute_analysis", {"request_id": request_id}
+            ):
+                yield item
+            return
+        async for item in ProcurementFakeProvider.stream(self, request):
+            yield item
+
+
+@pytest.mark.asyncio
+async def test_gated_analysis_tool_blocked_before_capture(data_dir: Path) -> None:
+    """Even a provider that picks the gated tool first must be blocked with a hint.
+
+    ``procurement_execute_analysis`` is present in the run's tool allowlist, yet it
+    must not run before ``procurement_capture_requirement`` succeeds. The run then
+    reaches the safe ``require_human`` terminal state instead of hanging.
+    """
+    truth = load_frozen_truth()
+    alpha = next(item for item in truth["quotes"] if item["id"] == "q-alpha")
+    theta = next(item for item in truth["quotes"] if item["id"] == "q-theta")
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    # Register the deviant provider first so ProcurementAgent keeps it.
+    harness.register_provider(PROCUREMENT_PROVIDER, _WrongToolFirstProvider())
+    agent = ProcurementAgent(harness, service, run_profile=_fake_run_profile())
+    try:
+        accepted = await agent.start(
+            message=(
+                "华东仓采购 1000000 个 PE 快递袋，尺寸 250x350 毫米，厚 60 微米，"
+                "PE 材质，白色，单色印刷。"
+            ),
+            attachments=[
+                (alpha["filename"], build_case_document(alpha)),
+                (theta["filename"], build_case_document(theta)),
+            ],
+        )
+        run_id = accepted["run_id"]
+        await agent._tasks[run_id]
+
+        invocations = harness.storage.list_tool_invocations(run_id)
+        assert [item.tool_name for item in invocations] == [
+            "procurement_execute_analysis"
+        ]
+        blocked = invocations[0]
+        assert blocked.status == ToolInvocationStatus.failed
+        assert blocked.error_code == "tool_disabled"
+        assert blocked.result is not None
+        assert (
+            "Complete the required earlier tool successfully"
+            in blocked.result.recovery_hint
+        )
+        assert blocked.result.retryable
+
+        # The gated attempt is the only invocation; capture never ran.
+        assert not any(
+            item.tool_name == "procurement_capture_requirement"
+            for item in invocations
+        )
+        run = harness.get_run(run_id)
+        assert run["status"] == "require_human"
+    finally:
+        await agent.aclose()
+        await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_capture_terminates_at_require_human(data_dir: Path) -> None:
+    """A failed requirement capture is a safe, human-gated exit, not a hang.
+
+    The stock fake extractor yields ``width=0`` for natural-language dimensions, so
+    ``procurement_capture_requirement`` fails validation. The run must finish
+    ``require_human`` and any resume must terminate the same way instead of looping.
+    """
+    truth = load_frozen_truth()
+    alpha = next(item for item in truth["quotes"] if item["id"] == "q-alpha")
+    theta = next(item for item in truth["quotes"] if item["id"] == "q-theta")
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    agent = ProcurementAgent(harness, service, run_profile=_fake_run_profile())
+    try:
+        accepted = await agent.start(
+            message=(
+                "华东仓需要采购 100 万个 PE 快递袋。规格：宽 250 毫米、长 350 毫米、"
+                "厚 60 微米，PE 材质，白色，单色印刷，15 天内交货。"
+            ),
+            attachments=[
+                (alpha["filename"], build_case_document(alpha)),
+                (theta["filename"], build_case_document(theta)),
+            ],
+        )
+        run_id = accepted["run_id"]
+        await agent._tasks[run_id]
+
+        invocations = harness.storage.list_tool_invocations(run_id)
+        assert [item.tool_name for item in invocations] == [
+            "procurement_capture_requirement"
+        ]
+        failed = invocations[0]
+        assert failed.status == ToolInvocationStatus.failed
+        assert failed.error_code == "tool_exception"
+        assert failed.result is not None
+        assert failed.result.retryable is False
+        # Natural-language dimensions are not extracted, so the captured width is 0
+        # and fails the domain's exclusive-minimum validation.
+        assert "宽度" in failed.result.content
+
+        run = harness.get_run(run_id)
+        assert run["status"] == "require_human"
+        assert run["error"] and "verification requires human review" in run["error"]
+
+        # Repeated resume must reach the same safe terminal state, never hang or loop.
+        for _ in range(2):
+            accepted = await agent.resume(
+                accepted["purchase_request_id"], message="请继续。"
+            )
+            await agent._tasks[accepted["run_id"]]
+            run = harness.get_run(accepted["run_id"])
+            assert run["status"] == "require_human"
+    finally:
+        await agent.aclose()
+        await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_guards_terminal_runs(data_dir, workspace) -> None:
+    """The cancel-run endpoint only stops active runs; terminal runs are rejected."""
+    truth = load_frozen_truth()
+    cases = [
+        next(item for item in truth["quotes"] if item["id"] == case_id)
+        for case_id in ("q-alpha", "q-theta")
+    ]
+    harness = Harness(data_dir=data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        accepted = (
+            await client.post(
+                "/api/procurement/conversations",
+                json={
+                    "message": (
+                        "华东仓采购 10000 个 PE 快递袋，尺寸 250x350 毫米，厚 60 微米，"
+                        "PE 材质，白色，单色印刷。"
+                    ),
+                    "attachments": [_upload(case) for case in cases],
+                },
+            )
+        ).json()
+        run_id = accepted["run_id"]
+        await _wait_for_run_status(client, run_id, {"require_human"})
+
+        # A run waiting for human review is not cancelable.
+        blocked = await client.post(
+            f"/api/procurement/requests/{accepted['purchase_request_id']}/cancel-run"
+        )
+        assert blocked.status_code == 409
+        assert "不可停止" in blocked.json()["detail"]
+
+    await app.state.run_supervisor.aclose()
+    await harness.aclose()
