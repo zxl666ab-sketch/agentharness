@@ -24,6 +24,7 @@ from agentharness.contracts import (
     MessageRole,
     ModelRequest,
     ModelStreamItem,
+    StreamItemType,
     ToolInvocationStatus,
 )
 from agentharness.engine.tool_execution import arguments_sha256, enabled_tool_names
@@ -3377,3 +3378,87 @@ async def test_cancel_run_guards_terminal_runs(data_dir, workspace) -> None:
 
     await app.state.run_supervisor.aclose()
     await harness.aclose()
+
+@pytest.mark.asyncio
+async def test_failed_conversation_recovers_via_start_existing(
+    data_dir: Path,
+    workspace: Path,
+) -> None:
+    """A conversation whose run fails at step 0 (before parsing quotes) must be
+    recoverable through "重新分析" (start_existing): the staged attachments are
+    re-parsed by a conversation-style relaunch instead of the strict
+    "至少上传 2 家供应商报价后才能比价" error.
+    """
+
+    class FailOnceProvider(ProcurementFakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def stream(self, request: ModelRequest):
+            self.calls += 1
+            if self.calls == 1:
+                yield ModelStreamItem(
+                    type=StreamItemType.error,
+                    error="injected provider failure",
+                    error_kind="provider",
+                )
+                return
+            async for item in super().stream(request):
+                yield item
+
+    truth = load_frozen_truth()
+    cases = [
+        next(item for item in truth["quotes"] if item["id"] == case_id)
+        for case_id in ("q-alpha", "q-beta", "q-theta")
+    ]
+    provider = FailOnceProvider()
+    harness = Harness(data_dir=data_dir, providers={"procurement_fake": provider})
+    service = ProcurementService(harness)
+    agent = ProcurementAgent(harness, service)
+    try:
+        started = await agent.start(
+            message=(
+                "采购10000个PE白色快递袋，规格250x350mm、厚60微米、单色印刷，"
+                "15天内交付上海松江，必须开票；USD/CNY按7.2，尺寸公差2mm、"
+                "厚度公差3微米。请比较附件报价并推荐供应商。"
+            ),
+            attachments=[(case["filename"], build_case_document(case)) for case in cases],
+        )
+        request_id = started["purchase_request_id"]
+        first_run_id = started["run_id"]
+
+        # Wait for the injected step-0 provider failure.
+        deadline = asyncio.get_running_loop().time() + 5
+        while asyncio.get_running_loop().time() < deadline:
+            run = harness.get_run(first_run_id)
+            if run is not None and run["status"] == "failed":
+                break
+            await asyncio.sleep(0.02)
+        assert run is not None
+        assert run["status"] == "failed"
+        assert "injected provider failure" in str(run["error"])
+        detail = service.get_request(request_id)
+        assert detail["quote_count"] == 0
+
+        # "重新分析" must recover instead of refusing.
+        accepted = await agent.start_existing(request_id)
+        new_run_id = accepted["run_id"]
+        assert new_run_id != first_run_id
+
+        deadline = asyncio.get_running_loop().time() + 10
+        while asyncio.get_running_loop().time() < deadline:
+            detail = service.get_request(request_id)
+            if detail["quote_count"] >= 2:
+                break
+            await asyncio.sleep(0.02)
+        assert detail["quote_count"] >= 2
+        recovered = harness.get_run(new_run_id)
+        assert recovered is not None
+        # 星河包装 supplier name needs human review -> safe human boundary.
+        assert recovered["status"] in {"require_human", "completed"}
+        assert provider.calls >= 2
+    finally:
+        await agent.aclose()
+        harness.close()
+
