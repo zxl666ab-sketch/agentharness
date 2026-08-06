@@ -1292,17 +1292,33 @@ class ProcurementService:
         )
         return self.get_request(request["id"])
 
-    def clean_demo_requests(self) -> int:
-        """Remove demo requests (created through the one-click demo task)."""
+    def clean_demo_requests(self) -> dict[str, int]:
+        """Remove demo requests (created through the one-click demo task).
+
+        Requests whose analysis run is still active (pending/running/
+        waiting_approval) are skipped so cleanup can never delete a task that
+        is mid-approval; the caller sees how many were skipped.
+        """
         removed = 0
+        skipped = 0
         for summary in self.list_requests():
             request_id = str(summary["id"])
             events = self.repo.list_audit_events(request_id)
             if not any(event["type"] == "demo_request" for event in events):
                 continue
+            run_id = str(summary.get("analysis_run_id") or "")
+            if run_id:
+                run = self.harness.get_run(run_id)
+                if run is not None and str(run.get("status") or "") in {
+                    "pending",
+                    "running",
+                    "waiting_approval",
+                }:
+                    skipped += 1
+                    continue
             self.repo.delete_request_tree(request_id)
             removed += 1
-        return removed
+        return {"removed": removed, "skipped": skipped}
 
     def purchase_order(self, request_id: str) -> dict[str, Any]:
 

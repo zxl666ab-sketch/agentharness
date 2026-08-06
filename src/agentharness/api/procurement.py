@@ -252,7 +252,7 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
 
     @router.post("/demo/clean", status_code=200)
     async def clean_demo() -> dict[str, int]:
-        return {"removed": service.clean_demo_requests()}
+        return service.clean_demo_requests()
 
     @router.get("/meta")
     async def meta() -> dict[str, Any]:

@@ -119,6 +119,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   const [configForm, setConfigForm] = useState<ProcurementModelConfigUpdate>(DEFAULT_CONFIG_FORM);
   const [configBusy, setConfigBusy] = useState(false);
   const [demoBusy, setDemoBusy] = useState<"create" | "clean" | null>(null);
+  const [cleanArmed, setCleanArmed] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
   const [configNotice, setConfigNotice] = useState<string | null>(null);
 
@@ -357,11 +358,22 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   }
 
   async function cleanDemoTasks() {
+    if (!cleanArmed) {
+      setCleanArmed(true);
+      window.setTimeout(() => setCleanArmed(false), 4000);
+      return;
+    }
+    setCleanArmed(false);
     setDemoBusy("clean");
     setActionError(null);
     try {
-      await procurementApi.cleanDemo();
+      const result = await procurementApi.cleanDemo();
       await requestsQuery.refetch();
+      setActionError(
+        result.skipped > 0
+          ? `已清理 ${result.removed} 个演示任务；${result.skipped} 个正在运行的任务已保留。`
+          : null
+      );
     } catch (err) {
       setActionError(err instanceof Error ? friendlyProcurementError(err.message) : "演示任务清理失败");
     } finally {
@@ -413,8 +425,9 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
               <button className="proc-button tiny" type="button" title="一键新建演示任务" disabled={demoBusy !== null} onClick={() => void createDemoTask()}>
                 {demoBusy === "create" ? <LoaderCircle className="spin" size={13} /> : <Sparkles size={13} />}演示
               </button>
-              <button className="proc-button tiny danger" type="button" title="一键清理演示任务" disabled={demoBusy !== null} onClick={() => void cleanDemoTasks()}>
-                {demoBusy === "clean" ? <LoaderCircle className="spin" size={13} /> : <Trash2 size={13} />}清理
+              <button className={`proc-button tiny ${cleanArmed ? "danger" : ""}`} type="button" title={cleanArmed ? "再次点击确认清理（4 秒后自动取消）" : "一键清理演示任务"} disabled={demoBusy !== null} onClick={() => void cleanDemoTasks()}>
+                {demoBusy === "clean" ? <LoaderCircle className="spin" size={13} /> : <Trash2 size={13} />}
+                {cleanArmed ? "确认清理？" : "清理"}
               </button>
               <button className="proc-icon-button primary-icon" type="button" title="新建采购对话" aria-label="新建采购对话" onClick={() => { setActionError(null); setSelectedId(null); setShowCreate(true); }}>
                 <Plus size={17} />

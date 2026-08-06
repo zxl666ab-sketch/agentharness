@@ -186,6 +186,7 @@ export const procurementApi = {
   purchaseOrderCsvUrl: (requestId: string) =>
     `/api/procurement/requests/${requestId}/purchase-order.csv`,
   createDemo: () => postJson<ProcurementRunAccepted>("/api/procurement/demo"),
-  cleanDemo: () => postJson<{ removed: number }>("/api/procurement/demo/clean"),
+  cleanDemo: () =>
+    postJson<{ removed: number; skipped: number }>("/api/procurement/demo/clean"),
   evaluation: () => requestJson<EvaluationResult>("/api/procurement/evaluation"),
 };
