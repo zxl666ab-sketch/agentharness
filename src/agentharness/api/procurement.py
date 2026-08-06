@@ -9,7 +9,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from agentharness.procurement.agent import ProcurementAgent
@@ -242,6 +242,18 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
         await agent.harness.cancel(run_id)
         return {"request_id": request_id, "run_id": run_id, "status": "cancelled"}
 
+    @router.post("/demo", status_code=202)
+    async def create_demo() -> dict[str, Any]:
+        try:
+            request = service.create_demo_request()
+            return await agent.start_existing(request["id"])
+        except (ProcurementError, RuntimeError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/demo/clean", status_code=200)
+    async def clean_demo() -> dict[str, int]:
+        return {"removed": service.clean_demo_requests()}
+
     @router.get("/meta")
     async def meta() -> dict[str, Any]:
         return {
@@ -379,6 +391,31 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
             return service.audit_report(request_id)
         except KeyError:
             raise HTTPException(404, "未找到采购需求") from None
+
+    @router.get("/requests/{request_id}/purchase-order")
+    async def purchase_order(request_id: str) -> dict[str, Any]:
+        try:
+            return service.purchase_order(request_id)
+        except KeyError:
+            raise HTTPException(404, "未找到采购需求") from None
+        except ProcurementError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.get("/requests/{request_id}/purchase-order.csv")
+    async def purchase_order_csv(request_id: str) -> Response:
+        try:
+            filename, content = service.purchase_order_csv(request_id)
+        except KeyError:
+            raise HTTPException(404, "未找到采购需求") from None
+        except ProcurementError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return Response(
+            content=content,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            },
+        )
 
     @router.get("/evaluation")
     async def evaluation() -> dict[str, Any]:

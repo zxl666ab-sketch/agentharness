@@ -24,7 +24,7 @@ const TOOL_LABELS: Record<string, string> = {
   procurement_read_request: "读取采购任务",
   procurement_capture_requirement: "结构化采购需求",
   procurement_execute_analysis: "解析、匹配、复算并比价",
-  procurement_approve_supplier: "写入供应商审批",
+  procurement_approve_supplier: "等待采购员确认",
 };
 
 const RUN_LABELS: Record<string, string> = {
@@ -74,7 +74,7 @@ function ToolState({ invocation }: { invocation: ToolInvocationRow }) {
       </span>
       <span>
         <strong>{TOOL_LABELS[invocation.tool_name] || invocation.tool_name}</strong>
-        <small>{invocation.status === "succeeded" ? "已完成" : invocation.status === "failed" ? "失败" : invocation.status === "indeterminate" ? "结果待确认" : "执行中"}</small>
+        <small>{invocation.status === "succeeded" ? "已完成" : invocation.status === "failed" ? "失败" : invocation.status === "indeterminate" ? "结果待确认" : invocation.tool_name === "procurement_approve_supplier" ? "等待采购员确认" : "执行中"}</small>
       </span>
     </li>
   );
@@ -357,7 +357,7 @@ export function ProcurementConversation({
         <button className="proc-conversation-next" type="button" onClick={onOpenComparison}><CheckCircle2 size={15} />{request.comparison.result.eligible_count ? "查看比价并选择供应商" : "查看淘汰原因并确认结论"}</button>
       ) : null}
       {canRecover ? (
-        <button className="proc-conversation-next warning" type="button" onClick={() => void onRecover()}><RefreshCw size={15} />从持久化状态重新分析</button>
+        <button className="proc-conversation-next warning" type="button" onClick={() => void onRecover()}><RefreshCw size={15} />一键恢复（从持久化状态重新分析）</button>
       ) : null}
     </aside>
   );

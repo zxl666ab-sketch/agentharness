@@ -14,7 +14,9 @@ import {
   Scale,
   Settings,
   ShieldCheck,
+  Sparkles,
   Sun,
+  Trash2,
   Wifi,
   X,
 } from "lucide-react";
@@ -116,6 +118,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   const [showConfig, setShowConfig] = useState(false);
   const [configForm, setConfigForm] = useState<ProcurementModelConfigUpdate>(DEFAULT_CONFIG_FORM);
   const [configBusy, setConfigBusy] = useState(false);
+  const [demoBusy, setDemoBusy] = useState<"create" | "clean" | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [configNotice, setConfigNotice] = useState<string | null>(null);
 
@@ -339,6 +342,33 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     setConfigForm((current) => ({ ...current, [field]: value }));
   }
 
+  async function createDemoTask() {
+    setDemoBusy("create");
+    setActionError(null);
+    try {
+      const accepted = await procurementApi.createDemo();
+      await requestsQuery.refetch();
+      setSelectedId(accepted.purchase_request_id);
+    } catch (err) {
+      setActionError(err instanceof Error ? friendlyProcurementError(err.message) : "演示任务创建失败");
+    } finally {
+      setDemoBusy(null);
+    }
+  }
+
+  async function cleanDemoTasks() {
+    setDemoBusy("clean");
+    setActionError(null);
+    try {
+      await procurementApi.cleanDemo();
+      await requestsQuery.refetch();
+    } catch (err) {
+      setActionError(err instanceof Error ? friendlyProcurementError(err.message) : "演示任务清理失败");
+    } finally {
+      setDemoBusy(null);
+    }
+  }
+
   async function saveConfig() {
     setConfigBusy(true);
     setConfigError(null);
@@ -379,9 +409,17 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
         <aside className="proc-sidebar">
           <div className="proc-sidebar-head">
             <span>采购任务</span>
-            <button className="proc-icon-button primary-icon" type="button" title="新建采购对话" aria-label="新建采购对话" onClick={() => { setActionError(null); setSelectedId(null); setShowCreate(true); }}>
-              <Plus size={17} />
-            </button>
+            <div className="proc-sidebar-actions">
+              <button className="proc-button tiny" type="button" title="一键新建演示任务" disabled={demoBusy !== null} onClick={() => void createDemoTask()}>
+                {demoBusy === "create" ? <LoaderCircle className="spin" size={13} /> : <Sparkles size={13} />}演示
+              </button>
+              <button className="proc-button tiny danger" type="button" title="一键清理演示任务" disabled={demoBusy !== null} onClick={() => void cleanDemoTasks()}>
+                {demoBusy === "clean" ? <LoaderCircle className="spin" size={13} /> : <Trash2 size={13} />}清理
+              </button>
+              <button className="proc-icon-button primary-icon" type="button" title="新建采购对话" aria-label="新建采购对话" onClick={() => { setActionError(null); setSelectedId(null); setShowCreate(true); }}>
+                <Plus size={17} />
+              </button>
+            </div>
           </div>
           <label className="proc-search">
             <Search size={15} />

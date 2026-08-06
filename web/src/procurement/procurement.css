@@ -635,3 +635,7 @@
 @media (prefers-reduced-motion: reduce) {
   .spin { animation: none; }
 }
+
+/* One-click demo actions in the sidebar head */
+.proc-sidebar-actions { display: inline-flex; align-items: center; gap: 6px; }
+.proc-button.tiny { min-height: 28px; padding: 0 9px; font-size: 12px; gap: 5px; }

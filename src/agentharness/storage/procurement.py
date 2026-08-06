@@ -380,6 +380,52 @@ class ProcurementRepo:
             ),
         )
 
+    def delete_request_tree(self, request_id: str) -> None:
+        with self._lock:
+            for table in (
+                "procurement_purchase_orders",
+                "procurement_decisions",
+                "procurement_comparison_snapshots",
+                "procurement_audit_events",
+                "procurement_quotes",
+            ):
+                self._conn.execute(
+                    f"DELETE FROM {table} WHERE request_id = ?", (request_id,)
+                )
+            self._conn.execute(
+                "DELETE FROM procurement_requests WHERE id = ?", (request_id,)
+            )
+
+    def save_purchase_order(self, order: dict[str, Any]) -> None:
+        safe = self.redactor.redact_obj(order)
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO procurement_purchase_orders(
+                       id, request_id, po_number, payload_json, created_at
+                   ) VALUES(?,?,?,?,?)
+                   ON CONFLICT(request_id) DO UPDATE SET
+                       po_number=excluded.po_number,
+                       payload_json=excluded.payload_json,
+                       created_at=excluded.created_at""",
+                (
+                    safe["id"],
+                    safe["request_id"],
+                    safe["po_number"],
+                    _dumps(safe),
+                    safe.get("created_at", _utcnow()),
+                ),
+            )
+
+    def get_purchase_order(self, request_id: str) -> dict[str, Any] | None:
+        row = self._reader().execute(
+            "SELECT payload_json FROM procurement_purchase_orders WHERE request_id = ?",
+            (request_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row[0] or "{}")
+        return payload if isinstance(payload, dict) else None
+
     def list_audit_events(self, request_id: str) -> list[dict[str, Any]]:
         rows = self._reader().execute(
             """SELECT * FROM procurement_audit_events

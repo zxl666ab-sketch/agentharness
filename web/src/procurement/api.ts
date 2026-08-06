@@ -4,6 +4,7 @@ import type {
   ProcurementMeta,
   ProcurementModelConfig,
   ProcurementModelConfigUpdate,
+  ProcurementPurchaseOrder,
   ProcurementQuote,
   ProcurementRequest,
   ProcurementRequestSummary,
@@ -33,6 +34,12 @@ type ValidationIssue = { msg?: string; loc?: Array<string | number> };
 
 /** Convert provider gateway failures into an actionable message for buyers. */
 export function friendlyProcurementError(message: string): string {
+  if (message.includes("UNIQUE constraint failed")) {
+    return "数据状态已更新，请刷新页面后重试（系统已自动恢复，无需重复操作）。";
+  }
+  if (message.includes("IntegrityError") || message.includes("sqlite3.")) {
+    return "本地数据写入冲突，请刷新后重试；如果问题持续，可点击“一键恢复”从持久化状态继续。";
+  }
   if (message.trim().toLowerCase() === "your request was blocked.") {
     return "模型网关拒绝了带工具调用的采购分析。请在模型配置中切换支持工具调用的模型或 API 模式，然后点击“从持久化状态重新分析”；采购需求和附件已保留。";
   }
@@ -172,5 +179,13 @@ export const procurementApi = {
     }),
   report: (requestId: string) =>
     requestJson<ProcurementAuditReport>(`/api/procurement/requests/${requestId}/report`),
+  purchaseOrder: (requestId: string) =>
+    requestJson<ProcurementPurchaseOrder>(
+      `/api/procurement/requests/${requestId}/purchase-order`
+    ),
+  purchaseOrderCsvUrl: (requestId: string) =>
+    `/api/procurement/requests/${requestId}/purchase-order.csv`,
+  createDemo: () => postJson<ProcurementRunAccepted>("/api/procurement/demo"),
+  cleanDemo: () => postJson<{ removed: number }>("/api/procurement/demo/clean"),
   evaluation: () => requestJson<EvaluationResult>("/api/procurement/evaluation"),
 };

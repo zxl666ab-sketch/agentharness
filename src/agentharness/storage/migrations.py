@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -400,6 +400,16 @@ MIGRATIONS: dict[int, str] = {
     13: """
     ALTER TABLE tool_invocations ADD COLUMN reason TEXT;
     """,
+    14: """
+    CREATE TABLE IF NOT EXISTS procurement_purchase_orders (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE,
+        po_number TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (request_id) REFERENCES procurement_requests(id)
+    );
+    """,
 }
 
 
@@ -431,5 +441,3 @@ def apply_migrations(conn) -> int:
                 conn.rollback()
             raise
         current = version
-    return current
-
