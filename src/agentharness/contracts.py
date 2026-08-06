@@ -1,4 +1,4 @@
-"""Public domain contracts — stable Pydantic types for the harness surface."""
+﻿"""Public domain contracts — stable Pydantic types for the harness surface."""
 
 from __future__ import annotations
 
@@ -121,6 +121,9 @@ class EventType(StrEnum):
     tool_execution_cancelled = "tool_execution_cancelled"
     tool_execution_indeterminate = "tool_execution_indeterminate"
     tool_recovery_resolved = "tool_recovery_resolved"
+    tool_stage_denied = "tool_stage_denied"
+    tool_call_duplicate = "tool_call_duplicate"
+    human_action_injected = "human_action_injected"
     tool_call_end = "tool_call_end"
     tool_result = "tool_result"
     approval_requested = "approval_requested"
@@ -671,3 +674,4 @@ class Tool(Protocol):
     def spec(self) -> ToolSpec: ...
 
     async def run(self, ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult: ...
+

@@ -53,6 +53,13 @@ ApprovalCallback = Callable[[ApprovalRequest], Awaitable[ApprovalDecision]]
 
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
+# State-changing effects advance the dedup epoch: reads are deduped per
+# analysis/approval round so read_request x4 polling loops are blocked.
+_STATE_CHANGING_EFFECTS = frozenset({
+    EffectKind.workspace_write,
+    EffectKind.destructive,
+})
+
 
 def tool_call_completed(tool_call: ToolCall, completed: set[str]) -> bool:
     """Use invocation ids for v8 checkpoints and provider ids for legacy checkpoints."""
@@ -88,6 +95,84 @@ def enabled_tool_names(
             enabled.discard(tool_name)
     return enabled
 
+
+
+def current_stage_index(
+    request: RunRequest,
+    invocations: list[ToolInvocationRecord],
+) -> int:
+    """Index of the active explicit tool stage, or -1 when no stage matrix is set.
+
+    The matrix comes from ``request.metadata["tool_stage_matrix"]``: a list of
+    ``{"name", "tools", "advance_on"}`` dicts. A stage advances once any of its
+    ``advance_on`` tools has a succeeded invocation, turning the prompt-level
+    capture → analysis → approve flow into an enforced state machine.
+    """
+    raw = request.metadata.get("tool_stage_matrix")
+    if not isinstance(raw, list) or not raw:
+        return -1
+    stages = [
+        item
+        for item in raw
+        if isinstance(item, dict)
+        and isinstance(item.get("tools"), list)
+        and isinstance(item.get("advance_on"), list)
+    ]
+    if not stages:
+        return -1
+    initial = request.metadata.get("tool_stage_initial", 0)
+    try:
+        current = int(initial)
+    except (TypeError, ValueError):
+        current = 0
+    current = max(0, min(current, len(stages) - 1))
+    succeeded = {
+        invocation.tool_name
+        for invocation in invocations
+        if invocation.status == ToolInvocationStatus.succeeded
+    }
+    for index in range(current, len(stages)):
+        advance = stages[index].get("advance_on") or []
+        advanced = any(
+            name in succeeded for name in advance if isinstance(name, str)
+        )
+        if not advanced:
+            # Some stages complete inside another tool pipeline (e.g. the
+            # capture tool already runs the analysis and returns
+            # stage=analysis_completed). Allow result-marked advancement.
+            for marker in stages[index].get("advance_on_result") or []:
+                if not isinstance(marker, dict):
+                    continue
+                marker_tool = marker.get("tool")
+                marker_stage = marker.get("stage")
+                for invocation in invocations:
+                    if (
+                        invocation.status == ToolInvocationStatus.succeeded
+                        and invocation.tool_name == marker_tool
+                        and _invocation_stage(invocation) == marker_stage
+                    ):
+                        advanced = True
+                        break
+                if advanced:
+                    break
+        if not advanced:
+            break
+        current = index + 1
+    return min(current, len(stages) - 1)
+
+
+def _invocation_stage(invocation: ToolInvocationRecord) -> str:
+    """Best-effort stage label embedded in a succeeded tool result payload."""
+    result = invocation.result
+    if result is None or result.is_error:
+        return ""
+    try:
+        payload = json.loads(result.content or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("stage") or "")
 
 def canonical_arguments(arguments: dict[str, Any]) -> str:
     return json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -314,6 +399,94 @@ class ToolInvocationExecutor:
     def _ctx(self, run_id: str) -> RunContext:
         return ensure_ctx(self._runs, run_id)
 
+    def _stage_matrix(self, request: RunRequest) -> list[dict[str, Any]]:
+        raw = request.metadata.get("tool_stage_matrix")
+        if not isinstance(raw, list):
+            return []
+        return [
+            item
+            for item in raw
+            if isinstance(item, dict)
+            and isinstance(item.get("tools"), list)
+            and isinstance(item.get("advance_on"), list)
+        ]
+
+    def _reject_invocation(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        run_row: dict[str, Any],
+        messages: list[Message],
+        tc: ToolCall,
+        tool: Any,
+        step: int,
+        collected_results: list[ToolResult],
+        completed_tool_ids: set[str],
+        error_code: str,
+        error_category: str,
+        content: str,
+        recovery_hint: str,
+        event_type: EventType,
+        event_payload: dict[str, Any],
+    ) -> None:
+        """Persist a governed rejection (stage violation / duplicate call) as a
+        failed invocation with an audit event, without crashing the run."""
+        effect = self._effect_for(tool, tc)
+        spec = tool.spec
+        invocation = ToolInvocationRecord(
+            id=tc.invocation_id,
+            run_id=run_id,
+            session_id=session_id,
+            step=step,
+            ordinal=tc.ordinal,
+            provider_call_id=tc.id,
+            tool_name=tc.name,
+            tool_version=spec.version,
+            status=ToolInvocationStatus.failed,
+            effect=effect,
+            replay_policy=resolved_replay_policy(spec, effect),
+            arguments=tc.arguments,
+            arguments_sha256=arguments_sha256(tc.arguments),
+            attempt_count=0,
+            error_code=error_code,
+            error_category=error_category,
+            finished_at=datetime.now(UTC),
+        )
+        result = ToolResult(
+            tool_call_id=tc.id,
+            invocation_id=tc.invocation_id,
+            name=tc.name,
+            content=content,
+            is_error=True,
+            error_code=error_code,
+            error_category=error_category,
+            retryable=False,
+            recovery_hint=recovery_hint,
+            attempts=0,
+        )
+        invocation.result = result
+        self.storage.save_tool_invocation(invocation)
+        self._append_tool_result(run_id, session_id, messages, result, run_row)
+        collected_results.append(result)
+        completed_tool_ids.add(tc.invocation_id)
+        self.events.emit_and_update(
+            run_id,
+            events=[
+                self.events.event(
+                    run_row,
+                    event_type,
+                    {
+                        "tool_call_id": tc.id,
+                        "invocation_id": tc.invocation_id,
+                        "name": tc.name,
+                        "step": step,
+                        **event_payload,
+                    },
+                )
+            ],
+)
+
     async def execute_batch(
         self,
         *,
@@ -417,6 +590,91 @@ class ToolInvocationExecutor:
                 completed_tool_ids.add(tc.invocation_id)
                 continue
 
+
+            # Explicit tool-stage governance: reject calls outside the current
+            # stage with a structured hint so the model can self-correct.
+            stage_index = current_stage_index(
+                request, self.storage.list_tool_invocations(run_id)
+            )
+            if stage_index >= 0:
+                stages = self._stage_matrix(request)
+                stage = stages[stage_index]
+                stage_allowed = stage.get("tools") or []
+                if tc.name not in stage_allowed:
+                    stage_name = str(stage.get("name") or f"stage-{stage_index}")
+                    self._ctx(run_id).stage_denied_count += 1
+                    self._reject_invocation(
+                        run_id=run_id,
+                        session_id=session_id,
+                        run_row=run_row,
+                        messages=messages,
+                        tc=tc,
+                        tool=tool,
+                        step=step,
+                        collected_results=collected_results,
+                        completed_tool_ids=completed_tool_ids,
+                        error_code="tool_stage_denied",
+                        error_category="governance",
+                        content=(
+                            f"越权调用：当前阶段为「{stage_name}」，不允许调用 {tc.name}。"
+                            f"本阶段仅允许：{', '.join(stage_allowed)}。"
+                            "请根据已有工具结果进入下一阶段后重试。"
+                        ),
+                        recovery_hint=(
+                            f"完成阶段「{stage_name}」的合法工具后再调用 {tc.name}。"
+                        ),
+                        event_type=EventType.tool_stage_denied,
+                        event_payload={
+                            "stage": stage_name,
+                            "stage_index": stage_index,
+                            "tool_name": tc.name,
+                            "allowed_tools": list(stage_allowed),
+                        },
+                    )
+                    continue
+
+            # Anti-loop dedup: a tool that already succeeded in the current
+            # state epoch (same set of state-changing tool successes) must not
+            # be called again. Returns "结果未变化" and counts as a governance
+            # anomaly instead of crashing the run. This directly targets the
+            # historical read_request x4 polling loop.
+            current_invocations = self.storage.list_tool_invocations(run_id)
+            epoch_at: dict[str, int] = {}
+            epoch = 0
+            for item in current_invocations:
+                if item.status == ToolInvocationStatus.succeeded:
+                    epoch_at[item.id] = epoch
+                    if item.effect in _STATE_CHANGING_EFFECTS:
+                        epoch += 1
+            duplicate = any(
+                item.tool_name == tc.name
+                and item.status == ToolInvocationStatus.succeeded
+                and epoch_at.get(item.id) == epoch
+                for item in current_invocations
+            )
+            if duplicate:
+                self._ctx(run_id).duplicate_call_count += 1
+                self._reject_invocation(
+                    run_id=run_id,
+                    session_id=session_id,
+                    run_row=run_row,
+                    messages=messages,
+                    tc=tc,
+                    tool=tool,
+                    step=step,
+                    collected_results=collected_results,
+                    completed_tool_ids=completed_tool_ids,
+                    error_code="duplicate_tool_call",
+                    error_category="governance",
+                    content=(
+                        f"结果未变化：本轮状态下已成功调用过 {tc.name}，重复调用被拦截。"
+                        "请基于已有工具结果继续推进，不要重复调用同一工具。"
+                    ),
+                    recovery_hint="不要重复调用同一工具；根据已有工具结果继续。",
+                    event_type=EventType.tool_call_duplicate,
+                    event_payload={"tool_name": tc.name, "step": step, "epoch": epoch},
+                )
+                continue
             effect = self._effect_for(tool, tc)
             spec = tool.spec
             replay_policy = self._replay_policy_for(tool, tc, effect)
@@ -1586,3 +1844,4 @@ __all__ = [
     "validate_tool_arguments",
     "validate_tool_spec",
 ]
+
