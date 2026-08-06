@@ -3453,7 +3453,15 @@ async def test_failed_conversation_recovers_via_start_existing(
                 break
             await asyncio.sleep(0.02)
         assert detail["quote_count"] >= 2
-        recovered = harness.get_run(new_run_id)
+        deadline = asyncio.get_running_loop().time() + 10
+        while asyncio.get_running_loop().time() < deadline:
+            recovered = harness.get_run(new_run_id)
+            if recovered is not None and recovered["status"] in {
+                "require_human",
+                "completed",
+            }:
+                break
+            await asyncio.sleep(0.02)
         assert recovered is not None
         # 星河包装 supplier name needs human review -> safe human boundary.
         assert recovered["status"] in {"require_human", "completed"}
@@ -3461,4 +3469,94 @@ async def test_failed_conversation_recovers_via_start_existing(
     finally:
         await agent.aclose()
         harness.close()
+
+@pytest.mark.asyncio
+async def test_approval_tolerates_model_invented_actor_and_note(
+    data_dir: Path,
+    workspace: Path,
+) -> None:
+    """A live model may fill its own actor/note in the approve tool call while
+    keeping the decision-critical fields (request/snapshot/input-hash/quote)
+    identical to the buyer's selection. The human approval must still succeed
+    instead of failing with '采购审批参数与用户选择不一致'."""
+
+    class MeddlingProvider(ProcurementFakeProvider):
+        async def _tool_call(self, name, arguments):
+            if name == "procurement_approve_supplier":
+                arguments = {
+                    **arguments,
+                    "actor": "采购决策Agent",
+                    "note": "模型自写备注：" + "长" * 600,
+                }
+            async for item in super()._tool_call(name, arguments):
+                yield item
+
+    truth = load_frozen_truth()
+    cases = [
+        next(item for item in truth["quotes"] if item["id"] == case_id)
+        for case_id in ("q-alpha", "q-beta", "q-theta")
+    ]
+    harness = Harness(data_dir=data_dir, providers={"procurement_fake": MeddlingProvider()})
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        started = await client.post(
+            "/api/procurement/conversations",
+            json={
+                "message": (
+                    "采购10000个PE白色快递袋，规格250x350mm、厚60微米、单色印刷，"
+                    "15天内交付上海松江，必须开票；USD/CNY按7.2，尺寸公差2mm、"
+                    "厚度公差3微米。请比较附件报价并推荐供应商。"
+                ),
+                "attachments": [_upload(case) for case in cases],
+            },
+        )
+        assert started.status_code == 202
+        accepted = started.json()
+        request_id = accepted["purchase_request_id"]
+        run_id = accepted["run_id"]
+        await _wait_for_run_status(client, run_id, {"require_human"})
+        detail = (await client.get(f"/api/procurement/requests/{request_id}")).json()
+
+        # 星河包装 supplier name is low-confidence -> human correction first.
+        theta = next(
+            item
+            for item in detail["quotes"]
+            if "supplier_name" in item["review_fields"]
+        )
+        corrected = await client.post(
+            f"/api/procurement/requests/{request_id}/quotes/{theta['id']}/corrections",
+            json={"field": "supplier_name", "value": "星河包装", "actor": "测试采购员"},
+        )
+        assert corrected.status_code == 200
+        assert corrected.json()["review_fields"] == []
+
+        resumed = await client.post(f"/api/procurement/requests/{request_id}/analyze")
+        assert resumed.status_code == 202
+        assert resumed.json()["run_id"] == run_id
+        detail = await _wait_for_comparison(client, request_id, run_id=run_id)
+        await _wait_for_run_status(client, run_id, {"require_human"})
+
+        snapshot = detail["comparison"]
+        approved = await client.post(
+            f"/api/procurement/requests/{request_id}/decision",
+            json={
+                "snapshot_id": snapshot["id"],
+                "input_sha256": snapshot["input_sha256"],
+                "quote_id": snapshot["result"]["recommended_quote_id"],
+                "confirmed": True,
+                "actor": "测试采购员",
+            },
+        )
+        assert approved.status_code == 200, approved.text
+        await _wait_for_run_status(client, run_id, {"completed"})
+        report = (await client.get(f"/api/runs/{run_id}/report")).json()
+        assert report["conclusion"]["status"] == "passed"
+        assert report["approvals"][-1]["tool_name"] == "procurement_approve_supplier"
+        final = await client.get(f"/api/procurement/requests/{request_id}")
+        assert final.json()["decision"]["decision"] == "approved"
+
+    await app.state.procurement_agent.aclose()
+    await app.state.run_supervisor.aclose()
+    await harness.aclose()
 
