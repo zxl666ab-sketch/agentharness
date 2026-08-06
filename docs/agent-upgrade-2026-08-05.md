@@ -11,7 +11,8 @@
 | 条目 | 处理 | 证据 |
 |---|---|---|
 | [P0] 审批摘要截断后仍被 JSON 解析 | `procurement/agent.py::_wait_for_approval` 改为只校验**完整参数的 `arguments_sha256`**（`arguments_sha256({"request_id", **selection})` vs 存储哈希），不再 `json.loads(arguments_summary)`；新增长备注回归测试 `test_procurement_approval_with_long_note_does_not_rely_on_truncated_summary` | 旧代码下该测试以 `409 采购审批参数不可验证` 失败；修复后通过；存储的 `arguments_summary` 仍 ≤500 字符但不再被解析 |
-| [P0] HEAD 与工作区不一致 | 审查并提交全部工作区改动（核心、测试、web、web_dist、文档）；提交后 HEAD == 工作区 | 提交后完整测试 **219 passed / 1 skipped**；`git status` 无残留跟踪改动 |
+| [P0] HEAD 与工作区不一致 | 审查并提交全部工作区改动（核心、测试、web、web_dist、文档）；提交后 HEAD == 工作区 | 提交后完整测试 **219 passed / 1 skipped**；`git status` 无残留跟踪改动；detached worktree @ HEAD 复测同结果 |
+| [P0] 干净 checkout 复现失败（Windows 行尾转换） | 新增 `.gitattributes`：`eval_truth.json`（`FROZEN_TRUTH_SHA256` 按字节校验）与 `web_dist/**`（确定性构建）标记 `-text`，禁止 checkout 时 LF→CRLF | 修复前 detached worktree @ HEAD 实测 **49 failed**（`load_frozen_truth` 哈希不符）；修复后同一干净 checkout **219 passed / 1 skipped / 80.02%** |
 | [P0] CI 覆盖率门槛 77.08% < 80% | 补 `tests/test_security_and_verification.py`（sandbox/approval/VerificationLoop）与 `tests/test_tool_execution_helpers.py`（tool_execution 纯函数），并删除死代码以收缩分母 | `pytest --cov=agentharness --cov-fail-under=80` 实测 **80.02% PASS**；web job 本地 `npm test` 12/12、`npm run lint` 通过、`scripts/check_web_build_determinism.py` 字节一致，重建后的 `web_dist` 已提交 |
 | [P2] 死代码：命令校验器指向已删除的 `shell` | 从 `contracts.py`（`VerificationCheck.kind` 去掉 `command`、删除 `command` 字段与 `ToolSpec.requires_approval`）、`engine/verification.py`（删除 `CommandRunner`/`_command_check`）、`engine/runtime.py`（删除 `governed_command` 与 `[verification command validator]` 过滤）整体移除该特性类 | `ruff check .` 通过；无任何测试引用已删路径 |
 | [P1] CHANGELOG “isolated real-model acceptance evidence” 口径 | CHANGELOG `[Unreleased]` 措辞改为“单次真实模型全链路运行记录存在工作区，但尚未整理为公开可复现评测，因此不声明真实模型准确率/成本”；与 README / demo-playbook 现有诚实声明对齐 | `CHANGELOG.md` diff；README / demo-playbook 无需改动 |
