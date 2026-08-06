@@ -423,6 +423,23 @@ class ToolInvocationExecutor:
             argument_hash = arguments_sha256(tc.arguments)
             invocation = self.storage.get_tool_invocation(tc.invocation_id)
             if invocation is None:
+                # Resume safety: a previously interrupted resume may re-issue a
+                # tool at the same (run_id, step, ordinal) slot with a fresh
+                # invocation id. Reuse the existing record for that slot instead
+                # of crashing on the UNIQUE constraint.
+                invocation = next(
+                    (
+                        item
+                        for item in self.storage.list_tool_invocations(run_id)
+                        if item.step == step
+                        and item.ordinal == tc.ordinal
+                        and item.tool_name == tc.name
+                    ),
+                    None,
+                )
+                if invocation is not None:
+                    tc = tc.model_copy(update={"invocation_id": invocation.id})
+            if invocation is None:
                 invocation = ToolInvocationRecord(
                     id=tc.invocation_id,
                     run_id=run_id,
