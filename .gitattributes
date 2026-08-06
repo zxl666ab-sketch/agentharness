@@ -1,0 +1,6 @@
+# Frozen truth is hashed byte-for-byte by tests (FROZEN_TRUTH_SHA256);
+# line-ending conversion would break clean checkouts on Windows.
+src/agentharness/procurement/eval_truth.json -text
+
+# Determinism-checked web bundle must stay byte-identical across checkouts.
+src/agentharness/web_dist/** -text
