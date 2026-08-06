@@ -1,4 +1,4 @@
-﻿"""Public domain contracts — stable Pydantic types for the harness surface."""
+"""Public domain contracts — stable Pydantic types for the harness surface."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ class RunStatus(StrEnum):
     failed = "failed"
     cancelled = "cancelled"
     interrupted = "interrupted"
+    budget_stopped = "budget_stopped"
 
 
 class EffectKind(StrEnum):
@@ -135,6 +136,7 @@ class EventType(StrEnum):
     child_run_ended = "child_run_ended"
     budget_warning = "budget_warning"
     provider_retry = "provider_retry"
+    run_budget_stopped = "run_budget_stopped"
     redaction = "redaction"
     heartbeat = "heartbeat"
     error = "error"

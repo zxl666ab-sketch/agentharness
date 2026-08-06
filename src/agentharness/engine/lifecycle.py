@@ -29,6 +29,7 @@ RESUMABLE_STATUSES = frozenset(
         # can be recovered through "从持久化状态重新分析"; step-0 failures
         # without a checkpoint still fail fast in resume() with a clear error.
         RunStatus.failed,
+        RunStatus.budget_stopped,
     }
 )
 
@@ -187,6 +188,7 @@ class RunLifecycle:
             RunStatus.failed: EventType.run_failed,
             RunStatus.cancelled: EventType.run_cancelled,
             RunStatus.interrupted: EventType.run_interrupted,
+            RunStatus.budget_stopped: EventType.run_budget_stopped,
         }.get(status, EventType.run_status)
         if run:
             finish_ctx = self._runs.get(run_id)

@@ -36,6 +36,7 @@ const RUN_LABELS: Record<string, string> = {
   failed: "运行失败",
   cancelled: "运行已取消",
   interrupted: "运行已中断",
+  budget_stopped: "已停在安全边界",
 };
 
 function formatBytes(value: number) {
@@ -259,7 +260,7 @@ export function ProcurementConversation({
   const tools = toolsQuery.data || [];
   const status = runQuery.data?.status || (runId ? "pending" : "");
   const needsClarification = status === "require_human";
-  const canRecover = status === "failed" || status === "cancelled" || status === "interrupted";
+  const canRecover = status === "failed" || status === "cancelled" || status === "interrupted" || status === "budget_stopped";
   const canStop = status === "pending" || status === "running";
 
   async function submitReply(event: FormEvent) {

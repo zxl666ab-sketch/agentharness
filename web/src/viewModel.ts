@@ -1,4 +1,4 @@
-import type { EventRow } from "./api/client";
+﻿import type { EventRow } from "./api/client";
 
 export const TERMINAL_STATUSES = new Set([
   "completed",
@@ -6,6 +6,7 @@ export const TERMINAL_STATUSES = new Set([
   "cancelled",
   "interrupted",
   "require_human",
+  "budget_stopped",
 ]);
 
 export function statusLabel(status?: string | null): string {
@@ -18,6 +19,7 @@ export function statusLabel(status?: string | null): string {
     cancelled: "已停止",
     interrupted: "已中断",
     require_human: "需要人工处理",
+    budget_stopped: "已停在安全边界",
   }[status || ""] || "未运行";
 }
 
@@ -94,7 +96,7 @@ export function eventTone(event: EventRow): "success" | "warning" | "danger" | "
   if (["approval_requested", "tool_retry", "provider_retry", "budget_warning"].includes(type)) {
     return "warning";
   }
-  if (["run_failed", "run_cancelled", "run_interrupted", "tool_execution_cancelled", "tool_execution_indeterminate", "error"].includes(type)) {
+  if (["run_failed", "run_cancelled", "run_interrupted", "run_budget_stopped", "tool_execution_cancelled", "tool_execution_indeterminate", "error"].includes(type)) {
     return "danger";
   }
   return "neutral";
