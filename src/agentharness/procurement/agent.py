@@ -130,6 +130,14 @@ def _env_optional_number(
     return value
 
 
+def _env_flag(name: str, *, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
 def _fake_run_profile() -> ProcurementRunProfile:
     return ProcurementRunProfile(
         provider=PROCUREMENT_PROVIDER,
@@ -823,6 +831,20 @@ class ProcurementAgent:
         self.approval_broker = approval_broker
         self.model_config_path = harness.data_dir / PROCUREMENT_CONFIG_FILENAME
         self.run_profile = run_profile or procurement_run_profile_from_env()
+        # Independent review (phase 3): a second provider/model cross-checks the
+        # recommendation against the deterministic comparison before approval.
+        # It never blocks the approval; the verdict is recorded as evidence.
+        self.ai_review_enabled = _env_flag(
+            "AGENTHARNESS_PROCUREMENT_AI_REVIEW_ENABLED", default=False
+        )
+        self.review_provider = (
+            os.environ.get("AGENTHARNESS_PROCUREMENT_REVIEW_PROVIDER", "")
+            .strip()
+            or "openai"
+        )
+        self.review_model = (
+            os.environ.get("AGENTHARNESS_PROCUREMENT_REVIEW_MODEL", "").strip() or None
+        )
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         if run_profile is None:
             self._restore_persisted_model_config()
@@ -946,6 +968,17 @@ class ProcurementAgent:
                     ),
                 )
             self.run_profile = profile
+            self.ai_review_enabled = bool(
+                payload.get("ai_review_enabled", self.ai_review_enabled)
+            )
+            self.review_provider = (
+                str(payload.get("review_provider") or self.review_provider).strip()
+                or "openai"
+            )
+            if "review_model" in payload:
+                self.review_model = (
+                    str(payload.get("review_model") or "").strip() or None
+                )
         except (TypeError, ValueError):
             # A malformed local file must not prevent the web service from starting.
             return
@@ -970,6 +1003,9 @@ class ProcurementAgent:
             "output_price_per_million_usd": profile.pricing.output_per_million_usd,
             "cached_input_price_per_million_usd": profile.pricing.cached_input_per_million_usd,
             "max_cost_usd": profile.budget.max_cost_usd,
+            "ai_review_enabled": self.ai_review_enabled,
+            "review_provider": self.review_provider,
+            "review_model": self.review_model,
         }
         temporary = self.model_config_path.with_suffix(".tmp")
         temporary.write_text(
@@ -1125,6 +1161,9 @@ class ProcurementAgent:
             "output_price_per_million_usd": profile.pricing.output_per_million_usd,
             "cached_input_price_per_million_usd": profile.pricing.cached_input_per_million_usd,
             "max_cost_usd": profile.budget.max_cost_usd,
+            "ai_review_enabled": self.ai_review_enabled,
+            "review_provider": self.review_provider,
+            "review_model": self.review_model,
         }
 
     async def configure_model(
@@ -1137,6 +1176,9 @@ class ProcurementAgent:
         api_mode: str,
         reasoning_effort: str | None,
         input_price_per_million_usd: float | None,
+        ai_review_enabled: bool | None = None,
+        review_provider: str | None = None,
+        review_model: str | None = None,
         output_price_per_million_usd: float | None,
         cached_input_price_per_million_usd: float | None,
         max_cost_usd: float | None,
@@ -1166,6 +1208,13 @@ class ProcurementAgent:
             "max",
         }:
             raise ValueError("推理强度仅支持自动、none、minimal、low、medium、high 或 max")
+
+        if ai_review_enabled is not None:
+            self.ai_review_enabled = bool(ai_review_enabled)
+        if review_provider is not None:
+            self.review_provider = (review_provider or "").strip().lower() or "openai"
+        if review_model is not None:
+            self.review_model = (review_model or "").strip() or None
 
         if provider == PROCUREMENT_PROVIDER:
             profile = ProcurementRunProfile(
@@ -1450,6 +1499,12 @@ class ProcurementAgent:
             detail = self.service.get_request(request_id)
             if result.status.value != "completed" and detail.get("decision") is None:
                 raise RuntimeError(result.error or "采购审批运行没有完成")
+            if self.ai_review_enabled and detail.get("decision") is not None:
+                await self._run_ai_review(
+                    detail,
+                    run_id=run_id,
+                    approval_id=str(detail["decision"].get("approval_id") or ""),
+                )
             return detail
         except BaseException:
             active = [owned for owned in owned_tasks if not owned.done()]
@@ -1458,6 +1513,101 @@ class ProcurementAgent:
             if active:
                 await asyncio.gather(*active, return_exceptions=True)
             raise
+
+    async def _run_ai_review(
+        self,
+        request: dict[str, Any],
+        *,
+        run_id: str,
+        approval_id: str,
+    ) -> None:
+        """Independent review (evidence only): a second provider/model cross-checks
+        the deterministic recommendation against the approved supplier. It never
+        blocks approval; verdicts and failures are recorded as audit events."""
+        request_id = str(request["id"])
+        comparison = request.get("comparison") or {}
+        result = comparison.get("result") or {}
+        recommended_id = result.get("recommended_quote_id")
+        decision = request.get("decision") or {}
+        approved_id = decision.get("quote_id")
+        model = self.review_model or self.run_profile.model
+        reviewer = self.harness.providers.get(self.review_provider)
+        if reviewer is None:
+            self.service._audit(
+                request_id,
+                "ai_review",
+                actor="独立评审",
+                payload={
+                    "verdict": "error",
+                    "reason": f"独立评审 Provider 未注册：{self.review_provider}",
+                    "model": model,
+                    "approval_id": approval_id,
+                    "run_id": run_id,
+                },
+            )
+            return
+        prompt = json.dumps(
+            {
+                "任务": "独立交叉验证采购审批与确定性比价是否一致，只输出 JSON。",
+                "确定性推荐报价": recommended_id,
+                "已批准供应商报价": approved_id,
+                "输出格式": {"pass": True, "reason": "简短中文理由"},
+            },
+            ensure_ascii=False,
+        )
+        try:
+            chunks: list[str] = []
+            async for item in reviewer.stream(
+                ModelRequest(
+                    model=model,
+                    system="你是独立评审员，只读，不执行任何操作。只输出 JSON。",
+                    messages=[Message(role=MessageRole.user, content=prompt)],
+                    tools=[],
+                    temperature=0,
+                    max_tokens=500,
+                )
+            ):
+                if item.type == StreamItemType.text_delta and item.text:
+                    chunks.append(item.text)
+                elif item.type == StreamItemType.error:
+                    raise RuntimeError(item.error or "独立评审 Provider 错误")
+            raw = "".join(chunks).strip()
+            if raw.startswith("```"):
+                raw = raw.strip("`")
+                if raw.startswith("json"):
+                    raw = raw[4:].lstrip()
+            verdict = json.loads(raw or "{}")
+            passed = bool(verdict.get("pass", verdict.get("passed", False)))
+            reason = str(verdict.get("reason") or "")
+        except Exception as exc:  # noqa: BLE001
+            self.service._audit(
+                request_id,
+                "ai_review",
+                actor="独立评审",
+                payload={
+                    "verdict": "error",
+                    "reason": f"独立评审调用失败：{exc}",
+                    "model": model,
+                    "approval_id": approval_id,
+                    "run_id": run_id,
+                },
+            )
+            return
+        self.service._audit(
+            request_id,
+            "ai_review",
+            actor="独立评审",
+            payload={
+                "verdict": "pass" if passed else "fail",
+                "reason": reason,
+                "model": model,
+                "approval_id": approval_id,
+                "run_id": run_id,
+                "recommended_quote_id": recommended_id,
+                "approved_quote_id": approved_id,
+            },
+        )
+
 
     async def _wait_for_approval(
         self,

@@ -1,4 +1,4 @@
-"""Governed procurement tool execution, validation, approvals and recovery."""
+﻿"""Governed procurement tool execution, validation, approvals and recovery."""
 
 from __future__ import annotations
 
@@ -447,6 +447,7 @@ class ToolInvocationExecutor:
             effect=effect,
             replay_policy=resolved_replay_policy(spec, effect),
             arguments=tc.arguments,
+            reason=tc.reason,
             arguments_sha256=arguments_sha256(tc.arguments),
             attempt_count=0,
             error_code=error_code,
@@ -561,6 +562,7 @@ class ToolInvocationExecutor:
                         else ReplayPolicy.never
                     ),
                     arguments=tc.arguments,
+                    reason=tc.reason,
                     arguments_sha256=arguments_sha256(tc.arguments),
                     attempt_count=0,
                     error_code=error_code,
@@ -711,6 +713,7 @@ class ToolInvocationExecutor:
                     effect=effect,
                     replay_policy=replay_policy,
                     arguments=tc.arguments,
+                    reason=tc.reason,
                     arguments_sha256=argument_hash,
                 )
                 self.storage.save_tool_invocation(invocation)
@@ -823,6 +826,7 @@ class ToolInvocationExecutor:
                             "name": tc.name,
                             "effect": effect.value,
                             "arguments_sha256": argument_hash,
+                            "reason": tc.reason,
                         },
                     )
                 ],

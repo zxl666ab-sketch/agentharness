@@ -194,6 +194,9 @@ class ProcurementModelConfigBody(BaseModel):
         default=None, ge=0, le=1_000
     )
     max_cost_usd: float | None = Field(default=None, ge=0, le=100)
+    ai_review_enabled: bool | None = None
+    review_provider: str | None = Field(default=None, max_length=100)
+    review_model: str | None = Field(default=None, max_length=200)
 
     @field_validator("model")
     @classmethod
