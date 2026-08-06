@@ -9,4 +9,6 @@ API_CAPABILITIES = (
     "procurement_no_award_v1",
     "procurement_audit_v1",
     "procurement_stream_v1",
+    "procurement_po_v1",
+    "procurement_demo_v1",
 )
