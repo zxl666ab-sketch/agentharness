@@ -36,6 +36,14 @@ export function AuditView({ request }: Props) {
   const costLabel = costStatus === "estimated" && typeof estimatedCost === "number"
     ? `$${estimatedCost.toFixed(4)}`
     : "成本未知";
+  const auditReport = useQuery({
+    queryKey: ["procurement-audit-report", request.id],
+    queryFn: () => procurementApi.report(request.id),
+    enabled: !!request.id,
+  });
+  const reviews = (auditReport.data?.audit_events || []).filter(
+    (event) => event.type === "ai_review"
+  );
   const checkpointStatus = String(checkpointQuery.data?.status || "");
   const checkpointLabel = checkpointStatus === "completed"
     ? "已完成并持久化"
@@ -126,6 +134,36 @@ export function AuditView({ request }: Props) {
             <div><Database size={17} /><span><small>持久化检查点</small><strong>{checkpointLabel}</strong></span></div>
             <div><ShieldCheck size={17} /><span><small>人工审批</small><strong>{approvalLabel}</strong></span></div>
             <div><Gauge size={17} /><span><small>模型回合 / 成本</small><strong>{modelTurns} · {costLabel}</strong></span></div>
+          </section>
+          <section className="proc-review-section">
+            <header>
+              <div><ShieldCheck size={17} /><h2>独立评审</h2></div>
+              <span>{reviews.length ? `${reviews.length} 条记录` : "未启用或暂无记录"}</span>
+            </header>
+            {reviews.length ? (
+              <ul className="proc-review-list">
+                {reviews.map((review) => {
+                  const verdict = String(review.payload.verdict || "error");
+                  return (
+                    <li key={review.id} className={`proc-review-item ${verdict}`}>
+                      <strong>
+                        {verdict === "pass" ? <CheckCircle2 size={15} /> : <AlertTriangle size={15} />}
+                        {verdict === "pass" ? "通过" : verdict === "fail" ? "未通过" : "评审失败"}
+                      </strong>
+                      <p>{String(review.payload.reason || "（无理由）")}</p>
+                      <small>
+                        模型 {String(review.payload.model || "—")} · 审批 {String(review.payload.approval_id || "").slice(0, 8)} ·{" "}
+                        {new Date(review.created_at).toLocaleString("zh-CN")}
+                      </small>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <p className="proc-review-empty">
+                在「API / 模型配置」开启「审批前启用独立评审」并完成审批后，这里会显示第二个模型交叉验证的 pass/fail 与理由（不阻塞审批，仅记录证据）。
+              </p>
+            )}
           </section>
           <div className="proc-runtime-report">
             <RunReport

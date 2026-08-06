@@ -639,3 +639,19 @@
 /* One-click demo actions in the sidebar head */
 .proc-sidebar-actions { display: inline-flex; align-items: center; gap: 6px; }
 .proc-button.tiny { min-height: 28px; padding: 0 9px; font-size: 12px; gap: 5px; }
+
+/* Independent review (ai_review) section on the audit tab */
+.proc-review-section { border: 1px solid var(--border-strong); border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; background: var(--surface); }
+.proc-review-section > header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.proc-review-section > header > div { display: inline-flex; align-items: center; gap: 7px; }
+.proc-review-section > header h2 { font-size: var(--text-sm); margin: 0; }
+.proc-review-section > header span { font-size: var(--text-xs); color: var(--text-muted); }
+.proc-review-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.proc-review-item { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-subtle); }
+.proc-review-item strong { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-xs); }
+.proc-review-item.pass strong { color: var(--success, #1a7f37); }
+.proc-review-item.fail strong { color: var(--danger, #b42318); }
+.proc-review-item.error strong { color: var(--text-secondary); }
+.proc-review-item p { margin: 0; font-size: var(--text-xs); line-height: 1.5; }
+.proc-review-item small { color: var(--text-muted); font-size: 11px; }
+.proc-review-empty { margin: 0; font-size: var(--text-xs); color: var(--text-muted); line-height: 1.6; }
