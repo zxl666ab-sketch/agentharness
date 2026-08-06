@@ -1312,6 +1312,10 @@ class ProcurementService:
             "decision": decision,
         }
 
+    def staged_attachment_count(self, request_id: str) -> int:
+        """Number of quote attachments staged for this request (conversation flow)."""
+        return len(self._staged_attachments(request_id))
+
     def _staged_attachments(self, request_id: str) -> list[dict[str, Any]]:
         return [
             dict(event["payload"])

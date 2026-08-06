@@ -995,7 +995,19 @@ class ProcurementAgent:
         if request.get("decision") is not None:
             raise ProcurementError("该采购需求已经形成审批结论")
         if request["quote_count"] < 2:
-            raise ProcurementError("至少上传 2 家供应商报价后才能比价")
+            if self.service.staged_attachment_count(request_id) < 2:
+                raise ProcurementError("至少上传 2 家供应商报价后才能比价")
+            # Conversation request whose run failed before the pipeline parsed
+            # the staged attachments (e.g. provider error on step 0): relaunch
+            # the conversation-style loop so capture re-runs and the analysis
+            # pipeline parses the already-staged quotes. Structured-API requests
+            # have no staged attachments and keep the strict error above.
+            return await self._launch(
+                request_id,
+                message=str(request.get("title") or "").strip()
+                or "请比较附件报价并推荐供应商。",
+                source="procurement_conversation",
+            )
         if request["unresolved_field_count"]:
             raise ProcurementError("仍有低置信度或缺失字段待复核")
 
