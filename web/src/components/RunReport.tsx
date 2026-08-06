@@ -116,7 +116,7 @@ export function RunReport({ report, loading = false, error = null }: Props) {
   }
   if (!report) return null;
 
-  const { conclusion, verification, usage, source } = report;
+  const { conclusion, verification, usage, source, convergence } = report;
   const validators = verification.policy?.validators || [];
   const cost = usage.estimated_cost_usd;
   const costStatus = usage.cost_status;
@@ -219,6 +219,46 @@ export function RunReport({ report, loading = false, error = null }: Props) {
                 </div>
               </details>
             ))}
+          </div>
+        </details>
+
+        <details className="report-section">
+          <summary>
+            <span><Gauge size={15} />收敛指标</span>
+            <span>{convergence ? `${convergence.model_turns} 回合` : "无"}</span>
+            <ChevronRight size={15} />
+          </summary>
+          <div className="report-section-body">
+            {convergence ? (
+              <>
+                <div className="report-policy">
+                  <div><span>模型回合</span><strong>{formatNumber(convergence.model_turns)}</strong></div>
+                  <div><span>工具调用</span><strong>{formatNumber(convergence.total_tool_calls)}</strong></div>
+                  <div><span>重复调用</span><strong className={convergence.duplicate_calls ? "convergence-bad" : ""}>{convergence.duplicate_calls}</strong></div>
+                  <div><span>越权调用</span><strong className={convergence.unauthorized_calls ? "convergence-bad" : ""}>{convergence.unauthorized_calls}</strong></div>
+                </div>
+                {Object.keys(convergence.tool_call_counts || {}).length ? (
+                  <div className="report-policy">
+                    {Object.entries(convergence.tool_call_counts || {}).map(([name, count]) => (
+                      <div key={name}><span>{toolLabel(name)}</span><strong>{count}</strong></div>
+                    ))}
+                  </div>
+                ) : null}
+                <h3 className="report-subhead">工具调用理由</h3>
+                {convergence.tool_reasons?.length ? convergence.tool_reasons.map((item, index) => (
+                  <details className="audit-record" key={`${item.tool_name}-${item.step}-${index}`}>
+                    <summary>
+                      <span>{toolLabel(item.tool_name)}</span>
+                      {typeof item.step === "number" ? <code>step {item.step}</code> : null}
+                      <ChevronRight size={14} />
+                    </summary>
+                    <p className="report-reason">{item.reason || "无说明"}</p>
+                  </details>
+                )) : <p className="report-empty">没有记录到工具调用理由。</p>}
+              </>
+            ) : (
+              <p className="report-empty">此运行没有收敛指标。</p>
+            )}
           </div>
         </details>
 

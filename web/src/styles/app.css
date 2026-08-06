@@ -246,3 +246,7 @@
   .artifact-record { grid-template-columns: minmax(0, 1fr) auto; }
   .artifact-record small { display: none; }
 }
+
+/* Convergence metrics in run reports */
+.report-subhead { margin: 12px 0 6px; font-size: var(--text-xs); font-weight: 650; color: var(--text-secondary); }
+.convergence-bad { color: var(--warning); }
