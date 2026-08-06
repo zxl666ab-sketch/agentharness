@@ -667,28 +667,39 @@ class ToolInvocationExecutor:
                     decision = ApprovalDecision.deny
                     cancelled_while_waiting = False
                 else:
-                    approval_task = asyncio.ensure_future(self.approval_callback(apr))
-                    cancel_waiter = asyncio.create_task(cancel.wait())
+                    # Time parked waiting for the buyer does not consume the
+                    # run's wall-clock budget (see RunContext wall_* fields).
+                    pause_ctx = self._ctx(run_id)
+                    pause_ctx.wall_pause_started = time.monotonic()
                     try:
-                        done, _ = await asyncio.wait(
-                            {approval_task, cancel_waiter},
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        cancelled_while_waiting = cancel_waiter in done
-                        if cancelled_while_waiting:
-                            approval_task.cancel()
-                            with suppress(asyncio.CancelledError):
-                                await approval_task
-                            decision = ApprovalDecision.deny
-                        else:
-                            try:
-                                decision = approval_task.result()
-                            except Exception:  # noqa: BLE001
+                        approval_task = asyncio.ensure_future(self.approval_callback(apr))
+                        cancel_waiter = asyncio.create_task(cancel.wait())
+                        try:
+                            done, _ = await asyncio.wait(
+                                {approval_task, cancel_waiter},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            cancelled_while_waiting = cancel_waiter in done
+                            if cancelled_while_waiting:
+                                approval_task.cancel()
+                                with suppress(asyncio.CancelledError):
+                                    await approval_task
                                 decision = ApprovalDecision.deny
+                            else:
+                                try:
+                                    decision = approval_task.result()
+                                except Exception:  # noqa: BLE001
+                                    decision = ApprovalDecision.deny
+                        finally:
+                            cancel_waiter.cancel()
+                            with suppress(asyncio.CancelledError):
+                                await cancel_waiter
                     finally:
-                        cancel_waiter.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await cancel_waiter
+                        if pause_ctx.wall_pause_started is not None:
+                            pause_ctx.wall_paused_s += (
+                                time.monotonic() - pause_ctx.wall_pause_started
+                            )
+                            pause_ctx.wall_pause_started = None
                 if requires_confirmation and decision == ApprovalDecision.allow_run:
                     decision = ApprovalDecision.allow_once
                 apr.decision = decision

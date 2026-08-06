@@ -14,6 +14,7 @@ from typing import Any, cast
 from agentharness.contracts import (
     ApprovalMode,
     BudgetConfig,
+    Checkpoint,
     ContextState,
     EventEnvelope,
     EventType,
@@ -377,10 +378,66 @@ class RunEngine:
         if run_id not in self._active_run_ids:
             self.lifecycle.mark_interrupted(run_id, reason)
 
+    def _wall_active_seconds(self, run_id: str, fallback_started: float | None = None) -> float:
+        """Wall-clock seconds charged against max_wall_time_s.
+
+        Time parked at the human approval gate (wall_pause_started set) is
+        excluded even while the wait is still in progress.
+        """
+        ctx = self._runs.get(run_id)
+        now = time.monotonic()
+        if ctx is None or ctx.wall_started <= 0:
+            return (now - fallback_started) if fallback_started else 0.0
+        paused = ctx.wall_paused_s
+        if ctx.wall_pause_started is not None:
+            paused += now - ctx.wall_pause_started
+        return now - ctx.wall_started - paused
+
+    async def _run_with_wall_clock(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        root_run_id: str,
+        parent_run_id: str | None,
+        budget: BudgetConfig,
+        work: Awaitable[RunResult],
+    ) -> RunResult:
+        """Run ``work`` bounded by max_wall_time_s, excluding time parked at a
+        human approval gate (status waiting_approval)."""
+        ctx = self._ctx(run_id)
+        ctx.wall_started = time.monotonic()
+        ctx.wall_paused_s = 0.0
+        ctx.wall_pause_started = None
+        task = asyncio.create_task(work)
+        try:
+            while True:
+                active = self._wall_active_seconds(run_id)
+                if active >= budget.max_wall_time_s:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+                    return await self._finish_wall_timeout(
+                        run_id,
+                        session_id,
+                        root_run_id,
+                        parent_run_id,
+                    )
+                done, _ = await asyncio.wait(
+                    {task},
+                    timeout=min(1.0, max(0.1, budget.max_wall_time_s - active)),
+                )
+                if task in done:
+                    return task.result()
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
     async def run(self, request: RunRequest, *, run_id: str | None = None) -> RunResult:
         from agentharness.session_history import session_title_from_message
 
-        wall_started = time.monotonic()
         parent_run_id = request.parent_run_id
         is_top_level = parent_run_id is None
 
@@ -523,11 +580,13 @@ class RunEngine:
 
         stop_watcher = asyncio.create_task(self._watch_stop_request(run_id, cancel))
         try:
-            remaining = request.budget.max_wall_time_s - (
-                time.monotonic() - wall_started
-            )
-            async with asyncio.timeout(max(0.0, remaining)):
-                return await self._loop(
+            return await self._run_with_wall_clock(
+                run_id=run_id,
+                session_id=session_id,
+                root_run_id=root_run_id,
+                parent_run_id=parent_run_id,
+                budget=request.budget,
+                work=self._loop(
                     run_id=run_id,
                     session_id=session_id,
                     root_run_id=root_run_id,
@@ -538,13 +597,7 @@ class RunEngine:
                     usage=Usage(),
                     completed_tool_ids=ctx.completed_tool_ids,
                     cancel=cancel,
-                )
-        except TimeoutError:
-            return await self._finish_wall_timeout(
-                run_id,
-                session_id,
-                root_run_id,
-                parent_run_id,
+                ),
             )
         except asyncio.CancelledError:
             # Preserve completed tools for resume when the run is cancelled.
@@ -590,8 +643,62 @@ class RunEngine:
             self._deactivate_run(run_id)
             await self._cleanup_run_state(run_id)
 
+    async def _resume_work(
+        self,
+        *,
+        run_id: str,
+        run: dict[str, Any],
+        request: RunRequest,
+        messages: list[Message],
+        pending: list[ToolCall],
+        cp: Checkpoint,
+        completed: set[str],
+        cancel: asyncio.Event,
+    ) -> RunResult:
+        if pending and cp.phase in ("tool_batch", "waiting_approval"):
+            # Continue pending tools first
+            await self.tool_executor.execute_batch(
+                run_id=run_id,
+                session_id=run["session_id"],
+                root_run_id=run["root_run_id"],
+                parent_run_id=run.get("parent_run_id"),
+                request=request,
+                messages=messages,
+                tool_calls=pending,
+                completed_tool_ids=completed,
+                usage=cp.usage,
+                step=cp.step,
+                cancel=cancel,
+            )
+            resume_ctx = self._ctx(run_id)
+            if resume_ctx.indeterminate_reason:
+                return self.lifecycle.finish(
+                    run_id,
+                    run["session_id"],
+                    run["root_run_id"],
+                    run.get("parent_run_id"),
+                    RunStatus.require_human,
+                    cp.partial_text,
+                    cp.usage,
+                    cp.step,
+                    resume_ctx.indeterminate_reason,
+                    messages=messages,
+                )
+
+        return await self._loop(
+            run_id=run_id,
+            session_id=run["session_id"],
+            root_run_id=run["root_run_id"],
+            parent_run_id=run.get("parent_run_id"),
+            request=request,
+            messages=messages,
+            step=cp.step + (1 if pending else 0),
+            usage=cp.usage,
+            completed_tool_ids=completed,
+            cancel=cancel,
+        )
+
     async def resume(self, run_id: str, input: str | None = None) -> RunResult:
-        wall_started = time.monotonic()
         run = self.storage.get_run(run_id)
         if not run:
             raise KeyError(f"run not found: {run_id}")
@@ -705,57 +812,22 @@ class RunEngine:
 
         stop_watcher = asyncio.create_task(self._watch_stop_request(run_id, cancel))
         try:
-            remaining = request.budget.max_wall_time_s - (
-                time.monotonic() - wall_started
-            )
-            async with asyncio.timeout(max(0.0, remaining)):
-                if pending and cp.phase in ("tool_batch", "waiting_approval"):
-                    # Continue pending tools first
-                    await self.tool_executor.execute_batch(
-                        run_id=run_id,
-                        session_id=run["session_id"],
-                        root_run_id=run["root_run_id"],
-                        parent_run_id=run.get("parent_run_id"),
-                        request=request,
-                        messages=messages,
-                        tool_calls=pending,
-                        completed_tool_ids=completed,
-                        usage=cp.usage,
-                        step=cp.step,
-                        cancel=cancel,
-                    )
-                    if resume_ctx.indeterminate_reason:
-                        return self.lifecycle.finish(
-                            run_id,
-                            run["session_id"],
-                            run["root_run_id"],
-                            run.get("parent_run_id"),
-                            RunStatus.require_human,
-                            cp.partial_text,
-                            cp.usage,
-                            cp.step,
-                            resume_ctx.indeterminate_reason,
-                            messages=messages,
-                        )
-
-                return await self._loop(
+            return await self._run_with_wall_clock(
+                run_id=run_id,
+                session_id=run["session_id"],
+                root_run_id=run["root_run_id"],
+                parent_run_id=run.get("parent_run_id"),
+                budget=request.budget,
+                work=self._resume_work(
                     run_id=run_id,
-                    session_id=run["session_id"],
-                    root_run_id=run["root_run_id"],
-                    parent_run_id=run.get("parent_run_id"),
+                    run=run,
                     request=request,
                     messages=messages,
-                    step=cp.step + (1 if pending else 0),
-                    usage=cp.usage,
-                    completed_tool_ids=completed,
+                    pending=pending,
+                    cp=cp,
+                    completed=completed,
                     cancel=cancel,
-                )
-        except TimeoutError:
-            return await self._finish_wall_timeout(
-                run_id,
-                run["session_id"],
-                run["root_run_id"],
-                run.get("parent_run_id"),
+                ),
             )
         except asyncio.CancelledError:
             await self.interrupt(run_id, "cancelled")
@@ -910,7 +982,7 @@ class RunEngine:
                     RunStatus.failed, "".join(output_parts), usage, step, "max_steps exceeded",
                     messages=messages,
                 )
-            if time.monotonic() - started > budget.max_wall_time_s:
+            if self._wall_active_seconds(run_id, started) > budget.max_wall_time_s:
                 return self.lifecycle.finish(
                     run_id, session_id, root_run_id, parent_run_id,
                     RunStatus.failed, "".join(output_parts), usage, step, "max_wall_time exceeded",

@@ -25,6 +25,10 @@ RESUMABLE_STATUSES = frozenset(
         RunStatus.cancelled,
         RunStatus.waiting_approval,
         RunStatus.require_human,
+        # A failed run with a checkpoint (e.g. provider/budget failure mid-run)
+        # can be recovered through "从持久化状态重新分析"; step-0 failures
+        # without a checkpoint still fail fast in resume() with a clear error.
+        RunStatus.failed,
     }
 )
 
