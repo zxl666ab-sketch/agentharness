@@ -68,19 +68,19 @@
 
 > 目标：网关/预算异常不再直接红屏。
 
-### 2.1 [x] length / 0 输出自动重试 + 输出预算放宽【已完成 · 2026-08-06 / fb995f6 / 证据 commit 待补 / docs/evidence/stage-2-reliability-offline-2026-08-06.md】
+### 2.1 [x] length / 0 输出自动重试 + 输出预算放宽【已完成 · 2026-08-06 / fb995f6  / 396cc54 / docs/evidence/stage-2-reliability-offline-2026-08-06.md】
 - 目标/做法：`finish_reason=length` 且 0 输出 → 自动重试一次并放宽输出预算；仍失败给中文可操作提示。
 - 加分点：现成面试案例「网关偶发截断 → 自动重试 → 不红」。
 - 工作量：0.5–1 天
 - 验收：使用 fake/provider 故障注入稳定复现 `length` 错误后，run 自动恢复完成，事件流记录 retry 原因和次数；真实模型阶段验证只要求正常路径不红，并记录实际 `finish_reason`，不得为了触发故障而无限重试或伪造真实模型结果。
 
-### 2.2 [x] 预算/回合感知降级【已完成 · 2026-08-06 / fb995f6 / 证据 commit 待补 / docs/evidence/stage-2-reliability-offline-2026-08-06.md】
+### 2.2 [x] 预算/回合感知降级【已完成 · 2026-08-06 / fb995f6  / 396cc54 / docs/evidence/stage-2-reliability-offline-2026-08-06.md】
 - 目标/做法：Token/回合预算快用完 → 先自动压缩上下文 → 仍不够 → 停在安全边界并明确告知用户，而非硬失败。
 - 加分点：体现「预算也是 agent 治理的一部分」。
 - 工作量：0.5–1 天
 - 验收：预算耗尽路径产生“已停在安全边界”的明确状态，而不是 failed 红屏；边界路径用确定性预算注入验证，真实模型验证记录正常路径或实际预算停止结果。
 
-### 2.3 [x] Few-shot 示例注入【已完成 · 2026-08-06 / fb995f6 / 证据 commit 待补 / docs/evidence/stage-2-reliability-offline-2026-08-06.md】
+### 2.3 [x] Few-shot 示例注入【已完成 · 2026-08-06 / fb995f6  / 396cc54 / docs/evidence/stage-2-reliability-offline-2026-08-06.md】
 - 目标/做法：系统提示词给 2–3 条理想工具序列示例（新对话→capture→analysis→等审批）。
 - 工作量：0.5 天
 - 验收：同一固定场景下真实/模拟回合数较各自阶段前基线下降，既有测试无回归；真实模型未达到目标时须记录模型、网关或场景差异，不得以 fake 数据替代真实证据。
