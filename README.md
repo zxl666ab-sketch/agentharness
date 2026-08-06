@@ -59,8 +59,8 @@ flowchart TB
 
 | 项 | 状态 |
 |---|---|
-| Python 测试 | 245 passed / 1 skipped |
-| 覆盖率 | 81.05%（门槛 80%） |
+| Python 测试 | 248 passed / 1 skipped |
+| 覆盖率 | 81.07%（门槛 80%） |
 | Python 质量 | `ruff check .` 通过 |
 | Web 测试 / lint / build | 14 passed / 通过 / 通过（web_dist 已重建） |
 | 确定性冻结评测 | 617/620 字段抽取、31/31 成本计算、0 硬约束漏检（0 模型调用） |
