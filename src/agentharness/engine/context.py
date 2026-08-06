@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -24,16 +25,31 @@ from agentharness.security.redaction import Redactor, default_redactor
 _RULE_FILES = ("AGENTS.md", "WORKBUDDY.md")
 _MAX_RULE_BYTES = 64 * 1024
 
+# CJK ideographs, kana, hangul and CJK punctuation consume roughly one token
+# per character in Chinese-capable tokenizers (DeepSeek, Qwen, GLM, GPT
+# cl100k); ASCII stays at ~4 chars/token.
+_CJK_RE = re.compile(
+    "[\u2E80-\u9FFF\u3040-\u30FF\uAC00-\uD7AF\uF900-\uFAFF"
+    "\uFF00-\uFFEF\u3000-\u303F]"
+)
+
 
 class ContextBudgetError(ValueError):
     """Essential context cannot fit without violating planner invariants."""
 
 
 def estimate_tokens(text: str) -> int:
-    """Deterministic token estimate when provider count is unavailable (~4 chars/token)."""
+    """Deterministic CJK-aware token estimate when provider count is unavailable.
+
+    ASCII text is estimated at ~4 chars/token. CJK characters are estimated at
+    1 token/char so Chinese-heavy prompts no longer systematically undercount,
+    which used to delay compaction and distort context budgets.
+    """
     if not text:
         return 0
-    return max(1, (len(text) + 3) // 4)
+    cjk = sum(1 for char in text if _CJK_RE.match(char))
+    ascii_chars = len(text) - cjk
+    return max(1, cjk + (ascii_chars + 3) // 4)
 
 
 def billable_turn_usage(

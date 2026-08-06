@@ -1,0 +1,14 @@
+# 一键启动：docker compose up -d --build
+# 数据与工作区分别持久化到 output/docker-data 与 output/docker-workspace。
+services:
+  caijitai:
+    build: .
+    image: agentharness:local
+    ports:
+      - "8741:8741"
+    volumes:
+      - ./output/docker-data:/data
+      - ./output/docker-workspace:/workspace
+    environment:
+      AGENTHARNESS_NO_DOTENV: "1"
+    restart: unless-stopped

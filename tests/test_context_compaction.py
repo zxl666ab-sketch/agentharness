@@ -15,11 +15,26 @@ from agentharness.contracts import (
     ToolCall,
 )
 from agentharness.engine.compaction import plan_compaction, render_transcript
-from agentharness.engine.context import ContextBudgetError, ContextPlanner
+from agentharness.engine.context import ContextBudgetError, ContextPlanner, estimate_tokens
 from agentharness.harness import Harness
 from tests.fake_provider import FakeModelAdapter
 
 BIG_TEXT = ("alpha beta gamma delta " * 700) + "END_MARKER_XYZ"
+
+
+def test_estimate_tokens_is_cjk_aware() -> None:
+    # ASCII stays at ~4 chars/token (previous default).
+    assert estimate_tokens("abcd") == 1
+    assert estimate_tokens("abcdefgh") == 2
+    assert estimate_tokens("") == 0
+    # CJK characters cost ~1 token each, so Chinese-heavy text no longer
+    # undercounts by ~4x (previously 8 CJK chars estimated as 2 tokens).
+    assert estimate_tokens("中文中文") == 4
+    assert estimate_tokens("采购10000个PE白色快递袋") == 10  # 8 CJK + ceil(7 ascii/4)
+    # Mixed text: CJK tokens + ceil(ascii/4).
+    assert estimate_tokens("中文 abcdef") == 4
+    # CJK punctuation and fullwidth forms count too.
+    assert estimate_tokens("，。！？") == 4
 
 
 def _long_history() -> list[Message]:

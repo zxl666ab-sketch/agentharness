@@ -56,6 +56,16 @@ uv run agentharness --workspace .
 uv run agentharness --workspace . --no-open
 ```
 
+### Docker / 一键启动
+
+仓库自带 `Dockerfile` 与 `docker-compose.yml`（镜像内使用 `uv sync --frozen --no-dev --no-editable` 安装；`src/agentharness/web_dist` 随 wheel 打包）。启动容器：
+
+```powershell
+docker compose up -d --build
+```
+
+数据目录与工作区分别持久化到 `output/docker-data`、`output/docker-workspace`，访问 [http://127.0.0.1:8741](http://127.0.0.1:8741)。容器内非回环绑定已显式 `--allow-remote-execution`，生产环境应在前置认证代理后暴露。
+
 采购的确定性解析、成本计算、资格检查与审批不要求模型密钥。配置 `OPENAI_API_KEY` 后，保留的 Agent Runtime 可用于非结构化字段抽取、规格候选匹配、缺失信息澄清和推荐说明；金额、资格、排序输入和最终决策数据不得由模型生成。
 
 ### 采购模型配置
@@ -72,8 +82,8 @@ AGENTHARNESS_PROCUREMENT_INPUT_PER_MILLION_USD=<输入价格>
 AGENTHARNESS_PROCUREMENT_OUTPUT_PER_MILLION_USD=<输出价格>
 AGENTHARNESS_PROCUREMENT_CACHED_INPUT_PER_MILLION_USD=<缓存输入价格，可省略并按输入价格计算>
 AGENTHARNESS_PROCUREMENT_MAX_COST_USD=<单 Run 费用上限>
-AGENTHARNESS_PROCUREMENT_MAX_TOKENS=100000
-AGENTHARNESS_PROCUREMENT_MAX_STEPS=12
+AGENTHARNESS_PROCUREMENT_MAX_TOKENS=50000
+AGENTHARNESS_PROCUREMENT_MAX_STEPS=20
 AGENTHARNESS_PROCUREMENT_MAX_WALL_TIME_S=180
 ```
 
@@ -152,7 +162,7 @@ uv run python scripts/evaluate_procurement.py run --manual-trial output/procurem
 - 物料/规格匹配准确率；
 - 成本计算准确率；
 - 硬约束漏检率；
-- 推荐准确率与推荐稳定率；
+- 推荐准确率；
 - 总耗时和单报价平均耗时；
 - 模型调用、tokens 与估算费用。
 

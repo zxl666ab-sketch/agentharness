@@ -204,6 +204,18 @@ def _classify_error(exc: BaseException) -> tuple[str, str]:
         kind = "rate_limit"
     elif "timeout" in low or "timeout" in type(exc).__name__.lower():
         kind = "timeout"
+    elif status in {400, 413, 422} or any(
+        marker in low
+        for marker in (
+            "context length",
+            "context_length",
+            "maximum context",
+            "too many tokens",
+            "token limit",
+            "prompt is too long",
+        )
+    ):
+        kind = "context_length"
     elif isinstance(status, int) and 500 <= status <= 599:
         kind = "server_error"
     elif "connection" in low or "connect" in type(exc).__name__.lower():

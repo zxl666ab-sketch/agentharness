@@ -10,6 +10,8 @@
 | `approved-report.png` | 已批准供应商、金额、原件哈希和报告指纹 |
 | `runtime-audit.png` | Run、Checkpoint、Verification、Approval、工具与 Token 证据 |
 | `approved-report-sample.md` | 浏览器从同一合成任务下载的中文审批报告 |
+| `live-real-run-report.md` | 真实模型（deepseek-v4-flash）单次全链路运行记录：6 回合、18,690 tokens（7,936 缓存）、137 事件、终态 `passed/verified`；**非公开可复现评测，不构成准确率/成本证据** |
+| `live-real-approval-report.png` / `live-real-conversation.png` | 上述单次运行的审批报告与对话截图 |
 
 ## 复算
 
