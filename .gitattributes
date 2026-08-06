@@ -2,5 +2,7 @@
 # line-ending conversion would break clean checkouts on Windows.
 src/agentharness/procurement/eval_truth.json -text
 
-# Determinism-checked web bundle must stay byte-identical across checkouts.
-src/agentharness/web_dist/** -text
+# Web sources and the determinism-checked bundle must normalize to LF so
+# Linux and Windows builds produce byte-identical output.
+web/** text eol=lf
+src/agentharness/web_dist/** text eol=lf
