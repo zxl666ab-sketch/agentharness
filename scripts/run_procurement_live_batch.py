@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from agentharness.api.execution import PendingApprovalBroker
+from agentharness.config import load_project_env
 from agentharness.contracts import EventType
 from agentharness.harness import Harness
 from agentharness.procurement.agent import ProcurementAgent
@@ -316,6 +317,7 @@ async def _main(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    load_project_env()
     parser = argparse.ArgumentParser(description="采购 Agent 真实模型验收跑批")
     parser.add_argument("--scenarios-dir", type=Path, default=SCENARIOS_ROOT)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
