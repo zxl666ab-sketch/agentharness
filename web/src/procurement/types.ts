@@ -326,6 +326,30 @@ export type EvaluationMetrics = {
   model_usage: { calls: number; tokens: number; estimated_cost_usd: number; note: string };
 };
 
+
+export type ProcurementPurchaseOrder = {
+  id: string;
+  po_number: string;
+  request_id: string;
+  reference?: string | null;
+  title?: string | null;
+  item_name?: string | null;
+  quantity?: number | null;
+  unit?: string | null;
+  supplier_name?: string | null;
+  quote_id?: string | null;
+  currency?: string | null;
+  unit_price_base?: string | null;
+  total_amount_base?: string | null;
+  snapshot_id?: string | null;
+  snapshot_version?: number | null;
+  input_sha256?: string | null;
+  approval_id?: string | null;
+  decision_id?: string | null;
+  created_at: string;
+  evidence_sha256: string;
+};
+
 export type EvaluationResult = {
   schema_version: number;
   dataset: string;

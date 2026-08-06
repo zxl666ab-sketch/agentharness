@@ -37,6 +37,56 @@ flowchart LR
 
 每次比价都会关联一个 Harness Run、终态 Checkpoint、待确认 Approval、原始报价与比价快照 Artifacts，以及可复现的运行证据报告。刷新或重启进程后，这些关系从 SQLite 恢复。
 
+## 架构边界与健康度
+
+```mermaid
+flowchart TB
+    Buyer["采购员"] -->|"需求/复核/审批"| Web["采购工作台 (web_dist)"]
+    Web --> API["FastAPI /api/procurement"]
+    API --> Agent["Agent Runtime（4 个白名单工具）"]
+    Agent -->|"capture → analysis → approve 显式阶段状态机"| Gate["越权拒绝 / 同状态去重 / 预算安全边界"]
+    Agent -->|"工具调用理由 + 收敛指标"| Report["运行报告 + 审计报告"]
+    Agent -->|"审批前独立评审（可选，不阻塞）"| Review["第二个 Provider/模型"]
+    Agent --> Pipeline["确定性报价流水线（解析→匹配→历史→Decimal 比价→复算）"]
+    Pipeline --> Domain["采购领域状态 + SQLite/WAL"]
+    Domain --> PO["采购订单（PO）导出 CSV"]
+    Domain --> Evidence["Artifact + Checkpoint + Approval + SHA-256 审计"]
+    classDef agent fill:#eef4ff,stroke:#88a;
+    class Agent,Gate,Report agent;
+```
+
+### 健康度表（2026-08-06 复算）
+
+| 项 | 状态 |
+|---|---|
+| Python 测试 | 241 passed / 1 skipped |
+| 覆盖率 | 80.93%（门槛 80%） |
+| Python 质量 | `ruff check .` 通过 |
+| Web 测试 / lint / build | 14 passed / 通过 / 通过（web_dist 已重建） |
+| 确定性冻结评测 | 617/620 字段抽取、31/31 成本计算、0 硬约束漏检（0 模型调用） |
+| 真实模型基线 | 由 `scripts/run_procurement_live_batch.py` 受预算约束跑批生成（诚实分层呈现，不与确定性结果混用） |
+| Agent 行为回归 | 跳阶段 / 重复调用 / 编造参数 / 提前声称成功 4 类坏行为全部被拦截（`tests/test_agent_behavior_regression.py`） |
+
+### 3 个可靠性案例（现象 → 根因 → 修复 → 回归）
+
+1. **模型反复 `read_request` 轮询（×4）**
+   - 现象：固定场景回合数 6–10，`read_request` 被连续调用 4 次，成本翻倍。
+   - 根因：提示词只要求“按状态选工具”，没有状态感知的去重；读取工具每回合都允许。
+   - 修复：按「状态纪元」（state-changing 工具成功次数）去重，同一纪元内同一工具已成功即返回“结果未变化”并计入 `duplicate_tool_call`。
+   - 回归：`tests/test_agent_convergence.py::test_duplicate_read_within_same_state_epoch_is_blocked`、`tests/test_agent_behavior_regression.py::test_duplicate_call_is_blocked`。
+
+2. **审批摘要截断仍被 JSON 解析**
+   - 现象：审批工具的参数摘要超过 500 字符被截断，摘要 JSON 解析后与采购员选择不一致，误拒/误批。
+   - 根因：审批匹配读的是可能被截断的 `arguments_summary`，而不是完整参数。
+   - 修复：审批只与**完整存储参数**（request/snapshot/input-hash/quote）比对，忽略模型自填的 actor/note。
+   - 回归：`tests/test_procurement.py::test_procurement_approval_with_long_note_does_not_rely_on_truncated_summary`。
+
+3. **网关偶发截断直接红屏**
+   - 现象：`finish_reason=length` 且 0 输出时 run 直接 failed，用户看到英文网关错误。
+   - 根因：runtime 只对 rate_limit/timeout/connection/server_error 重试，length 截断没有自动恢复路径。
+   - 修复：0 输出 length 自动重试一次并放宽输出预算，仍失败给出中文可操作提示；预算耗尽改为「已停在安全边界」（`budget_stopped`，可一键恢复）。
+   - 回归：`tests/test_agent_reliability.py::test_length_zero_output_retries_once_with_widened_budget`、`test_persistent_length_failure_gives_chinese_actionable_message`、`test_token_budget_exhaustion_stops_at_safe_boundary`。
+
 ## 快速开始
 
 要求 Python 3.11+、[uv](https://github.com/astral-sh/uv) 和 Node.js 20+。

@@ -1,8 +1,10 @@
-"""Application service for the complete procurement sourcing workflow."""
+﻿"""Application service for the complete procurement sourcing workflow."""
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import re
 from datetime import UTC, date, datetime
@@ -1263,6 +1265,138 @@ class ProcurementService:
         return self._enrich_quote(stored)
 
 
+
+    def create_demo_request(self, *, actor: str = "演示员") -> dict[str, Any]:
+        """Create and stage a frozen demo conversation (one-click demo task)."""
+        from agentharness.procurement.evaluation import build_case_document, load_frozen_truth
+
+        truth = load_frozen_truth()
+        cases = truth["quotes"][:2]
+        attachments = [
+            (case["filename"], build_case_document(case)) for case in cases
+        ]
+        request = self.create_conversation(
+            (
+                "采购10000个PE白色快递袋，规格250x350mm、厚60微米、单色印刷，"
+                "15天内交付上海松江，必须开票；USD/CNY按7.2，尺寸公差2mm、"
+                "厚度公差3微米。请比较附件报价并推荐供应商。"
+            ),
+            attachments,
+            actor=actor,
+        )
+        self._audit(
+            request["id"],
+            "demo_request",
+            actor=actor,
+            payload={"kind": "frozen-express-bag", "quote_count": len(cases)},
+        )
+        return self.get_request(request["id"])
+
+    def clean_demo_requests(self) -> int:
+        """Remove demo requests (created through the one-click demo task)."""
+        removed = 0
+        for summary in self.list_requests():
+            request_id = str(summary["id"])
+            events = self.repo.list_audit_events(request_id)
+            if not any(event["type"] == "demo_request" for event in events):
+                continue
+            self.repo.delete_request_tree(request_id)
+            removed += 1
+        return removed
+
+    def purchase_order(self, request_id: str) -> dict[str, Any]:
+
+        """Build (and persist once) the purchase order after approval."""
+        existing = self.repo.get_purchase_order(request_id)
+        if existing is not None:
+            return existing
+        request = self.get_request(request_id)
+        decision = request.get("decision")
+        if decision is None or decision.get("quote_id") is None:
+            raise ProcurementError("采购任务尚未形成正式审批结论，无法生成订单")
+        comparison = request.get("comparison")
+        if comparison is None:
+            raise ProcurementError("缺少比价快照，无法生成订单")
+        result = comparison.get("result") or {}
+        quote = next(
+            (
+                item
+                for item in result.get("quotes") or []
+                if item.get("quote_id") == decision.get("quote_id")
+            ),
+            None,
+        )
+        if quote is None:
+            raise ProcurementError("审批所选报价不在当前快照中")
+        cost = quote.get("cost") or {}
+        reference = request.get("reference") or request_id[:8]
+        order = {
+            "id": new_id(),
+            "po_number": f"PO-{reference}",
+            "request_id": request_id,
+            "reference": request.get("reference"),
+            "title": request.get("title"),
+            "item_name": request.get("item_name"),
+            "quantity": request.get("quantity"),
+            "unit": request.get("unit"),
+            "supplier_name": quote.get("supplier_name"),
+            "quote_id": quote.get("quote_id"),
+            "currency": result.get("base_currency") or comparison.get("base_currency"),
+            "unit_price_base": cost.get("landed_unit_base"),
+            "total_amount_base": cost.get("landed_total_base"),
+            "snapshot_id": comparison.get("id"),
+            "snapshot_version": comparison.get("version"),
+            "input_sha256": comparison.get("input_sha256"),
+            "approval_id": decision.get("approval_id"),
+            "decision_id": decision.get("id"),
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        canonical = json.dumps(
+            order, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        order["evidence_sha256"] = hashlib.sha256(canonical).hexdigest()
+        self.repo.save_purchase_order(order)
+        self._audit(
+            request_id,
+            "purchase_order_created",
+            actor="系统",
+            payload={
+                "po_number": order["po_number"],
+                "evidence_sha256": order["evidence_sha256"],
+                "snapshot_id": comparison.get("id"),
+            },
+        )
+        return order
+
+    def purchase_order_csv(self, request_id: str) -> tuple[str, str]:
+        """Return (filename, UTF-8 BOM CSV content) for the purchase order."""
+        order = self.purchase_order(request_id)
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow([
+            "采购订单号", "需求单号", "标题", "物料", "数量", "单位",
+            "供应商", "单价（本位币）", "总金额（本位币）", "币种",
+            "快照ID", "快照版本", "审批ID", "创建时间", "证据SHA-256",
+        ])
+        writer.writerow([
+            order["po_number"],
+            order.get("reference") or "",
+            order.get("title") or "",
+            order.get("item_name") or "",
+            order.get("quantity") if order.get("quantity") is not None else "",
+            order.get("unit") or "",
+            order.get("supplier_name") or "",
+            order.get("unit_price_base") if order.get("unit_price_base") is not None else "",
+            order.get("total_amount_base") if order.get("total_amount_base") is not None else "",
+            order.get("currency") or "",
+            order.get("snapshot_id") or "",
+            order.get("snapshot_version") if order.get("snapshot_version") is not None else "",
+            order.get("approval_id") or "",
+            order.get("created_at") or "",
+            order.get("evidence_sha256") or "",
+        ])
+        filename = f'{order["po_number"]}.csv'
+        return filename, "\\ufeff" + buffer.getvalue()
 
     def audit_report(self, request_id: str) -> dict[str, Any]:
         request = self.get_request(request_id)

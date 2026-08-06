@@ -158,6 +158,12 @@ describe("procurement workflow views", () => {
   it("explains a blocked model request and preserves the recovery path", () => {
     expect(friendlyProcurementError("Your request was blocked.")).toContain("模型网关拒绝");
     expect(friendlyProcurementError("Your request was blocked.")).toContain("从持久化状态重新分析");
+  expect(
+    friendlyProcurementError("UNIQUE constraint failed: tool_invocations.id")
+  ).toContain("刷新");
+  expect(
+    friendlyProcurementError("UNIQUE constraint failed: tool_invocations.id")
+  ).toContain("无需重复操作");
   });
 
   it("keeps the reply composer available whenever the agent requires human input", () => {

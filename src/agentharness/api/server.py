@@ -160,6 +160,8 @@ def create_app(
         path = request.url.path
         if path == "/api/procurement/conversations":
             return True
+        if path == "/api/procurement/demo" or path == "/api/procurement/demo/clean":
+            return True
         if path == "/api/procurement/config":
             return True
         if path == "/api/procurement/requests" or path.startswith("/api/procurement/requests/"):

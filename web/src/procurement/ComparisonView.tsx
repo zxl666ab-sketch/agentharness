@@ -11,6 +11,7 @@ import {
   ShieldCheck,
   X,
   XCircle,
+  FileDown,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -201,7 +202,16 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove, onN
       <footer className="proc-comparison-actions">
         {error ? <p className="proc-inline-error" role="alert">{error}</p> : <span />}
         {request.status === "approved" ? (
-          <span className="proc-approved-banner"><CheckCircle2 size={16} />供应商已人工批准</span>
+          <span className="proc-approved-banner">
+            <CheckCircle2 size={16} />供应商已人工批准
+            <a
+              className="proc-button secondary"
+              href={`/api/procurement/requests/${request.id}/purchase-order.csv`}
+              download
+            >
+              <FileDown size={15} />下载采购订单 CSV
+            </a>
+          </span>
         ) : request.status === "no_award" ? (
           <span className="proc-approved-banner"><XCircle size={16} />已确认本轮无合格报价</span>
         ) : noEligibleQuotes ? (
