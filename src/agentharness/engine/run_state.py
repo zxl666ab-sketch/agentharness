@@ -1,4 +1,4 @@
-"""Shared per-run in-memory state for the engine and its collaborators."""
+﻿"""Shared per-run in-memory state for the engine and its collaborators."""
 
 from __future__ import annotations
 
@@ -36,6 +36,9 @@ class RunContext:
     provider_owner_task: asyncio.Task[Any] | None = None
     lease_heartbeat_task: asyncio.Task[Any] | None = None
     tool_call_count: int = 0
+    # Governance counters surfaced in the run report's convergence metrics.
+    stage_denied_count: int = 0
+    duplicate_call_count: int = 0
     indeterminate_reason: str | None = None
     # Wall-clock budget: wall_started anchors active time; wall_paused_s
     # accumulates time parked at a human approval gate (waiting_approval)
@@ -56,3 +59,4 @@ def ensure_ctx(runs: dict[str, RunContext], run_id: str) -> RunContext:
         ctx = RunContext()
         runs[run_id] = ctx
     return ctx
+

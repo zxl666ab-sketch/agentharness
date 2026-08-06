@@ -1,4 +1,4 @@
-"""Procurement-specific Agent orchestration built on the public Harness facade."""
+﻿"""Procurement-specific Agent orchestration built on the public Harness facade."""
 
 from __future__ import annotations
 
@@ -572,6 +572,12 @@ class ProcurementFakeProvider:
                 async for item in self._tool_call(
                     "procurement_approve_supplier",
                     {"request_id": request_id, **selection},
+                ):
+                    yield item
+                return
+            if "[verification_feedback]" in latest_user:
+                async for item in self._text(
+                    "【采购决策已验证】供应商审批工具已成功执行，采购决策已验证。",
                 ):
                     yield item
                 return
@@ -1303,6 +1309,50 @@ class ProcurementAgent:
                 "source": source,
                 "procurement_request_id": request_id,
                 "procurement_provider_mode": self.run_profile.mode,
+                # Explicit stage machine: capture -> analysis -> approve.
+                # Tools outside the current stage are rejected with a structured
+                # hint and recorded as governance events (phase-1 convergence).
+                "tool_stage_matrix": [
+                    {
+                        "name": "capture",
+                        "tools": [
+                            "procurement_read_request",
+                            "procurement_capture_requirement",
+                        ],
+                        "advance_on": ["procurement_capture_requirement"],
+                    },
+                    {
+                        "name": "analysis",
+                        "tools": [
+                            "procurement_read_request",
+                            "procurement_execute_analysis",
+                        ],
+                        "advance_on": ["procurement_execute_analysis"],
+                        "advance_on_result": [
+                            {
+                                "tool": "procurement_capture_requirement",
+                                "stage": "analysis_completed",
+                            },
+                        ],
+                    },
+                    {
+                        "name": "approve",
+                        "tools": [
+                            "procurement_read_request",
+                            # Re-running the deterministic pipeline is idempotent
+                            # and required after quote corrections invalidate a
+                            # snapshot, so analysis stays legal at this stage.
+                            "procurement_execute_analysis",
+                            "procurement_approve_supplier",
+                        ],
+                        "advance_on": ["procurement_approve_supplier"],
+                    },
+                ],
+                # Conversation flows start at capture; structured-API requests are
+                # already captured, so they start at the analysis stage.
+                "tool_stage_initial": (
+                    0 if source == "procurement_conversation" else 1
+                ),
                 **(
                     {
                         "tool_prerequisites": {
