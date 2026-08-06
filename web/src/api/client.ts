@@ -164,6 +164,19 @@ export type RunReport = {
     summary?: string | null;
     created_at: string;
   }>;
+  convergence?: {
+    model_turns: number;
+    tool_call_counts: Record<string, number>;
+    total_tool_calls: number;
+    duplicate_calls: number;
+    unauthorized_calls: number;
+    tool_reasons: Array<{
+      tool_name: string;
+      step?: number;
+      status?: string;
+      reason?: string | null;
+    }>;
+  };
   usage: Record<string, unknown>;
   events: EventRow[];
   events_total: number;
