@@ -88,6 +88,7 @@
 - 加分点：面试被问“真实模型行不行”时的答案；从 demo → engineered 的唯一硬证据。
 - 工作量：1–2 天
 - 验收：脚本可复现；报告含场景级指标 + 诚实分层说明（确定性 617/620 vs 真实模型基线）。
+- 补充（真实模型冒烟）：凡涉及 Agent 行为的条目完成时，都附带一次**受预算约束的真实模型冒烟**（deepseek-v4-flash，用 `.env` key，完整任务 capture→修正→analysis→审批→passed，上限 max_cost/max_tokens），记录 run_id/状态/回合/工具调用/Token 成本到 `docs/evidence/real-model-smoke-<日期>.md`；失败要区分模型问题 vs 编排问题，能修则修，偶发 length 重试一次并如实记录，不得用 fake 结果掩盖。
 
 ### 4.2 [ ] Agent 行为回归测试集
 - 目标/做法：用 fake provider 注入坏行为（跳阶段、重复调用、编造参数、提前声称成功）→ 断言系统拦截/纠正。
