@@ -1493,10 +1493,16 @@ class ProcurementService:
     ) -> None:
         if invalidate_snapshot:
             self._record_snapshot_invalidation(request, reason="quote_changed")
-        quotes = [
-            *self.repo.list_quotes(request["id"]),
-            *(pending_quotes or []),
-        ]
+        quotes_by_id: dict[str, dict[str, Any]] = {
+            str(item["id"]): item for item in self.repo.list_quotes(request["id"])
+        }
+        for item in pending_quotes or []:
+            # A pending quote can be an updated copy of an already-committed
+            # quote (human correction). The pending copy must win so the stale
+            # version's review fields are not counted twice and the request
+            # status can advance from "review" back to "ready".
+            quotes_by_id[str(item["id"])] = item
+        quotes = list(quotes_by_id.values())
         unresolved = sum(len(fields_requiring_review(item["extracted"])) for item in quotes)
         if unresolved:
             status = "review"

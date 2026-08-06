@@ -1760,6 +1760,90 @@ def test_quote_correction_and_snapshot_invalidation_are_atomic(
     assert not any(event["type"] == "field_corrected" for event in report["audit_events"])
 
 
+def test_correcting_last_review_field_moves_status_to_ready(data_dir: Path) -> None:
+    """Regression: correcting the final review field must advance status to
+    ready, not stay stuck at review (stale committed copy was double-counted)."""
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    request = service.create_request(_request_body(load_frozen_truth()))
+    request_id = str(request["id"])
+
+    def extracted(supplier: str, *, needs_review: bool) -> dict[str, object]:
+        values = {
+            "supplier_name": supplier,
+            "item_description": "PE \u5feb\u9012\u888b",
+            "material": "PE",
+            "color": "\u767d\u8272",
+            "print_colors": 1,
+            "currency": "CNY",
+            "unit_price": "0.5",
+            "price_basis": 1,
+            "tax_rate": "0.13",
+            "tax_included": False,
+            "shipping_fee": "0",
+            "shipping_included": True,
+            "moq": 1000,
+            "lead_time_days": 10,
+            "supports_invoice": True,
+            "width_mm": "250",
+            "length_mm": "350",
+            "thickness_um": "60",
+            "payment_terms": "Net 30",
+            "valid_until": "2026-12-31",
+        }
+        fields = {
+            name: {
+                "value": value,
+                "confidence": 0.5 if (needs_review and name == "supplier_name") else 1.0,
+                "status": (
+                    "needs_review" if (needs_review and name == "supplier_name") else "accepted"
+                ),
+                "source": {
+                    "document_kind": "xlsx",
+                    "locator": "test",
+                    "excerpt": "",
+                    "method": "test",
+                },
+            }
+            for name, value in values.items()
+        }
+        return {
+            "schema_version": 1,
+            "parser_version": "test",
+            "document_kind": "xlsx",
+            "fields": fields,
+            "processing_ms": 0,
+        }
+
+    first = service.import_quote(
+        request_id,
+        filename="\u4f9b\u5e94\u5546\u7532\u62a5\u4ef7.xlsx",
+        data=b"quote-a",
+        extracted=extracted("\u4f9b\u5e94\u5546\u7532", needs_review=True),
+    )
+    service.import_quote(
+        request_id,
+        filename="\u4f9b\u5e94\u5546\u4e59\u62a5\u4ef7.xlsx",
+        data=b"quote-b",
+        extracted=extracted("\u4f9b\u5e94\u5546\u4e59", needs_review=False),
+    )
+    assert service.get_request(request_id)["status"] == "review"
+    assert service.get_request(request_id)["unresolved_field_count"] == 1
+
+    service.correct_field(
+        request_id,
+        first["id"],
+        field="supplier_name",
+        value="\u4f9b\u5e94\u5546\u7532",
+        actor="\u91c7\u8d2d\u5458",
+    )
+
+    detail = service.get_request(request_id)
+    assert detail["status"] == "ready"
+    assert detail["unresolved_field_count"] == 0
+    harness.close()
+
+
 def test_comparison_snapshot_and_audit_are_atomic(
     data_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
