@@ -1116,6 +1116,85 @@ def test_quote_parser_structures_material_color_and_printing(
     assert not set(expected) & set(fields_requiring_review(extracted))
 
 
+def _rich_quote_rows() -> list[tuple[str, str]]:
+    return [
+        ("\u4f9b\u5e94\u5546\u540d\u79f0", "\u4f9b\u5e94\u5546\u7532"),
+        ("\u54c1\u540d", "PE \u5feb\u9012\u888b"),
+        ("\u6750\u8d28", "PE"),
+        ("\u989c\u8272", "\u767d\u8272"),
+        ("\u5370\u5237\u8272\u6570", "1"),
+        ("\u5e01\u79cd", "CNY"),
+        ("\u5355\u4ef7", "0.5"),
+        ("\u8ba1\u4ef7\u6570\u91cf", "1"),
+        ("\u7a0e\u7387", "13%"),
+        ("\u662f\u5426\u542b\u7a0e", "\u5426"),
+        ("\u8fd0\u8d39", "0"),
+        ("\u662f\u5426\u542b\u8fd0\u8d39", "\u662f"),
+        ("\u8d77\u8ba2\u91cf", "1000"),
+        ("\u4ea4\u671f\uff08\u5929\uff09", "10"),
+        ("\u662f\u5426\u53ef\u5f00\u7968", "\u662f"),
+        ("\u5bbd\u5ea6", "250"),
+        ("\u957f\u5ea6", "350"),
+        ("\u539a\u5ea6\uff08\u5fae\u7c73\uff09", "60"),
+        ("\u4ed8\u6b3e\u6761\u4ef6", "Net 30"),
+        ("\u62a5\u4ef7\u6709\u6548\u671f", "2026-12-31"),
+        ("\u62a5\u4ef7\u5355\u53f7", "QT-001"),
+        ("\u8054\u7cfb\u4eba", "\u738b\u7ecf\u7406"),
+        ("\u5907\u6ce8", "\u542b\u4e13\u7968"),
+    ]
+
+
+def test_parser_captures_unknown_xlsx_fields_as_informational() -> None:
+    """Unknown label/value rows in XLSX are kept as read-only evidence fields."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Quote"
+    for label, value in _rich_quote_rows():
+        ws.append([label, value])
+    buffer = io.BytesIO()
+    wb.save(buffer)
+
+    extracted = parse_quote("rich.xlsx", buffer.getvalue())
+    fields = extracted["fields"]
+    assert fields["supplier_name"]["value"] == "\u4f9b\u5e94\u5546\u7532"
+    assert fields["item_description"]["value"] == "PE \u5feb\u9012\u888b"
+    assert fields["width_mm"]["value"] == "250"
+    assert fields_requiring_review(extracted) == []
+
+    info = extracted["informational_fields"]
+    assert info["\u62a5\u4ef7\u5355\u53f7"]["value"] == "QT-001"
+    assert info["\u62a5\u4ef7\u5355\u53f7"]["informational"] is True
+    assert info["\u62a5\u4ef7\u5355\u53f7"]["label"] == "\u62a5\u4ef7\u5355\u53f7"
+    assert info["\u62a5\u4ef7\u5355\u53f7"]["source"]["locator"] == "Quote!B21"
+    assert info["\u8054\u7cfb\u4eba"]["value"] == "\u738b\u7ecf\u7406"
+    assert info["\u5907\u6ce8"]["value"] == "\u542b\u4e13\u7968"
+
+
+def test_parser_captures_unknown_pdf_fields_as_informational() -> None:
+    """Unknown labelled lines in PDFs are kept as read-only evidence fields."""
+    from reportlab.pdfgen import canvas
+
+    from agentharness.procurement.evaluation import _pdf_font
+
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer)
+    font = _pdf_font("zh-CN")
+    pdf.setFont(font, 12)
+    y = 800
+    for label, value in _rich_quote_rows():
+        pdf.drawString(50, y, f"{label}: {value}")
+        y -= 20
+    pdf.save()
+
+    extracted = parse_quote("rich.pdf", buffer.getvalue())
+    assert extracted["fields"]["supplier_name"]["value"] == "\u4f9b\u5e94\u5546\u7532"
+    assert extracted["fields"]["width_mm"]["value"] == "250"
+    assert fields_requiring_review(extracted) == []
+    info = extracted["informational_fields"]
+    assert info["\u62a5\u4ef7\u5355\u53f7"]["value"] == "QT-001"
+    assert info["\u8054\u7cfb\u4eba"]["value"] == "\u738b\u7ecf\u7406"
+
+
 def test_quote_parser_requires_review_when_identity_facts_are_missing() -> None:
     document = _xlsx_bytes(
         [
