@@ -192,7 +192,7 @@
 .proc-upload-button:hover { background: var(--accent-hover); }
 .proc-upload-button.disabled { cursor: not-allowed; opacity: .5; }
 .proc-upload-button input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-.proc-quote-items { min-height: 0; flex: 1; overflow: auto; }
+.proc-quote-items { min-height: 0; flex: 0 1 auto; }
 .proc-quote-item { display: flex; width: 100%; min-width: 0; align-items: center; gap: 10px; padding: 11px 14px; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: var(--text); text-align: left; }
 .proc-quote-item:hover { background: var(--surface-subtle); }
 .proc-quote-item.selected { background: var(--accent-softer); box-shadow: inset 3px 0 var(--accent); }
@@ -228,8 +228,8 @@
 .proc-source-strip { min-height: 34px; gap: 8px; padding: 0 16px; border-bottom: 1px solid var(--border); background: var(--surface-subtle); color: var(--text-muted); font-size: 10px; }
 .proc-source-strip code { overflow: hidden; max-width: 220px; color: var(--text-secondary); text-overflow: ellipsis; white-space: nowrap; }
 .proc-source-strip > span:last-child { margin-left: auto; }
-.proc-field-table { min-width: 720px; }
-.proc-field-table-head, .proc-field-row { display: grid; grid-template-columns: 150px minmax(220px, .9fr) minmax(250px, 1.1fr); }
+.proc-field-table { min-width: 0; }
+.proc-field-table-head, .proc-field-row { display: grid; grid-template-columns: 120px minmax(150px, .9fr) minmax(180px, 1.1fr); }
 .proc-field-table-head { position: sticky; z-index: 2; top: 0; min-height: 34px; align-items: center; border-bottom: 1px solid var(--border); background: var(--surface); color: var(--text-muted); font-size: 10px; font-weight: 700; }
 .proc-field-table-head span, .proc-field-row > div { min-width: 0; padding: 7px 12px; border-right: 1px solid var(--border); }
 .proc-field-table-head span:last-child, .proc-field-row > div:last-child { border-right: 0; }
@@ -665,3 +665,7 @@
 .proc-info-count { display: inline-flex; min-width: 20px; justify-content: center; padding: 1px 6px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); font-size: 9px; font-weight: 750; }
 .proc-info-table { max-height: 340px; overflow: auto; border-top: 1px solid var(--border); }
 .proc-info-value { font-size: var(--text-xs); word-break: break-all; }
+
+/* Read-only field value + edit affordance */
+.proc-readonly-value { flex: 1; min-width: 0; font-size: var(--text-xs); color: var(--text); word-break: break-all; }
+.proc-field-editor .proc-icon-button { flex: 0 0 auto; }

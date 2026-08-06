@@ -7,9 +7,11 @@ import {
   FileText,
   Filter,
   LoaderCircle,
+  Pencil,
   Play,
   ShieldCheck,
   Upload,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -97,47 +99,84 @@ function FieldEditor({
   onSave: (value: string | number | boolean | null) => Promise<void>;
 }) {
   const rendered = displayValue(field.value, meta);
+  const needsReview = field.status === "needs_review";
+  const [editing, setEditing] = useState(needsReview);
   const [value, setValue] = useState(rendered);
   useEffect(() => setValue(rendered), [rendered]);
+  useEffect(() => {
+    if (!needsReview) setEditing(false);
+  }, [needsReview]);
   const changed = value !== rendered;
   const hasValue = meta.kind === "boolean" || value.trim().length > 0;
-  const canConfirmCurrentValue = field.status === "needs_review" && hasValue;
+  const canConfirmCurrentValue = needsReview && hasValue;
+  const canSave = (changed || canConfirmCurrentValue) && !saving;
   const confidence = Math.round(field.confidence * 100);
 
   return (
-    <div data-field={name} className={`proc-field-row ${field.status === "needs_review" ? "needs-review" : ""}`}>
+    <div data-field={name} className={`proc-field-row ${needsReview ? "needs-review" : ""}`}>
       <div className="proc-field-label">
         <strong>{meta.label}</strong>
         {meta.required ? <span title="必填">必填</span> : null}
       </div>
       <div className="proc-field-editor">
-        {meta.kind === "boolean" ? (
-          <select value={value} onChange={(event) => setValue(event.target.value)} aria-label={meta.label}>
-            <option value="true">是</option>
-            <option value="false">否</option>
-          </select>
+        {editing ? (
+          <>
+            {meta.kind === "boolean" ? (
+              <select value={value} onChange={(event) => setValue(event.target.value)} aria-label={meta.label}>
+                <option value="true">是</option>
+                <option value="false">否</option>
+              </select>
+            ) : (
+              <div className="proc-edit-input">
+                <input
+                  aria-label={meta.label}
+                  type={meta.kind === "date" ? "date" : ["decimal", "integer", "rate"].includes(meta.kind) ? "number" : "text"}
+                  step={meta.kind === "integer" ? "1" : "any"}
+                  value={value}
+                  onChange={(event) => setValue(event.target.value)}
+                />
+                {meta.kind === "rate" ? <span>%</span> : null}
+              </div>
+            )}
+            <button
+              type="button"
+              className="proc-icon-button compact"
+              title={canConfirmCurrentValue && !changed ? "确认当前值并完成复核" : "保存人工修正"}
+              aria-label={`保存${meta.label}修正`}
+              disabled={!canSave}
+              onClick={() => void onSave(correctionValue(value, meta))}
+            >
+              {saving ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}
+            </button>
+            {!needsReview ? (
+              <button
+                type="button"
+                className="proc-icon-button compact"
+                title="取消修正"
+                aria-label={`取消${meta.label}修正`}
+                onClick={() => {
+                  setValue(rendered);
+                  setEditing(false);
+                }}
+              >
+                <X size={15} />
+              </button>
+            ) : null}
+          </>
         ) : (
-          <div className="proc-edit-input">
-            <input
-              aria-label={meta.label}
-              type={meta.kind === "date" ? "date" : ["decimal", "integer", "rate"].includes(meta.kind) ? "number" : "text"}
-              step={meta.kind === "integer" ? "1" : "any"}
-              value={value}
-              onChange={(event) => setValue(event.target.value)}
-            />
-            {meta.kind === "rate" ? <span>%</span> : null}
-          </div>
+          <>
+            <span className="proc-readonly-value">{rendered || "—"}</span>
+            <button
+              type="button"
+              className="proc-icon-button compact"
+              title="人工修正此字段"
+              aria-label={`修正${meta.label}`}
+              onClick={() => setEditing(true)}
+            >
+              <Pencil size={14} />
+            </button>
+          </>
         )}
-        <button
-          type="button"
-          className="proc-icon-button compact"
-          title={canConfirmCurrentValue && !changed ? "确认当前值并完成复核" : "保存人工修正"}
-          aria-label={`保存${meta.label}修正`}
-          disabled={(!changed && !canConfirmCurrentValue) || saving}
-          onClick={() => void onSave(correctionValue(value, meta))}
-        >
-          {saving ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}
-        </button>
       </div>
       <div className="proc-field-evidence">
         <span className={`proc-confidence ${confidence < 80 ? "low" : field.status === "corrected" ? "corrected" : "high"}`}>
