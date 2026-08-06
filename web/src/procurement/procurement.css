@@ -595,6 +595,13 @@
 .spin { animation: proc-spin .9s linear infinite; }
 @keyframes proc-spin { to { transform: rotate(360deg); } }
 
+@media (max-width: 1240px) {
+  /* Stack the quote list above the review table before the columns get too
+     narrow to fit the field evidence grid. */
+  .proc-workspace-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .proc-quote-list { border-right: 0; border-bottom: 1px solid var(--border); }
+}
+
 @media (max-width: 900px) {
   .proc-app, .proc-gate { min-width: 0; }
   .proc-app { height: 100dvh; }
