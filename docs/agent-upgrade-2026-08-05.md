@@ -19,6 +19,24 @@
 
 **剩余未闭环**：真实模型记录的 transcript/run-report 整理进 `docs/evidence/`（P1）、CJK token 估算与 context-length 降级（P1）、两块 FAQ（P2）、同步工具事件循环审查（P2）、P3 卫生项，以及 2026-08-05 遗留项，仍按文末与冲刺表继续保留。
 
+### 2026-08-06 第三轮 · 已闭环（本轮实测）
+
+> 本轮闭环第 2/3 周清单中的代码与文档项；除 Docker 镜像构建外均有本地实测证据。
+
+| 条目 | 处理 | 证据 |
+|---|---|---|
+| [P1] Token 估算 `len/4` 中文低估 | `engine/context.py::estimate_tokens` 改为 CJK 感知：CJK 字符按 1 token/字符、ASCII 按 4 字符/token | 新增 `test_estimate_tokens_is_cjk_aware`；旧值“中文中文=2”现为 4；“采购10000个PE白色快递袋”=10；全套 222 passed |
+| [P2] context-window-exceeded 无降级路径 | 适配器与运行时把 400/413/422 及 context-length 类消息分类为 `context_length`；运行时对无输出的 context_length 错误**缩减一次预算**（`max_context_tokens // 2`，下限 8k）并用更小上下文重新 plan 后重试；`provider_retry` 事件记录 `context_shrunk_to` | 新增 `test_context_length_error_shrinks_budget_and_retries_once`（100k→50k、2 次尝试、completed）与 `test_classify_error_detects_context_length`；`test_provider_retry.py` 11 passed |
+| [P2] 同步工具事件循环审查 | 逐个审查 4 个白名单工具：`capture_requirement`/`execute_analysis` 的解析/比价流水线已在 `asyncio.to_thread`；`read_request`/`approve_supplier` 仅为有界 SQLite/JSON 操作，无长时间同步 I/O 或 CPU | 审查结论记录于本表；无需代码修改 |
+| [P3] 文档漂移 | README 的 `MAX_TOKENS`/`MAX_STEPS` 由 100000/12 改为与代码默认一致的 **50000/20** | `README.md` diff；`procurement/agent.py` 默认值即 50000/20 |
+| [P3] “推荐稳定率”口径 | 从 `AuditView.tsx` 与 README 评测输出列表移除该同义反复指标（确定性复算自洽 ≠ 输入扰动稳定性），不再作为招牌指标；`evaluation.py` 原始 JSON 保留但不上屏 | `npm test` 14 passed；`npm run lint` 通过；重建后的 `web_dist` 已随本批提交 |
+| [P3] AppErrorBoundary 无测试 | 新增 `web/src/AppErrorBoundary.test.tsx`（正常渲染 + 抛错兜底） | web 测试 12 → **14 passed** |
+| [P3] Docker / 一键启动 | 新增 `Dockerfile`（uv slim 镜像 + `uv sync --frozen --no-dev --no-editable`）、`.dockerignore`、`docker-compose.yml`；README 增加启动说明 | `uv sync --frozen --no-dev --no-editable` 在全新 scratch venv 实测成功且 `agentharness` 可导入；**本机 Docker daemon 未就绪，镜像未实际 build**（如实记录，非已验证项） |
+| [P2] 两块 FAQ | `docs/demo-playbook.md` 面试追问新增“为何不用 LangGraph/扣子/OpenAI Agents SDK”与“转型删掉的能力怎么加回”两段可防御回答 | `docs/demo-playbook.md` diff |
+| [P1] 评测证据整理（口径部分） | 新增 `docs/evidence/live-real-run-report.md`：单次真实模型（deepseek-v4-flash）全链路运行记录，含 run_id、6 回合、18,690 tokens（7,936 缓存）、137 事件、终态 `passed/verified`、费用 null（未配置价格），并明确“非公开可复现评测、不构成准确率/成本证据”；`docs/evidence/README.md` 登记 | 数据直接取自 `output/proc-review-live-real/agentharness.db`（runs/events/tool_invocations/approvals）；与 CHANGELOG/README 诚实声明一致 |
+
+**剩余未闭环**：受预算约束的真实模型多轮评测（P1，需预算与更多运行数据）、2026-08-05 遗留的独立模型评审 / 故障转移 / 精确事实检索（均为“待核实/保留”，不接入）、P3 英文文档；Docker 镜像 build 待 daemon 可用后补验。
+
 ## 2026-08-06 轮 · 秋招就绪审查结论
 
 > 一句话结论：运行时与产品工程深度在实习中位数之上（子系统评分 7–8/10）。本轮（2026-08-06 第二轮）已将 4 个硬伤中的 3 个闭环：**CI 覆盖率门槛（80.02% ≥ 80%）、当前 HEAD 与工作区一致（提交后 219 passed / 1 skipped）、招牌人工审批路径 bug（改绑完整参数 `arguments_sha256` + 长备注回归测试）**；第 4 个“冻结评测 0 次调用模型”属口径问题，CHANGELOG 已同步诚实化，但把单次真实模型运行整理成公开可复现评测仍为 P1 未闭环。其中评委评分和“2–3 周修完”属于主观判断，不作为仓库实测证据。
@@ -75,8 +93,8 @@
 | 周 | 事项 | 对应条目 |
 |---|---|---|
 | 第 1 周 | ~~提交工作区使 HEAD 绿仓；修审批摘要 bug + 长备注回归测试；CI 两 job 变绿；清死代码~~ **已完成（2026-08-06 第二轮）** | P0×3 + 死代码 |
-| 第 2 周 | 受预算约束真实模型评测并提交证据进 `docs/evidence/`；校准 CJK token 估算并补 context-length 降级；逐个审查工具是否阻塞事件循环 | P1 + P2 |
-| 第 3 周 | 写"为何不用 LangGraph/扣子"+"转型删了什么/怎么加回"两段 FAQ；加 Docker/一键启动；清文档漂移、删"稳定率"口径、补 AppErrorBoundary 测试 | P2/P3 剩余 |
+| 第 2 周 | ~~校准 CJK token 估算并补 context-length 降级；逐个审查工具是否阻塞事件循环；整理单次真实模型记录进 `docs/evidence/`（口径部分）~~ **已完成（2026-08-06 第三轮）**；受预算约束的多轮真实模型评测仍待预算与更多运行数据 | P1 + P2 |
+| 第 3 周 | ~~两段 FAQ；Docker/一键启动；文档漂移；删"稳定率"口径；AppErrorBoundary 测试~~ **已完成（2026-08-06 第三轮，Docker 镜像 build 待补验）**；英文文档与其余 P3 卫生项仍保留 | P2/P3 剩余 |
 
 ## 2026-08-05 遗留（继续保留）
 

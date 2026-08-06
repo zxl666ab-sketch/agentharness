@@ -65,7 +65,6 @@ export function AuditView({ request }: Props) {
               <span><small>硬约束漏检 ↓</small><strong title="漏检率越低越好">{percent(evaluation.data.metrics.hard_constraint_miss.miss_rate)}</strong></span>
               <span><small>不合格报价错误入选</small><strong>{evaluation.data.metrics.incorrect_eligible_selection.count}</strong></span>
               <span><small>推荐准确率</small><strong>{percent(evaluation.data.metrics.recommendation_accuracy.rate)}</strong></span>
-              <span><small>推荐稳定率</small><strong>{percent(evaluation.data.metrics.recommendation_consistency.rate)}</strong></span>
               <span><small>报价人工复核率</small><strong>{percent(evaluation.data.metrics.manual_review.quote_rate)}</strong></span>
             </div>
             <div className="proc-eval-table-wrap">

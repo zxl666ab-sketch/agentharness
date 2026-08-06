@@ -16,6 +16,7 @@ from agentharness.contracts import (
     Usage,
 )
 from agentharness.harness import Harness
+from agentharness.providers.openai_adapter import _classify_error
 
 
 class _SequenceProvider:
@@ -231,3 +232,65 @@ async def test_no_implicit_fallback(data_dir, workspace) -> None:
     assert result.status == RunStatus.failed
     assert primary.calls == 1
     assert secondary.calls == 0
+
+
+def test_classify_error_detects_context_length() -> None:
+    class _HttpError(RuntimeError):
+        def __init__(self, message: str, status: int) -> None:
+            super().__init__(message)
+            self.status_code = status
+
+    message, kind = _classify_error(
+        _HttpError("This model's maximum context length is 128000 tokens", 400)
+    )
+    assert kind == "context_length"
+    assert "context length" in message
+
+    _, generic = _classify_error(_HttpError("unexpected upstream failure", 500))
+    assert generic == "server_error"
+
+
+@pytest.mark.asyncio
+async def test_context_length_error_shrinks_budget_and_retries_once(
+    data_dir, workspace
+) -> None:
+    class RecordingProvider(_SequenceProvider):
+        def __init__(self, name: str, attempts: list[list[ModelStreamItem]]) -> None:
+            super().__init__(name, attempts)
+            self.requests: list[ModelRequest] = []
+
+        async def stream(self, request: ModelRequest) -> AsyncIterator[ModelStreamItem]:
+            self.requests.append(request)
+            async for item in super().stream(request):
+                yield item
+
+    provider = RecordingProvider(
+        "long-context",
+        [_error("context_length"), _success("OK")],
+    )
+    harness = Harness(data_dir=data_dir, providers={"long-context": provider})
+    try:
+        result = await harness.run(
+            RunRequest(
+                message="shrink me",
+                provider="long-context",
+                cwd=str(workspace),
+                provider_retry=ProviderRetryConfig(max_retries=0),
+            )
+        )
+        events = harness.get_events(run_id=result.run_id, limit=1000)
+    finally:
+        await harness.aclose()
+
+    assert result.status == RunStatus.completed
+    assert result.output == "OK"
+    assert provider.calls == 2
+    assert [attempt.status for attempt in result.usage.provider_attempts] == [
+        "error",
+        "completed",
+    ]
+    retry = next(event for event in events if str(event.type) == "provider_retry")
+    assert retry.payload["error_kind"] == "context_length"
+    # Default BudgetConfig max_context_tokens=100_000 is halved on the one retry.
+    assert retry.payload["context_shrunk_to"] == 50_000
+    assert len(provider.requests) == 2

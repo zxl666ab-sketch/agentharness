@@ -48,7 +48,12 @@ from agentharness.engine.compaction import (
     render_transcript,
     summarize_history,
 )
-from agentharness.engine.context import ContextPlanner, billable_turn_usage, estimate_tokens
+from agentharness.engine.context import (
+    ContextBudgetError,
+    ContextPlanner,
+    billable_turn_usage,
+    estimate_tokens,
+)
 from agentharness.engine.events import EventEmitter
 from agentharness.engine.lease import LeaseManager
 from agentharness.engine.lifecycle import RESUMABLE_STATUSES, RunLifecycle
@@ -68,6 +73,9 @@ _RETRYABLE_PROVIDER_ERRORS = frozenset(
     {"rate_limit", "timeout", "connection", "server_error"}
 )
 
+# Floor for the one budget-constrained context-length retry; never shrink below.
+_CONTEXT_SHRINK_FLOOR = 8_000
+
 
 def _provider_exception_kind(exc: BaseException) -> str:
     status = getattr(exc, "status_code", None)
@@ -77,6 +85,18 @@ def _provider_exception_kind(exc: BaseException) -> str:
         return "rate_limit"
     if "timeout" in low or "timeout" in name:
         return "timeout"
+    if status in {400, 413, 422} or any(
+        marker in low
+        for marker in (
+            "context length",
+            "context_length",
+            "maximum context",
+            "too many tokens",
+            "token limit",
+            "prompt is too long",
+        )
+    ):
+        return "context_length"
     if isinstance(status, int) and 500 <= status <= 599:
         return "server_error"
     if "connection" in low or "connect" in name:
@@ -1024,6 +1044,7 @@ class RunEngine:
             streamed_length = 0
             target_attempt = 1
             turn_usage_charged = False
+            context_shrunk = False
 
             while True:
                 provider = self.providers[request.provider]
@@ -1293,6 +1314,60 @@ class RunEngine:
 
                 retryable = error_kind in _RETRYABLE_PROVIDER_ERRORS
                 can_replay = not had_provider_output
+                if (
+                    can_replay
+                    and error_kind == "context_length"
+                    and not context_shrunk
+                    and budget.max_context_tokens > _CONTEXT_SHRINK_FLOOR
+                ):
+                    # Budget-constrained degradation: halve the context budget once
+                    # and replan so the provider receives a smaller transcript
+                    # instead of failing the run on an irreducible context error.
+                    shrunk = max(_CONTEXT_SHRINK_FLOOR, budget.max_context_tokens // 2)
+                    try:
+                        bundle = self.context_planner.plan(
+                            run_id=run_id,
+                            request=request,
+                            messages=messages,
+                            tools=tool_specs,
+                            model_turn=step,
+                            state=self._ctx(run_id).context_state,
+                            max_tokens=shrunk,
+                        )
+                    except ContextBudgetError:
+                        break
+                    budget.max_context_tokens = shrunk
+                    self._ctx(run_id).context_state = bundle.state
+                    context_shrunk = True
+                    usage.input_tokens += attempt_input
+                    usage.output_tokens += attempt_output
+                    usage.total_tokens += attempt_input + attempt_output
+                    usage.cached_input_tokens += attempt_cached
+                    usage.estimated = usage.estimated or not turn_usage.total_tokens
+                    _update_usage_cost(usage, request.pricing)
+                    turn_usage_charged = True
+                    self.events.emit_and_update(
+                        run_id,
+                        events=[
+                            self.events.event(
+                                run_row,
+                                EventType.provider_retry,
+                                {
+                                    "provider": request.provider,
+                                    "model": request.model,
+                                    "attempt": target_attempt,
+                                    "next_attempt": target_attempt + 1,
+                                    "error_kind": error_kind,
+                                    "delay_s": 0.0,
+                                    "retry_after_s": None,
+                                    "context_shrunk_to": shrunk,
+                                },
+                                span_id=span_id,
+                            )
+                        ],
+                    )
+                    target_attempt += 1
+                    continue
                 if (
                     can_replay
                     and retryable
