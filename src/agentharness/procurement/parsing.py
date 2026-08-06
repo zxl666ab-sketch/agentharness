@@ -361,6 +361,57 @@ def _set_field(fields: dict[str, Any], field: str, entry: dict[str, Any]) -> Non
         fields[field] = entry
 
 
+
+def _informational_entry(
+    value: Any,
+    confidence: float,
+    *,
+    document_kind: str,
+    locator: str,
+    excerpt: str,
+    method: str,
+) -> dict[str, Any]:
+    """Evidence entry for a label/value pair that is not part of the fixed
+    field set. Stored read-only under ``informational_fields`` so unknown
+    fields from rich supplier quotes are never silently dropped."""
+    return {
+        "value": str(value).strip(),
+        "confidence": round(max(0.0, min(1.0, confidence)), 2),
+        "status": "accepted",
+        "informational": True,
+        "label": str(excerpt).split(":", 1)[0].split("?", 1)[0].strip()[:100],
+        "source": {
+            "document_kind": document_kind,
+            "locator": locator,
+            "excerpt": str(excerpt).strip()[:500],
+            "method": method,
+        },
+    }
+
+
+def _informational_key(label: Any) -> str | None:
+    key = _key(label)
+    if not key or key[0].isdigit():
+        return None
+    return key
+
+
+def _set_informational(
+    informational: dict[str, Any],
+    label: Any,
+    entry: dict[str, Any],
+) -> None:
+    key = _informational_key(label)
+    if key is None:
+        return
+    current = informational.get(key)
+    if current is None:
+        informational[key] = entry
+        return
+    if float(entry.get("confidence", 0)) > float(current.get("confidence", 0)):
+        informational[key] = entry
+
+
 def _extract_specs(fields: dict[str, Any], document_kind: str) -> None:
     description = fields.get("item_description")
     if not description or not description.get("value"):
@@ -532,7 +583,14 @@ def _infer_common(fields: dict[str, Any], text: str, document_kind: str) -> None
     _extract_specs(fields, document_kind)
 
 
-def _finalize(fields: dict[str, Any], *, filename: str, document_kind: str, processing_ms: float) -> dict[str, Any]:
+def _finalize(
+    fields: dict[str, Any],
+    *,
+    filename: str,
+    document_kind: str,
+    processing_ms: float,
+    informational: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if "supplier_name" not in fields:
         fallback = re.sub(r"[_-]+", " ", Path(filename).stem).strip()
         fields["supplier_name"] = _entry(
@@ -570,6 +628,7 @@ def _finalize(fields: dict[str, Any], *, filename: str, document_kind: str, proc
         "parser_version": PARSER_VERSION,
         "document_kind": document_kind,
         "fields": fields,
+        "informational_fields": informational or {},
         "processing_ms": round(processing_ms, 2),
     }
 
@@ -620,6 +679,7 @@ def _xlsx_quote(filename: str, data: bytes) -> dict[str, Any]:
         if len(workbook.worksheets) > MAX_XLSX_SHEETS:
             raise QuoteParseError(f"XLSX 工作表不得超过 {MAX_XLSX_SHEETS} 个")
         fields: dict[str, Any] = {}
+        informational: dict[str, Any] = {}
         document_lines: list[str] = []
         for sheet in workbook.worksheets:
             if int(sheet.max_row or 0) > MAX_XLSX_ROWS:
@@ -681,9 +741,6 @@ def _xlsx_quote(filename: str, data: bytes) -> dict[str, Any]:
                             )
                     continue
                 for position, (column, label) in enumerate(populated):
-                    field = ALIASES.get(_key(label))
-                    if not field:
-                        continue
                     candidate = next(
                         (
                             (candidate_column, candidate_value)
@@ -696,19 +753,38 @@ def _xlsx_quote(filename: str, data: bytes) -> dict[str, Any]:
                         continue
                     value_column, value = candidate
                     locator = f"{sheet.title}!{get_column_letter(value_column)}{row_index}"
-                    _set_field(
-                        fields,
-                        field,
-                        _entry(
+                    excerpt = f"{label}: {value}"
+                    field = ALIASES.get(_key(label))
+                    if field:
+                        _set_field(
+                            fields,
                             field,
-                            value,
-                            0.97,
-                            document_kind="xlsx",
-                            locator=locator,
-                            excerpt=f"{label}: {value}",
-                            method="key_value_cell",
-                        ),
-                    )
+                            _entry(
+                                field,
+                                value,
+                                0.97,
+                                document_kind="xlsx",
+                                locator=locator,
+                                excerpt=excerpt,
+                                method="key_value_cell",
+                            ),
+                        )
+                    elif len(populated) == 2:
+                        # Only single label/value rows (exactly two populated
+                        # cells) count as unknown key-value fields. Wider rows
+                        # are table data/headers and would add noise.
+                        _set_informational(
+                            informational,
+                            label,
+                            _informational_entry(
+                                value,
+                                0.9,
+                                document_kind="xlsx",
+                                locator=locator,
+                                excerpt=excerpt,
+                                method="key_value_cell",
+                            ),
+                        )
         full_text = "\n".join(document_lines)[:MAX_EXTRACTED_CHARS]
         _infer_common(fields, full_text, "xlsx")
         return _finalize(
@@ -716,13 +792,17 @@ def _xlsx_quote(filename: str, data: bytes) -> dict[str, Any]:
             filename=filename,
             document_kind="xlsx",
             processing_ms=(time.perf_counter() - started) * 1000,
+            informational=informational,
         )
     finally:
         workbook.close()
 
 
 def _pdf_delimited_tables(
-    fields: dict[str, Any], lines: list[str], page_number: int
+    fields: dict[str, Any],
+    informational: dict[str, Any],
+    lines: list[str],
+    page_number: int,
 ) -> None:
     for line_index, line in enumerate(lines):
         headers = [value.strip() for value in line.split("|")]
@@ -746,23 +826,41 @@ def _pdf_delimited_tables(
         values = [value.strip() for value in lines[data_index].split("|")]
         if len(values) != len(headers):
             continue
-        for position, field in header_map.items():
+        for position, header in enumerate(headers):
+            if not header:
+                continue
             value = values[position]
             if not value:
                 continue
-            _set_field(
-                fields,
-                field,
-                _entry(
+            excerpt = f"{header}: {value}"
+            field = header_map.get(position)
+            if field:
+                _set_field(
+                    fields,
                     field,
-                    value,
-                    0.94,
-                    document_kind="pdf",
-                    locator=f"page {page_number}, table line {data_index + 1}",
-                    excerpt=f"{headers[position]}: {value}",
-                    method="delimited_table",
-                ),
-            )
+                    _entry(
+                        field,
+                        value,
+                        0.94,
+                        document_kind="pdf",
+                        locator=f"page {page_number}, table line {data_index + 1}",
+                        excerpt=excerpt,
+                        method="delimited_table",
+                    ),
+                )
+            else:
+                _set_informational(
+                    informational,
+                    header,
+                    _informational_entry(
+                        value,
+                        0.9,
+                        document_kind="pdf",
+                        locator=f"page {page_number}, table line {data_index + 1}",
+                        excerpt=excerpt,
+                        method="delimited_table",
+                    ),
+                )
 
 
 def _pdf_quote(filename: str, data: bytes) -> dict[str, Any]:
@@ -776,6 +874,7 @@ def _pdf_quote(filename: str, data: bytes) -> dict[str, Any]:
     if len(reader.pages) > MAX_PDF_PAGES:
         raise QuoteParseError(f"PDF 不得超过 {MAX_PDF_PAGES} 页")
     fields: dict[str, Any] = {}
+    informational: dict[str, Any] = {}
     all_text: list[str] = []
     total_chars = 0
     for page_number, page in enumerate(reader.pages, start=1):
@@ -788,7 +887,7 @@ def _pdf_quote(filename: str, data: bytes) -> dict[str, Any]:
             raise QuoteParseError("PDF 提取文本过大")
         all_text.append(text)
         lines = text.splitlines()
-        _pdf_delimited_tables(fields, lines, page_number)
+        _pdf_delimited_tables(fields, informational, lines, page_number)
         for line_number, line in enumerate(lines, start=1):
             clean = line.strip()
             if not clean:
@@ -798,21 +897,33 @@ def _pdf_quote(filename: str, data: bytes) -> dict[str, Any]:
                 continue
             label, value = match.groups()
             field = ALIASES.get(_key(label))
-            if not field:
-                continue
-            _set_field(
-                fields,
-                field,
-                _entry(
+            if field:
+                _set_field(
+                    fields,
                     field,
-                    value,
-                    0.94,
-                    document_kind="pdf",
-                    locator=f"page {page_number}, line {line_number}",
-                    excerpt=clean,
-                    method="labelled_text",
-                ),
-            )
+                    _entry(
+                        field,
+                        value,
+                        0.94,
+                        document_kind="pdf",
+                        locator=f"page {page_number}, line {line_number}",
+                        excerpt=clean,
+                        method="labelled_text",
+                    ),
+                )
+            else:
+                _set_informational(
+                    informational,
+                    label,
+                    _informational_entry(
+                        value,
+                        0.9,
+                        document_kind="pdf",
+                        locator=f"page {page_number}, line {line_number}",
+                        excerpt=clean,
+                        method="labelled_text",
+                    ),
+                )
     full_text = "\n".join(all_text)
     if not full_text.strip():
         raise QuoteParseError("PDF 不含可提取文本；扫描件 OCR 不在当前范围内")
@@ -822,6 +933,7 @@ def _pdf_quote(filename: str, data: bytes) -> dict[str, Any]:
         filename=filename,
         document_kind="pdf",
         processing_ms=(time.perf_counter() - started) * 1000,
+        informational=informational,
     )
 
 

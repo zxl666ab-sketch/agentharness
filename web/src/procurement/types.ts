@@ -17,6 +17,10 @@ export type QuoteField = {
   value: string | number | boolean | null;
   confidence: number;
   status: "accepted" | "needs_review" | "corrected";
+  /** Unknown label/value pairs captured from the source document (read-only). */
+  informational?: boolean;
+  /** Original source label for informational fields. */
+  label?: string;
   original_value?: string | number | boolean | null;
   source: {
     document_kind: string;
@@ -50,6 +54,7 @@ export type ProcurementQuote = {
     parser_version: string;
     document_kind: string;
     fields: Record<string, QuoteField>;
+    informational_fields?: Record<string, QuoteField>;
     processing_ms: number;
   };
   status: "needs_review" | "ready";

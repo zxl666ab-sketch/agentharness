@@ -186,6 +186,12 @@ export function QuoteWorkspace({
       return [{ name, field, meta: fieldMeta }];
     });
   }, [meta.field_meta, onlyReview, selected]);
+  const informational = useMemo(() => {
+    if (!selected) return [];
+    return Object.entries(selected.extracted.informational_fields || {})
+      .map(([key, field]) => ({ key, field }))
+      .sort((a, b) => (a.field.label || a.key).localeCompare(b.field.label || b.key, "zh-CN"));
+  }, [selected]);
   const canAnalyze =
     request.quote_count >= 2 &&
     request.unresolved_field_count === 0 &&
@@ -310,6 +316,28 @@ export function QuoteWorkspace({
                 <div className="proc-no-review"><CheckCircle2 size={18} />没有待复核字段</div>
               ) : null}
             </div>
+            {informational.length ? (
+              <details className="proc-info-fields">
+                <summary>
+                  <span>其他字段（未纳入计算，来自原件）</span>
+                  <span className="proc-info-count">{informational.length}</span>
+                </summary>
+                <div className="proc-info-table">
+                  <div className="proc-field-table-head"><span>字段</span><span>抽取值</span><span>来源证据</span></div>
+                  {informational.map(({ key, field }) => (
+                    <div key={key} className="proc-field-row">
+                      <div className="proc-field-label"><strong>{field.label || key}</strong><span>参考</span></div>
+                      <div className="proc-field-editor"><span className="proc-info-value">{String(field.value ?? "")}</span></div>
+                      <div className="proc-field-evidence">
+                        <span className="proc-confidence high">{Math.round(field.confidence * 100)}%</span>
+                        <span title={field.source.excerpt}>{sourceLocator(field.source.locator)}</span>
+                        <small>{field.source.excerpt || "原文未找到"}</small>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            ) : null}
           </>
         ) : (
           <div className="proc-empty-panel">
