@@ -46,19 +46,19 @@
 
 > 目标：让模型不乱来、不绕圈，并在固定场景中相对阶段前基线显著减少回合和重复调用；2–3 回合是期望指标，不是脱离模型差异的绝对完成门槛。若未达到，须记录数据和原因，但状态机、去重、人工注入等功能验收仍必须全部满足。
 
-### 1.1 [x] 显式阶段状态机 + 越权工具拒绝【已完成 · 2026-08-06 / e62f3ca  / e0395cf / docs/evidence/stage-1-convergence-offline-2026-08-06.md】
+### 1.1 [x] 显式阶段状态机 + 越权工具拒绝【已完成 · 2026-08-06 / e62f3ca  / e0395cf / docs/evidence/stage-1-convergence-offline-2026-08-06.md；真实模型验证见 docs/evidence/stage-1-real-model-2026-08-06.md】
 - 目标/做法：把 capture → analysis → approve 的阶段约束从「提示词」升级为显式状态机；每阶段只放行对应工具，跨阶段调用直接拒绝并返回结构化提示让模型自纠。
 - 加分点：面试必问“你怎么保证 Agent 不乱来”，这是比提示词更硬的答案；实现量小（一张阶段→工具矩阵）。
 - 工作量：0.5–1 天
 - 验收：fake provider 注入“跳阶段调用”被拒绝，事件流里留下越权记录，run 不崩溃。
 - 指标口径：阶段一的“2–3 回合”是固定场景下相较基线的目标值，不是脱离模型、网关和网络差异的绝对硬门槛；硬验收仍以状态机、事件记录和 run 稳定性为准，未达到目标时须在证据中如实说明原因。
 
-### 1.2 [x] 同一步内工具调用去重 / 防绕圈【已完成 · 2026-08-06 / e62f3ca  / e0395cf / docs/evidence/stage-1-convergence-offline-2026-08-06.md】
+### 1.2 [x] 同一步内工具调用去重 / 防绕圈【已完成 · 2026-08-06 / e62f3ca  / e0395cf / docs/evidence/stage-1-convergence-offline-2026-08-06.md；真实模型验证见 docs/evidence/stage-1-real-model-2026-08-06.md】
 - 目标/做法：同一 (step, 工具) 已成功过就不允许再调；重复调用返回“结果未变化”并计入异常（直接治 `read_request`×4）。
 - 工作量：0.5 天
 - 验收：同一步重复调用被拦截，报告显示重复调用次数；同一固定场景的真实/模拟数据均与各自阶段前基线比较，不得混用，目标是回合数和重复调用下降。
 
-### 1.3 [x] 人工操作结果直接注入 Agent【已完成 · 2026-08-06 / e62f3ca  / e0395cf / docs/evidence/stage-1-convergence-offline-2026-08-06.md】
+### 1.3 [x] 人工操作结果直接注入 Agent【已完成 · 2026-08-06 / e62f3ca  / e0395cf / docs/evidence/stage-1-convergence-offline-2026-08-06.md；真实模型验证见 docs/evidence/stage-1-real-model-2026-08-06.md】
 - 目标/做法：修正/确认/审批结果作为事件直接注入上下文，模型不再反复 `read_request` 猜状态。
 - 加分点：体现 agent 编排理解（结果驱动，而非模型轮询）。
 - 工作量：1 天
@@ -68,19 +68,19 @@
 
 > 目标：网关/预算异常不再直接红屏。
 
-### 2.1 [x] length / 0 输出自动重试 + 输出预算放宽【已完成 · 2026-08-06 / fb995f6  / 396cc54 / docs/evidence/stage-2-reliability-offline-2026-08-06.md】
+### 2.1 [x] length / 0 输出自动重试 + 输出预算放宽【已完成 · 2026-08-06 / fb995f6  / 396cc54 / docs/evidence/stage-2-reliability-offline-2026-08-06.md；真实模型验证见 docs/evidence/stage-2-real-model-2026-08-06.md】
 - 目标/做法：`finish_reason=length` 且 0 输出 → 自动重试一次并放宽输出预算；仍失败给中文可操作提示。
 - 加分点：现成面试案例「网关偶发截断 → 自动重试 → 不红」。
 - 工作量：0.5–1 天
 - 验收：使用 fake/provider 故障注入稳定复现 `length` 错误后，run 自动恢复完成，事件流记录 retry 原因和次数；真实模型阶段验证只要求正常路径不红，并记录实际 `finish_reason`，不得为了触发故障而无限重试或伪造真实模型结果。
 
-### 2.2 [x] 预算/回合感知降级【已完成 · 2026-08-06 / fb995f6  / 396cc54 / docs/evidence/stage-2-reliability-offline-2026-08-06.md】
+### 2.2 [x] 预算/回合感知降级【已完成 · 2026-08-06 / fb995f6  / 396cc54 / docs/evidence/stage-2-reliability-offline-2026-08-06.md；真实模型验证见 docs/evidence/stage-2-real-model-2026-08-06.md】
 - 目标/做法：Token/回合预算快用完 → 先自动压缩上下文 → 仍不够 → 停在安全边界并明确告知用户，而非硬失败。
 - 加分点：体现「预算也是 agent 治理的一部分」。
 - 工作量：0.5–1 天
 - 验收：预算耗尽路径产生“已停在安全边界”的明确状态，而不是 failed 红屏；边界路径用确定性预算注入验证，真实模型验证记录正常路径或实际预算停止结果。
 
-### 2.3 [x] Few-shot 示例注入【已完成 · 2026-08-06 / fb995f6  / 396cc54 / docs/evidence/stage-2-reliability-offline-2026-08-06.md】
+### 2.3 [x] Few-shot 示例注入【已完成 · 2026-08-06 / fb995f6  / 396cc54 / docs/evidence/stage-2-reliability-offline-2026-08-06.md；真实模型验证见 docs/evidence/stage-2-real-model-2026-08-06.md】
 - 目标/做法：系统提示词给 2–3 条理想工具序列示例（新对话→capture→analysis→等审批）。
 - 工作量：0.5 天
 - 验收：同一固定场景下真实/模拟回合数较各自阶段前基线下降，既有测试无回归；真实模型未达到目标时须记录模型、网关或场景差异，不得以 fake 数据替代真实证据。
@@ -89,18 +89,18 @@
 
 > 目标：每个决策可回溯、可解释。
 
-### 3.1 [x] 工具调用理由记录【已完成 · 2026-08-06 / d558cf7  / b6dd646 / docs/evidence/stage-3-governance-offline-2026-08-06.md】
+### 3.1 [x] 工具调用理由记录【已完成 · 2026-08-06 / d558cf7  / b6dd646 / docs/evidence/stage-3-governance-offline-2026-08-06.md；真实模型验证见 docs/evidence/stage-3-real-model-2026-08-06.md】
 - 目标/做法：每回合记录模型“调用工具前的说明”作为 reason 存入事件流，并在报告展示。
 - 工作量：0.5 天
 - 验收：运行报告显示每次工具调用的理由文本。
 
-### 3.2 [x] 收敛指标进运行报告【已完成 · 2026-08-06 / d558cf7  / b6dd646 / docs/evidence/stage-3-governance-offline-2026-08-06.md】
+### 3.2 [x] 收敛指标进运行报告【已完成 · 2026-08-06 / d558cf7  / b6dd646 / docs/evidence/stage-3-governance-offline-2026-08-06.md；真实模型验证见 docs/evidence/stage-3-real-model-2026-08-06.md】
 - 目标/做法：报告新增：模型回合数、每个工具调用次数、重复调用次数、越权调用次数、每次调用的理由。
 - 加分点：状态机 + 去重 + 跑批的可视化输出，面试直接翻报告说话。
 - 工作量：0.5 天
 - 验收：报告 JSON/页面含上述指标字段。
 
-### 3.3 [x] 独立评审最小版（启用现有 `_ai_check`）【已完成 · 2026-08-06 / d558cf7  / b6dd646 / docs/evidence/stage-3-governance-offline-2026-08-06.md】
+### 3.3 [x] 独立评审最小版（启用现有 `_ai_check`）【已完成 · 2026-08-06 / d558cf7  / b6dd646 / docs/evidence/stage-3-governance-offline-2026-08-06.md；真实模型验证见 docs/evidence/stage-3-real-model-2026-08-06.md】
 - 目标/做法：审批前用第二个 provider/模型交叉验证推荐是否与确定性比价一致，输出 pass/fail + 理由；**不阻塞审批**，只作为证据。
 - 加分点：“可治理 agent”叙事的最强证据；代码已有 `_ai_check` 基础，工作量可控（配置化 + 一个演示场景）。
 - 工作量：1–1.5 天
@@ -110,7 +110,7 @@
 
 > 目标：从 demo 变 engineered 的硬证据。
 
-### 4.1 [ ] 真实模型验收跑批
+### 4.1 [x] 真实模型验收跑批【已完成 · 2026-08-06 / f836584+5b91a5d / 证据 commit 待补 / docs/evidence/stage-4-live-batch-2026-08-06.md】
 - 目标/做法：5–10 个场景，受预算约束跑真实模型；脚本输出：回合数、工具调用数、成功率、Token/成本基线。
 - 加分点：面试被问“真实模型行不行”时的答案；从 demo → engineered 的唯一硬证据。
 - 工作量：1–2 天
@@ -126,17 +126,17 @@
 
 > 目标：业务最小完整 + 30 秒讲清项目。
 
-### 5.1 [x] 审批后生成采购订单（PO）导出【已完成 · 2026-08-06 / d9555ea  / 7031988 / docs/evidence/stage-5-closure-offline-2026-08-06.md】
+### 5.1 [x] 审批后生成采购订单（PO）导出【已完成 · 2026-08-06 / d9555ea  / 7031988 / docs/evidence/stage-5-closure-offline-2026-08-06.md；真实模型验证见 docs/evidence/stage-5-real-model-2026-08-06.md】
 - 目标/做法：审批通过 → 生成订单（一个数据表 + 至少一种明确的可下载格式，优先确定性较高的 Excel/CSV；若声明支持 PDF，则 PDF 也必须纳入验收 + 页面按钮）；不做收货/付款。
 - 工作量：1 天
 - 验收：审批后能生成并下载至少一种已明确约定的订单格式，含供应商/物料/数量/金额/快照引用；如果实现 PDF 和 Excel/CSV 两种格式，则两种均须可下载并测试。
 
-### 5.2 [x] README：架构边界图 + 健康度表 + 3 个可靠性案例【已完成 · 2026-08-06 / d9555ea  / 7031988 / docs/evidence/stage-5-closure-offline-2026-08-06.md】
+### 5.2 [x] README：架构边界图 + 健康度表 + 3 个可靠性案例【已完成 · 2026-08-06 / d9555ea  / 7031988 / docs/evidence/stage-5-closure-offline-2026-08-06.md；真实模型验证见 docs/evidence/stage-5-real-model-2026-08-06.md】
 - 目标/做法：一张架构边界图 + 健康度表 + 3 个「现象→根因→修复→回归」案例。
 - 工作量：0.5 天
 - 验收：README 30 秒可讲清“交付了什么、怎么证明可靠”。
 
-### 5.3 [x] 使用层面顺手项（低成本高感知）【已完成 · 2026-08-06 / d9555ea  / 7031988 / docs/evidence/stage-5-closure-offline-2026-08-06.md】
+### 5.3 [x] 使用层面顺手项（低成本高感知）【已完成 · 2026-08-06 / d9555ea  / 7031988 / docs/evidence/stage-5-closure-offline-2026-08-06.md；真实模型验证见 docs/evidence/stage-5-real-model-2026-08-06.md】
 - 报错中文化 + 一键恢复入口（不再让用户看 `UNIQUE constraint failed...`）；
 - 审批状态文案「等待采购员确认」取代「写入审批 · 执行中」；
 - 一键清理/新建演示任务。
