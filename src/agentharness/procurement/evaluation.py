@@ -170,17 +170,28 @@ def _pdf_font(locale: str) -> str:
         return "Helvetica"
     name = "ProcurementChinese"
     if name not in pdfmetrics.getRegisteredFontNames():
+        # reportlab cannot embed CFF/PostScript-outline fonts (e.g. the Noto
+        # CJK .ttc from fonts-noto-cjk), so try each candidate and skip any
+        # font that fails to register instead of crashing the whole run.
         candidates = (
             Path("C:/Windows/Fonts/simhei.ttf"),
             Path("C:/Windows/Fonts/simsunb.ttf"),
+            Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
+            Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+            Path("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"),
             Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttf"),
             Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
             Path("/Library/Fonts/Arial Unicode.ttf"),
         )
-        font_path = next((path for path in candidates if path.is_file()), None)
-        if font_path is None:
-            raise RuntimeError("生成中文 PDF 演示报价需要可嵌入的中文字体")
-        pdfmetrics.registerFont(TTFont(name, font_path))
+        for font_path in candidates:
+            if not font_path.is_file():
+                continue
+            try:
+                pdfmetrics.registerFont(TTFont(name, font_path, subfontIndex=0))
+                return name
+            except Exception:  # noqa: BLE001 - unreadable/CFF fonts are skipped
+                continue
+        raise RuntimeError("生成中文 PDF 演示报价需要可嵌入的中文字体")
     return name
 
 
