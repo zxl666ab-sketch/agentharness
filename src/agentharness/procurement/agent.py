@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -15,6 +16,8 @@ from agentharness.contracts import (
     ApprovalMode,
     BudgetConfig,
     EffectKind,
+    EventEnvelope,
+    EventType,
     Message,
     MessageRole,
     ModelRequest,
@@ -39,6 +42,15 @@ from agentharness.procurement.service import (
 )
 
 PROCUREMENT_PROVIDER = "procurement_fake"
+
+logger = logging.getLogger(__name__)
+
+_SNAPSHOT_INVALIDATED_RESUME_MESSAGE = (
+    "比价快照已因报价人工修正失效（当前状态 ready，无有效快照）。"
+    "你必须调用 procurement_execute_analysis 重新执行确定性比价并生成新快照；"
+    "这是人工修正后的必要重跑，不是重复调用。完成后等待采购员确认供应商选择，"
+    "收到选择确认前不要调用审批工具。"
+)
 PROCUREMENT_LIVE_PROVIDER = "openai"
 PROCUREMENT_CONFIG_FILENAME = "procurement-model-config.json"
 PROCUREMENT_TOOL_NAMES = (
@@ -447,7 +459,11 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
                         "type": "object",
                         "description": (
                             "Keys must be ISO 3-letter currency codes relative to "
-                            "base_currency, such as USD. Do not use pair strings like USD/CNY."
+                            "base_currency, such as USD. Do not use pair strings like USD/CNY. "
+                            "Each value is how many base-currency units one unit of that "
+                            "currency buys (e.g. base CNY with USD/CNY=7.2 means "
+                            "{\"CNY\": 1, \"USD\": 7.2}; base USD means {\"USD\": 1, "
+                            "\"CNY\": 0.138888}). Never invert the direction."
                         ),
                         "additionalProperties": {"type": ["string", "number"]},
                     },
@@ -1069,6 +1085,8 @@ class ProcurementAgent:
             if status in {"pending", "running", "waiting_approval"}:
                 return self._accepted(request, existing_run_id)
             if status == "require_human":
+                if self._needs_reanalysis(request):
+                    return await self._resume_after_correction(request, existing_run_id)
                 return await self._resume(
                     request,
                     message="已在结构化报价面板完成人工复核，请继续执行确定性比价。",
@@ -1079,6 +1097,109 @@ class ProcurementAgent:
             message="请读取当前结构化采购需求和已校对报价，执行确定性比价并请求人工选择供应商。",
             source="procurement_structured",
         )
+
+    @staticmethod
+    def _needs_reanalysis(request: dict[str, Any]) -> bool:
+        """A human correction invalidated (or prevented) the comparison snapshot:
+        the request is ready but carries no valid snapshot, so re-analysis is
+        mandatory rather than a duplicate tool call."""
+        return (
+            str(request.get("status") or "") == "ready"
+            and request.get("current_snapshot_id") is None
+        )
+
+    async def _resume_after_correction(
+        self,
+        request: dict[str, Any],
+        run_id: str,
+    ) -> dict[str, str]:
+        """Resume a run whose comparison snapshot was invalidated by a human
+        correction.
+
+        The resume input tells the model the snapshot MUST be regenerated.
+        Real models sometimes still refuse to repeat the analysis tool, so a
+        background guard re-runs the deterministic pipeline when the resumed
+        run ends without a fresh snapshot. This makes "开始比价" deterministic
+        instead of model-dependent.
+        """
+        task = asyncio.create_task(
+            self._resume_and_ensure_snapshot(request, run_id),
+            name=f"procurement-agent-ensure-snapshot-{run_id[:12]}",
+        )
+        self._track(run_id, task)
+        await asyncio.sleep(0)
+        if task.done():
+            task.result()
+        return self._accepted(request, run_id)
+
+    async def _resume_and_ensure_snapshot(
+        self,
+        request: dict[str, Any],
+        run_id: str,
+    ) -> None:
+        active = self._tasks.get(run_id)
+        current = asyncio.current_task()
+        if active is not None and active is not current and not active.done():
+            raise RuntimeError("采购 Agent 正在运行，请稍后再试")
+        inner: asyncio.Task[Any] | None = None
+        try:
+            inner = asyncio.create_task(
+                self.harness.resume(
+                    run_id,
+                    input=_SNAPSHOT_INVALIDATED_RESUME_MESSAGE,
+                ),
+                name=f"procurement-agent-resume-{run_id[:12]}",
+            )
+            await asyncio.sleep(0)
+            if inner.done():
+                inner.result()
+            await inner
+        except asyncio.CancelledError:
+            if inner is not None and not inner.done():
+                inner.cancel()
+            raise
+        except Exception:
+            logger.warning(
+                "采购 Agent 恢复运行未生成比价快照，将执行确定性重算",
+                exc_info=True,
+            )
+        current_state = self.service.get_request(str(request["id"]))
+        if (
+            str(current_state.get("status") or "") == "ready"
+            and current_state.get("current_snapshot_id") is None
+        ):
+            try:
+                self.service.execute_analysis_pipeline(
+                    str(current_state["id"]),
+                    run_id=run_id,
+                )
+                self._emit_snapshot_refreshed(run_id)
+            except Exception:
+                logger.exception("比价快照确定性重算失败")
+
+    def _emit_snapshot_refreshed(self, run_id: str) -> None:
+        """Publish a run_status event so the web UI refreshes after the
+        deterministic fallback regenerated the comparison snapshot."""
+        run = self.harness.get_run(run_id)
+        if run is None:
+            return
+        try:
+            self.harness.storage.events.append_events(
+                [
+                    EventEnvelope(
+                        session_id=str(run.get("session_id") or ""),
+                        root_run_id=str(run.get("root_run_id") or run_id),
+                        run_id=run_id,
+                        type=EventType.run_status,
+                        payload={
+                            "status": "require_human",
+                            "reason": "比价快照已重新生成，等待人工选择供应商",
+                        },
+                    )
+                ]
+            )
+        except Exception:
+            logger.warning("快照刷新事件写入失败", exc_info=True)
 
     async def _launch(
         self,
@@ -1334,6 +1455,9 @@ class ProcurementAgent:
                 "尺寸公差和厚度公差是可选项；用户未说明时分别使用业务默认值 2 mm 和 3 μm，"
                 "并在说明中告知采购员，不得仅因缺少这两个公差而停止或追问。"
                 "fx_rates 的键必须是相对本位币的三位 ISO 货币代码（例如 USD），不要写 USD/CNY；"
+                "fx_rates 的值表示 1 单位该币种可兑换的本位币数量，例如本位币 CNY、USD/CNY=7.2 时应写 "
+                "fx_rates={CNY: 1, USD: 7.2}；本位币 USD 时则应写 fx_rates={USD: 1, CNY: 0.138888}，"
+                "不要写反方向；"
                 "必须忠实保留用户明确说出的颜色、印刷色数和开票要求。"
                 "只有收到 [procurement_supplier_selection] JSON 后才能调用审批工具；审批成功后最终回复"
                 "必须包含【采购决策已验证】。审批工具成功前严禁输出、引用、解释或复述该验证标记。"
@@ -1341,6 +1465,8 @@ class ProcurementAgent:
                 "②已结构化/已复核：procurement_execute_analysis（执行确定性比价并准备人工选择）；"
                 "③收到 [procurement_supplier_selection] JSON：procurement_approve_supplier（采购员已确认，完成审批）。"
                 "不要在前一步完成前调用后续工具，也不要在同一状态下重复调用同一工具。"
+                "如果采购任务状态为 ready 且 current_snapshot_id 为空（比价快照已因人工修正失效），"
+                "必须调用 procurement_execute_analysis 重新生成比价快照；这属于必要重跑而非重复调用。"
                 "所有面向采购员的回复必须使用纯中文文本，不使用 Markdown 符号（例如 **、-、`、#），"
                 "不使用表情符号；需要强调时用中文引号或“加粗”语义的普通文字表达。"
             ),
