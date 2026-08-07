@@ -28,10 +28,10 @@
 ## 反馈闭环（1.6 反馈事件，调权依据）
 
 - 展示注入参考数：3
-- knowledge_reference_viewed：1
-- knowledge_reference_adopted：1
-- 参考查看率：0.3333
-- 参考采纳率：0.3333
+- knowledge_reference_viewed：0
+- knowledge_reference_adopted：0
+- 参考查看率：0.0
+- 参考采纳率：0.0
 
 ## 失败案例（top-1 未命中相关历史）
 

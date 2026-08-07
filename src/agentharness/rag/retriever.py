@@ -15,7 +15,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from agentharness.rag.chunking import specification_summary
+from agentharness.rag.chunking import canonical_color, canonical_material, specification_summary
 
 WIDTH = "width_mm"
 LENGTH = "length_mm"
@@ -72,8 +72,22 @@ def _structured_hits(
             hits[dimension] = False
             missing += 1
             continue
-        if dimension in {MATERIAL, COLOR}:
-            hit = _norm_text(expected) == _norm_text(actual)
+        if dimension == MATERIAL:
+            left = canonical_material(expected)
+            right = canonical_material(actual)
+            hit = (
+                left == right
+                if left is not None and right is not None
+                else _norm_text(expected) == _norm_text(actual)
+            )
+        elif dimension == COLOR:
+            left = canonical_color(expected)
+            right = canonical_color(actual)
+            hit = (
+                left == right
+                if left is not None and right is not None
+                else _norm_text(expected) == _norm_text(actual)
+            )
         elif dimension == PRINT_COLORS:
             hit = _decimal(expected) == _decimal(actual) and _decimal(expected) is not None
         elif dimension == WIDTH or dimension == LENGTH:

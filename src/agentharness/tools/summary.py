@@ -1,11 +1,8 @@
 """Shared tool-argument summarizer.
 
 Single source of truth for the compact ``args_summary`` embedded in ``tool_call_start``
-event payloads and rendered by the CLI / web inspector. The TypeScript twin lives in
-``web/src/trace/buildTurnTrace.ts`` (``summarizeArgs``) and must stay behaviourally
-identical — both are locked by tests (``tests/test_api_observability.py`` end-to-end
-assertion and ``web/src/trace/buildTurnTrace.test.ts`` snapshot) so the two cannot drift
-silently.
+event payloads and rendered by the run report / web inspector. Used by
+``engine.tool_execution`` when building invocation records and tool-start events.
 """
 
 from __future__ import annotations

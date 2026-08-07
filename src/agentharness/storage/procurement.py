@@ -244,19 +244,6 @@ class ProcurementRepo:
         ).fetchone()
         return _decode_row(row, "result_json")
 
-    def list_snapshots(self, request_id: str) -> list[dict[str, Any]]:
-        rows = self._reader().execute(
-            """SELECT * FROM procurement_comparison_snapshots
-               WHERE request_id = ? ORDER BY version DESC""",
-            (request_id,),
-        ).fetchall()
-        return [item for row in rows if (item := _decode_row(row, "result_json"))]
-
-    def create_decision(self, decision: dict[str, Any]) -> None:
-        safe = self.redactor.redact_obj(decision)
-        with self._lock:
-            self._insert_decision(safe)
-
     def commit_decision(
         self,
         decision: dict[str, Any],

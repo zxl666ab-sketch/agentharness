@@ -4,20 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import threading
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from agentharness.contracts import (
     Checkpoint,
-    ConversationTurn,
     EventEnvelope,
     Message,
-    MessageRole,
     RunRequest,
     RunResult,
-    RunStatus,
     ToolRecoveryDecision,
     ToolSpec,
 )
@@ -26,8 +21,6 @@ from agentharness.engine.tool_execution import validate_tool_spec
 from agentharness.providers.openai_adapter import OpenAIResponsesAdapter
 from agentharness.security.redaction import Redactor, default_redactor
 from agentharness.storage.sqlite import Storage
-
-EventCallback = Callable[[EventEnvelope], None]
 
 
 class Harness:
@@ -59,15 +52,13 @@ class Harness:
         self.providers: dict[str, Any] = providers or {
             "openai": OpenAIResponsesAdapter(),
         }
-        self._event_subs: list[EventCallback] = []
-        self._event_subs_lock = threading.RLock()
         self.engine = RunEngine(
             self.storage,
             self.providers,
             self.tools,
             redactor=self.redactor,
             approval_callback=approval_callback,
-            on_events=self._notify_events,
+            on_events=None,
             lease_owner_id=lease_owner_id,
             lease_ttl_s=lease_ttl_s,
             lease_heartbeat_s=lease_heartbeat_s,
@@ -215,85 +206,6 @@ class Harness:
     def unpin_run(self, run_id: str) -> bool:
         return self.storage.unpin_run(run_id)
 
-    def get_session_transcript(self, session_id: str) -> list[ConversationTurn]:
-        turns: list[ConversationTurn] = []
-        for run in self.storage.list_top_level_runs(session_id):
-            user_content = ""
-            assistant_parts: list[str] = []
-            for message in self.storage.get_messages(run["id"]):
-                if message.role == MessageRole.user and not user_content:
-                    user_content = message.content or ""
-                elif (
-                    message.role == MessageRole.assistant
-                    and message.content
-                    and not message.tool_calls
-                ):
-                    assistant_parts.append(message.content)
-            assistant_content = "".join(assistant_parts) or str(
-                run.get("output_summary") or ""
-            )
-            status_raw = run.get("status") or RunStatus.pending.value
-            try:
-                status: RunStatus | str = RunStatus(status_raw)
-            except ValueError:
-                status = str(status_raw)
-            turns.append(
-                ConversationTurn(
-                    run_id=run["id"],
-                    session_id=session_id,
-                    user_content=user_content,
-                    assistant_content=assistant_content,
-                    status=status,
-                    error=run.get("error"),
-                    provider=run.get("provider"),
-                    model=run.get("model"),
-                    started_at=run.get("created_at"),
-                    finished_at=run.get("finished_at"),
-                )
-            )
-        return turns
-
-    def subscribe_events(self, callback: EventCallback) -> Callable[[], None]:
-        with self._event_subs_lock:
-            self._event_subs.append(callback)
-
-        def unsubscribe() -> None:
-            with self._event_subs_lock:
-                try:
-                    self._event_subs.remove(callback)
-                except ValueError:
-                    pass
-
-        return unsubscribe
-
-    def _notify_events(self, events: list[EventEnvelope]) -> None:
-        with self._event_subs_lock:
-            subscribers = list(self._event_subs)
-        for event in events:
-            for callback in subscribers:
-                try:
-                    callback(event)
-                except Exception:  # noqa: BLE001 - one observer cannot break a run
-                    pass
-
-    def doctor(self) -> dict[str, Any]:
-        packaged_web = Path(__file__).resolve().parent / "web_dist" / "index.html"
-        source_web = Path(__file__).resolve().parents[2] / "web" / "dist" / "index.html"
-        return {
-            "data_dir": str(self.data_dir),
-            "db": str(self.storage.db_path),
-            "db_exists": self.storage.db_path.exists(),
-            "sqlite_integrity": self.storage.integrity_check(),
-            "schema_version": self.storage.schema_version(),
-            "web_build": "ready" if packaged_web.is_file() or source_web.is_file() else "missing",
-            "providers": list(self.providers),
-            "tools": list(self.tools),
-            "sessions": len(self.list_sessions()),
-            "runs": len(self.list_runs()),
-            "max_global_seq": self.storage.max_global_seq(),
-            "recovered_process_lost_runs": len(self.recovered_run_ids),
-        }
-
     async def aclose(self) -> None:
         if self._closed:
             return
@@ -331,8 +243,6 @@ class Harness:
                         await result
                 except Exception as exc:  # noqa: BLE001
                     errors.append(exc)
-        with self._event_subs_lock:
-            self._event_subs.clear()
         try:
             self.storage.close()
             self._closed = True
@@ -356,7 +266,5 @@ class Harness:
             return
         if self._has_open_async_resources():
             raise RuntimeError("Harness has live async resources; use `await harness.aclose()`")
-        with self._event_subs_lock:
-            self._event_subs.clear()
         self.storage.close()
         self._closed = True

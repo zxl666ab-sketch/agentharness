@@ -23,46 +23,11 @@ from pathlib import Path
 from typing import Any
 
 from agentharness.procurement.evaluation import load_frozen_truth
-from agentharness.rag.chunking import specification_summary
+from agentharness.rag.chunking import canonical_color, canonical_material, specification_summary
 from agentharness.rag.retriever import Retriever
 from agentharness.storage.sqlite import Storage
 
 EVAL_AS_OF = date(2026, 8, 7)
-
-_MATERIAL_ALIASES = {
-    "PE": ("pe", "聚乙烯", "polyethylene"),
-    "PVC": ("pvc", "聚氯乙烯", "polyvinyl chloride"),
-    "PP": ("pp", "聚丙烯", "polypropylene"),
-    "PET": ("pet", "聚对苯二甲酸乙二醇酯"),
-    "PLA": ("pla", "聚乳酸"),
-}
-_COLOR_ALIASES = {
-    "white": ("白色", "白", "white"),
-    "black": ("黑色", "黑", "black"),
-    "transparent": ("透明", "transparent", "clear"),
-    "red": ("红色", "红", "red"),
-    "blue": ("蓝色", "蓝", "blue"),
-}
-
-
-def _norm(value: Any) -> str:
-    return str(value or "").strip().casefold()
-
-
-def _canonical_material(value: Any) -> str | None:
-    text = _norm(value)
-    for canonical, aliases in _MATERIAL_ALIASES.items():
-        if any(alias in text for alias in aliases):
-            return canonical
-    return None
-
-
-def _canonical_color(value: Any) -> str | None:
-    text = _norm(value)
-    for canonical, aliases in _COLOR_ALIASES.items():
-        if any(alias in text for alias in aliases):
-            return canonical
-    return None
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -82,11 +47,11 @@ def _spec_compatible(
     size_tolerance_mm: Decimal,
     thickness_tolerance_um: Decimal,
 ) -> bool:
-    if _canonical_material(left.get("material")) != _canonical_material(
+    if canonical_material(left.get("material")) != canonical_material(
         right.get("material")
     ):
         return False
-    if _canonical_color(left.get("color")) != _canonical_color(right.get("color")):
+    if canonical_color(left.get("color")) != canonical_color(right.get("color")):
         return False
     if _decimal(left.get("print_colors")) != _decimal(right.get("print_colors")):
         return False

@@ -18,6 +18,40 @@ QUALITY_CORRECTED = "corrected"
 
 _LOW_CONFIDENCE_THRESHOLD = 0.8
 
+_MATERIAL_ALIASES: dict[str, tuple[str, ...]] = {
+    "PE": ("pe", "聚乙烯", "polyethylene"),
+    "PVC": ("pvc", "聚氯乙烯", "polyvinyl chloride"),
+    "PP": ("pp", "聚丙烯", "polypropylene"),
+    "PET": ("pet", "聚对苯二甲酸乙二醇酯"),
+    "PLA": ("pla", "聚乳酸"),
+}
+
+_COLOR_ALIASES: dict[str, tuple[str, ...]] = {
+    "white": ("白色", "白", "white"),
+    "black": ("黑色", "黑", "black"),
+    "transparent": ("透明", "transparent", "clear"),
+    "red": ("红色", "红", "red"),
+    "blue": ("蓝色", "蓝", "blue"),
+}
+
+
+def canonical_material(value: Any) -> str | None:
+    """Canonical material identity (PE/聚乙烯/polyethylene -> PE)."""
+    text = str(value or "").strip().casefold()
+    for canonical, aliases in _MATERIAL_ALIASES.items():
+        if any(alias in text for alias in aliases):
+            return canonical
+    return None
+
+
+def canonical_color(value: Any) -> str | None:
+    """Canonical color identity (白色/白/white -> white)."""
+    text = str(value or "").strip().casefold()
+    for canonical, aliases in _COLOR_ALIASES.items():
+        if any(alias in text for alias in aliases):
+            return canonical
+    return None
+
 
 def canonical_facts(
     *,
@@ -204,7 +238,9 @@ __all__ = [
     "QUALITY_CORRECTED",
     "QUALITY_LOW_CONFIDENCE",
     "build_chunk",
+    "canonical_color",
     "canonical_facts",
+    "canonical_material",
     "chunk_sha256",
     "quality_flags_for_quote",
     "specification_summary",
