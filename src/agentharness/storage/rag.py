@@ -9,6 +9,7 @@ analysis inputs.
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any
 
 from agentharness.security.redaction import Redactor
@@ -193,8 +194,9 @@ class RagRepo:
                 ]
                 if decoded:
                     return decoded
-            except Exception:
-                # FTS5 may be unavailable on unusual builds; LIKE fallback below.
+            except sqlite3.OperationalError:
+                # FTS5 may be unavailable on unusual builds or reject the query
+                # syntax; LIKE fallback below. Real database errors still raise.
                 pass
         return self._like_search(query, limit=limit)
 

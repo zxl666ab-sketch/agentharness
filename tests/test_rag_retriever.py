@@ -188,6 +188,46 @@ def test_retriever_is_deterministic(data_dir) -> None:  # type: ignore[no-untype
         storage.close()
 
 
+def test_retriever_normalizes_material_and_color_aliases(data_dir) -> None:  # type: ignore[no-untyped-def]
+    storage = Storage(data_dir)
+    try:
+        # Chunk uses Chinese/alias values; query uses canonical codes.
+        storage.rag.upsert_chunk(
+            _chunk(
+                "2" * 63 + "2",
+                specifications={
+                    "width_mm": "250",
+                    "length_mm": "350",
+                    "thickness_um": "60",
+                    "material": "聚乙烯",
+                    "color": "白",
+                    "print_colors": 1,
+                },
+                decision_at="2026-07-10T00:00:00+00:00",
+            )
+        )
+        retriever = Retriever(storage)
+        results = retriever.retrieve(
+            request=_request(
+                specifications={
+                    "width_mm": "250",
+                    "length_mm": "350",
+                    "thickness_um": "60",
+                    "material": "PE",
+                    "color": "白色",
+                    "print_colors": 1,
+                }
+            ),
+            now=date(2026, 7, 15),
+        )
+        assert len(results) == 1
+        assert results[0]["chunk_sha256"] == "2" * 63 + "2"
+        assert results[0]["spec_match"]["material"] is True
+        assert results[0]["spec_match"]["color"] is True
+    finally:
+        storage.close()
+
+
 def test_retriever_missing_fields_are_penalized(data_dir) -> None:  # type: ignore[no-untyped-def]
     storage = Storage(data_dir)
     try:
