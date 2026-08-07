@@ -437,6 +437,18 @@ class ProcurementRepo:
         payload = json.loads(row[0] or "{}")
         return payload if isinstance(payload, dict) else None
 
+    def list_knowledge_feedback_events(self) -> list[dict[str, Any]]:
+        rows = self._reader().execute(
+            """SELECT * FROM procurement_audit_events
+               WHERE type LIKE 'knowledge_reference_%'
+               ORDER BY created_at ASC, id ASC"""
+        ).fetchall()
+        return [
+            item
+            for row in rows
+            if (item := _decode_row(row, "payload_json")) is not None
+        ]
+
     def list_audit_events(self, request_id: str) -> list[dict[str, Any]]:
         rows = self._reader().execute(
             """SELECT * FROM procurement_audit_events
