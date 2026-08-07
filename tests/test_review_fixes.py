@@ -38,8 +38,8 @@ def test_invocation_stage_survives_truncated_json() -> None:
     """A tool result truncated to max_inline_tool_result_bytes with an artifact
     suffix must still expose its stage marker for the deterministic stage machine."""
     content = (
-        '{"ok":true,"stage":"analysis_completed","request_id":"abcdef0123456789abcdef0123456789",'
-        '"recommendation_explanation":["...'
+        '{"ok":true,"stage":"requirement_captured","request_id":"abcdef0123456789abcdef0123456789",'
+        '"requirement":{...'
         "\n...[artifact:0123456789abcdef sha=0123456789ab]"
     )
     invocation = ToolInvocationRecord(
@@ -53,10 +53,13 @@ def test_invocation_stage_survives_truncated_json() -> None:
         status=ToolInvocationStatus.succeeded,
         result=ToolResult(tool_call_id="p-1", name="procurement_capture_requirement", content=content),
     )
-    assert _invocation_stage(invocation) == "analysis_completed"
+    assert _invocation_stage(invocation) == "requirement_captured"
 
 
-def test_stage_machine_advances_on_truncated_capture_result() -> None:
+def test_stage_machine_advances_to_analysis_after_capture() -> None:
+    """After a successful capture (even a truncated one) the run advances from
+    the capture stage to the analysis stage; only a succeeded
+    ``procurement_execute_analysis`` advances to the approve stage."""
     request = RunRequest(
         message="x",
         metadata={
@@ -70,12 +73,6 @@ def test_stage_machine_advances_on_truncated_capture_result() -> None:
                     "name": "analysis",
                     "tools": ["procurement_execute_analysis"],
                     "advance_on": ["procurement_execute_analysis"],
-                    "advance_on_result": [
-                        {
-                            "tool": "procurement_capture_requirement",
-                            "stage": "analysis_completed",
-                        }
-                    ],
                 },
                 {
                     "name": "approve",
@@ -99,12 +96,12 @@ def test_stage_machine_advances_on_truncated_capture_result() -> None:
             tool_call_id="p-1",
             name="procurement_capture_requirement",
             content=(
-                '{"ok":true,"stage":"analysis_completed","request_id":"abcdef0123456789abcdef0123456789"'
+                '{"ok":true,"stage":"requirement_captured","request_id":"abcdef0123456789abcdef0123456789"'
                 "\n...[artifact:0123456789abcdef sha=0123456789ab]"
             ),
         ),
     )
-    assert current_stage_index(request, [invocation]) == 2
+    assert current_stage_index(request, [invocation]) == 1
 
 
 # ---------------------------------------------------------------- H2
