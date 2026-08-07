@@ -7,6 +7,7 @@ from typing import Any
 
 from agentharness.security.redaction import Redactor
 from agentharness.storage.core import StorageCore, _dumps, _utcnow
+from agentharness.storage.rag import RagRepo
 
 
 def _decode_row(row: Any, *json_columns: str) -> dict[str, Any] | None:
@@ -260,9 +261,12 @@ class ProcurementRepo:
         self,
         decision: dict[str, Any],
         audit_event: dict[str, Any],
+        *,
+        rag_chunks: list[dict[str, Any]] | None = None,
     ) -> None:
         safe_decision = self.redactor.redact_obj(decision)
         safe_event = self.redactor.redact_obj(audit_event)
+        safe_chunks = self.redactor.redact_obj(rag_chunks or [])
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -283,6 +287,12 @@ class ProcurementRepo:
                 if cursor.rowcount != 1:
                     raise ValueError("采购任务不存在或已经完成审批")
                 self._insert_audit_event(safe_event)
+                if safe_chunks:
+                    # Same transaction: a failed approval must not leave
+                    # knowledge chunks behind (atomic index + business facts).
+                    rag = RagRepo(self._core, self.redactor)
+                    for chunk in safe_chunks:
+                        rag.upsert_chunk(chunk)
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -392,6 +402,7 @@ class ProcurementRepo:
                 self._conn.execute(
                     f"DELETE FROM {table} WHERE request_id = ?", (request_id,)
                 )
+            RagRepo(self._core, self.redactor).delete_chunks_for_request(request_id)
             self._conn.execute(
                 "DELETE FROM procurement_requests WHERE id = ?", (request_id,)
             )
