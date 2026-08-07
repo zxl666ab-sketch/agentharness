@@ -267,9 +267,11 @@ async def test_procurement_model_config_persists_and_restores_on_restart(
         await restored.aclose()
 
 
-def test_procurement_env_is_default_and_persisted_fields_override_it(
+def test_procurement_env_is_default_and_wins_over_persisted_ui_fields(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # .env is the single source of truth: a stale UI-saved config file must
+    # never override OPENAI_MODEL / OPENAI_BASE_URL / OPENAI_API_KEY.
     monkeypatch.setenv("AGENTHARNESS_PROCUREMENT_PROVIDER", "openai")
     monkeypatch.setenv("AGENTHARNESS_PROCUREMENT_MODEL", "env-default-model")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://env.example/v1")
@@ -281,7 +283,7 @@ def test_procurement_env_is_default_and_persisted_fields_override_it(
     harness = Harness(data_dir=data_dir)
     agent = ProcurementAgent(harness, ProcurementService(harness))
     try:
-        assert agent.run_profile.model == "ui-override-model"
+        assert agent.run_profile.model == "env-default-model"
         assert agent.run_profile.base_url == "https://env.example/v1"
         assert agent.run_profile.api_key == "sk-env-default"
     finally:
