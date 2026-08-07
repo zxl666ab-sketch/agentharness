@@ -123,10 +123,10 @@ def _build_scenarios(scenarios_dir: Path, limit: int | None) -> list[dict[str, A
     return scenarios
 
 
-def _capture_succeeded(harness: Harness, run_id: str) -> bool:
-    """True when the model's procurement_capture_requirement call succeeded."""
+def _tool_succeeded(harness: Harness, run_id: str, tool_name: str) -> bool:
+    """True when the named tool invocation succeeded in this run."""
     for invocation in harness.storage.list_tool_invocations(run_id):
-        if invocation.tool_name != "procurement_capture_requirement":
+        if invocation.tool_name != tool_name:
             continue
         if invocation.status.value in {"succeeded", "completed"} and not invocation.error_code:
             return True
@@ -188,16 +188,20 @@ async def _run_scenario(
         run = harness.get_run(run_id)
         request = service.get_request(accepted["purchase_request_id"])
         comparison = request.get("comparison")
-        capture_ok = _capture_succeeded(harness, run_id)
-        # 分析成功 = 产出比价快照；或 capture 成功且进入“待人工复核”的合法门禁。
-        # 模型连 capture 都没成功（工具校验失败/未调用）时不得计为成功，
+        capture_ok = _tool_succeeded(harness, run_id, "procurement_capture_requirement")
+        execute_ok = _tool_succeeded(harness, run_id, "procurement_execute_analysis")
+        # 两阶段失败分离后，分析成功 = 产出比价快照；或 capture 与 execute_analysis
+        # 都成功且进入“待人工复核”的合法门禁。任何一步未成功都不得计为成功，
         # 否则 require_human 会掩盖真实失败（历史口径曾把 100% 掩盖为通过）。
         analysis_ok = comparison is not None or (
-            capture_ok and run_result.status.value in {"completed", "require_human"}
+            capture_ok
+            and execute_ok
+            and run_result.status.value in {"completed", "require_human"}
         )
         result["status"] = run_result.status.value
         result["error"] = run_result.error
         result["capture_succeeded"] = capture_ok
+        result["execute_succeeded"] = execute_ok
         result["analysis_success"] = bool(analysis_ok)
         result["comparison_produced"] = comparison is not None
         try:

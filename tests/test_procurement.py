@@ -2198,7 +2198,7 @@ async def test_cancelled_approval_request_cannot_commit_in_background(
 
 
 @pytest.mark.asyncio
-async def test_complete_procurement_scenario_uses_one_run_and_three_model_turns(
+async def test_complete_procurement_scenario_uses_one_run_and_four_model_turns(
     data_dir: Path,
     workspace: Path,
 ) -> None:
@@ -2247,9 +2247,11 @@ async def test_complete_procurement_scenario_uses_one_run_and_three_model_turns(
             ).json()
 
             assert len(harness.list_runs()) == 1
-            assert runtime_report["usage"]["model_turns"] == 3
+            # 两阶段拆分后：capture -> execute_analysis -> 文本 -> approve = 4 轮
+            assert runtime_report["usage"]["model_turns"] == 4
             assert {item["tool_name"] for item in invocations} == {
                 "procurement_capture_requirement",
+                "procurement_execute_analysis",
                 "procurement_approve_supplier",
             }
             assert any(
@@ -2968,8 +2970,10 @@ async def test_procurement_conversation_uses_harness_and_pauses_for_quote_review
         assert detail["unresolved_field_count"] == 1
         assert detail["comparison"] is None
         assert checkpoint["status"] == "require_human"
+        # capture 只保存需求，execute_analysis 执行比价并停在待复核门禁
         assert [item["tool_name"] for item in invocations] == [
             "procurement_capture_requirement",
+            "procurement_execute_analysis",
         ]
 
     await app.state.run_supervisor.aclose()
@@ -3049,7 +3053,8 @@ async def test_procurement_human_review_resumes_same_run_and_builds_comparison(
         }
         assert "procurement_correct_quote" not in actual_tools
         usage = json.loads(run["usage_json"])
-        assert usage["model_turns"] <= 4
+        # 初始 capture+execute+文本=3，人工修正后 analyze 重跑 execute=2，合计 5
+        assert usage["model_turns"] <= 6
 
     await app.state.procurement_agent.aclose()
     await app.state.run_supervisor.aclose()
@@ -3142,7 +3147,8 @@ async def test_procurement_supplier_decision_is_a_harness_approval(
         assert report["decision"]["approval_id"] == approvals[-1]["id"]
         assert report["runtime"]["run_id"] == run_id
         usage = json.loads(completed["usage_json"])
-        assert usage["model_turns"] <= 5
+        # 初始 capture+execute+文本=3，修正后 execute=1，analyze 重跑 execute=1，审批=1 → 6
+        assert usage["model_turns"] <= 7
 
     await app.state.procurement_agent.aclose()
     await app.state.run_supervisor.aclose()
@@ -3733,6 +3739,9 @@ async def test_failed_capture_terminates_at_require_human(data_dir: Path) -> Non
         # Natural-language dimensions are not extracted, so the captured width is 0
         # and fails the domain's exclusive-minimum validation.
         assert "宽度" in failed.result.content
+        # 两阶段失败分离：校验失败必须带字段级原因与可操作修正提示
+        assert "需求结构化校验失败" in failed.result.content
+        assert "请修正" in failed.result.content
 
         run = harness.get_run(run_id)
         assert run["status"] == "require_human"
