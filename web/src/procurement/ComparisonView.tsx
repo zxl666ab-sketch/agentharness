@@ -15,7 +15,12 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
-import type { ComparisonQuote, ProcurementRequest } from "./types";
+import { KnowledgeReferences } from "./KnowledgeReferences";
+import type {
+  ComparisonQuote,
+  KnowledgeFeedbackAction,
+  ProcurementRequest,
+} from "./types";
 
 type Props = {
   request: ProcurementRequest;
@@ -24,6 +29,7 @@ type Props = {
   onAnalyze: () => Promise<void>;
   onApprove: (quoteId: string, note: string) => Promise<void>;
   onNoAward: (note: string) => Promise<void>;
+  onKnowledgeFeedback?: (chunkId: string, action: KnowledgeFeedbackAction) => void;
 };
 
 function money(value: string, currency: string) {
@@ -47,7 +53,15 @@ function QuoteStatus({ quote }: { quote: ComparisonQuote }) {
   );
 }
 
-export function ComparisonView({ request, busy, error, onAnalyze, onApprove, onNoAward }: Props) {
+export function ComparisonView({
+  request,
+  busy,
+  error,
+  onAnalyze,
+  onApprove,
+  onNoAward,
+  onKnowledgeFeedback,
+}: Props) {
   const snapshot = request.comparison;
   const result = snapshot?.result;
   const [selectedId, setSelectedId] = useState<string | null>(
@@ -92,6 +106,10 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove, onN
           生成比价
         </button>
         {error ? <p className="proc-inline-error" role="alert">{error}</p> : null}
+        <KnowledgeReferences
+          references={request.knowledge_references || []}
+          onFeedback={onKnowledgeFeedback}
+        />
       </section>
     );
   }
@@ -120,6 +138,11 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove, onN
           <span><strong>{result.ruleset_version}</strong>规则集</span>
         </div>
       </header>
+
+      <KnowledgeReferences
+        references={request.knowledge_references || []}
+        onFeedback={onKnowledgeFeedback}
+      />
 
       <div className="proc-comparison-table-wrap">
         <table className="proc-comparison-table">
