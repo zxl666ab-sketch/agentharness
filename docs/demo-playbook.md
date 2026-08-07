@@ -48,7 +48,15 @@ uv run agentharness --workspace . --data-dir output/procurement-demo-run-v3 --po
 - 浏览器闭环：1 个 Run、3 次工具、1 次一次性审批、5 个模型回合、212 Token、Fake Provider 费用 0；控制台 0 错误/0 警告。
 - 原始指标、三张截图和中文审批报告见 [`docs/evidence/`](evidence/README.md)，可用 `evaluate_procurement.py verify` 独立复算。
 
-当前 v3 没有可复用的真人对照和真实模型公开证据，因此不要写“显著提效”“真实企业上线”“真实模型总体准确率”或历史模型费用。
+当前 v3 的真人对照仍为“待实测”（阶段六 assisted vs assisted+RAG），因此不要写“显著提效”“真实企业上线”“真实模型总体准确率”或历史模型费用；阶段六真实模型验证（deepseek-v4-flash）记录见 `docs/evidence/stage-6-real-model-2026-08-07.md`，检索质量冻结评测见 `docs/evidence/rag-retrieval-2026-08-07.md`（0 模型调用，与确定性指标分层呈现）。
+
+## 有记忆、能提效（阶段六面试叙事）
+
+- **一句话**：按物料规格相似度检索本地已成交历史（供应商、成交价、到货成本、交期、是否成交、来源哈希），自动注入比价页与 Agent 推荐说明；只做参考，绝不进入 `input_sha256` 与比价快照。
+- **实现**：混合召回（FTS5 关键词 + 结构化规格容差，无向量/embedding）→ rerank（规格匹配度 × 时间衰减 × 供应商口碑 × 数据质量，top-20→top-5）→ 分级注入（自动 top-3、前端展开 top-5，token 预算断言）→ 反馈闭环（`knowledge_reference_viewed/adopted` 只记 chunk_id 与动作，采纳计数回喂 rerank 口碑因子）。
+- **索引与业务事实联动**：审批落库同事务写 chunk；人工修正报价字段同步更新 chunk；低置信度来源打 `low_confidence` 标记降权；`scripts/rebuild_rag_index.py` 幂等全量重建（0 模型调用）。
+- **确定性隔离**：`canonical_analysis_input()` 不含任何 RAG 字段；回归测试证明历史数据变化不改变 `analysis_input_sha256`/快照哈希；治理面仍 4 个白名单工具，检索是 `execute_analysis_pipeline` 的一个内部阶段。
+- **证据**：检索冻结评测 recall@1 0.0714、precision@1 0.9286、MRR 0.9464、top-1 命中率 92.86%（0 模型调用）；真实模型 run `09528bf7…`：比价页 5 条参考、2 回合、$0.0051、预算内；真人对照待实测，不虚构提效比例。
 
 ## 简历描述
 
