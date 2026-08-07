@@ -702,7 +702,31 @@
 .proc-knowledge-more { display: inline-flex; align-items: center; gap: 5px; margin-top: 8px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-subtle); color: var(--text-secondary); font-size: 11px; cursor: pointer; }
 .proc-knowledge-chevron { transition: transform 0.15s ease; }
 .proc-knowledge-chevron.open { transform: rotate(180deg); }
-.proc-knowledge-dialog { width: min(520px, 92vw); }
+.proc-knowledge-dialog {
+  width: min(520px, 92vw);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-md);
+}
+.proc-knowledge-dialog > header {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.proc-knowledge-dialog > header > div { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); }
+.proc-knowledge-dialog h2 { margin: 0; color: var(--text); font-size: var(--text-lg); }
 .proc-knowledge-detail { display: grid; gap: 8px; margin: 0; padding: 14px 18px 16px; }
 .proc-knowledge-detail div { display: grid; grid-template-columns: 88px 1fr; gap: 10px; align-items: baseline; }
 .proc-knowledge-detail dt { color: var(--text-muted); font-size: 11px; }
