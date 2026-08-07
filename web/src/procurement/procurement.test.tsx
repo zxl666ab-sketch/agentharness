@@ -200,6 +200,39 @@ describe("procurement workflow views", () => {
     expect(html).toContain('aria-label="补充澄清信息"');
   });
 
+  it("renders a completed run as finished instead of waiting after refresh", () => {
+    const queryClient = new QueryClient();
+    const completedRequest: ProcurementRequest = {
+      ...request,
+      status: "analyzed",
+      analysis_run_id: "run-completed",
+      unresolved_field_count: 0,
+    };
+    queryClient.setQueryData(["procurement-run", "run-completed"], {
+      id: "run-completed",
+      status: "completed",
+      error: null,
+    });
+    queryClient.setQueryData(["procurement-messages", "run-completed"], []);
+    queryClient.setQueryData(["procurement-tools", "run-completed"], []);
+
+    const html = renderToString(
+      <QueryClientProvider client={queryClient}>
+        <ProcurementConversation
+          request={completedRequest}
+          streamLive
+          onResume={async () => undefined}
+          onRecover={async () => undefined}
+          onOpenComparison={() => undefined}
+        />
+      </QueryClientProvider>
+    );
+
+    expect(html).toContain("采购决策已完成");
+    expect(html).not.toContain("等待运行");
+    expect(html).not.toContain("Agent 正在分析报价");
+  });
+
   it("uses the server quote limit for a 30-file blind-test batch", () => {
     const html = renderToString(
       <NewProcurementConversation

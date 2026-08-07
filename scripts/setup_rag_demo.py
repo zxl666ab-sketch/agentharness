@@ -14,6 +14,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from agentharness.contracts import RunStatus
 from agentharness.harness import Harness
 from agentharness.procurement.evaluation import build_case_document, load_frozen_truth
 from agentharness.procurement.parsing import parse_quote
@@ -81,6 +82,7 @@ def main() -> None:
                 run_id=run_id,
                 session_id=str(history["session_id"]),
                 root_run_id=run_id,
+                status=RunStatus.completed,
             )
             snapshot = service.compare_for_agent(str(history["id"]), run_id=run_id)
             service.approve_supplier_from_agent(
@@ -93,6 +95,7 @@ def main() -> None:
                 note=f"演示历史成交 {index + 1}",
                 actor="演示员",
             )
+            harness.storage.update_run(run_id, finished=True)
             history_ids.append(str(history["id"]))
 
         # Matching request -> history references shown.
@@ -103,8 +106,10 @@ def main() -> None:
             run_id=run_id,
             session_id=str(matching["session_id"]),
             root_run_id=run_id,
+            status=RunStatus.completed,
         )
         result = service.execute_analysis_pipeline(str(matching["id"]), run_id=run_id)
+        harness.storage.update_run(run_id, finished=True)
         assert result["knowledge_references"], "matching request should see history"
 
         print(f"数据目录：{args.data_dir}")
