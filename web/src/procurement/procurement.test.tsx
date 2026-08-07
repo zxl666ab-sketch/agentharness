@@ -1,8 +1,12 @@
+﻿import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 
 import { ComparisonView } from "./ComparisonView";
+import { DashboardView } from "./DashboardView";
+import { KnowledgeReferences } from "./KnowledgeReferences";
 import { friendlyProcurementError } from "./api";
 import {
   NewProcurementConversation,
@@ -197,6 +201,39 @@ describe("procurement workflow views", () => {
     expect(html).toContain('aria-label="补充澄清信息"');
   });
 
+  it("renders a completed run as finished instead of waiting after refresh", () => {
+    const queryClient = new QueryClient();
+    const completedRequest: ProcurementRequest = {
+      ...request,
+      status: "analyzed",
+      analysis_run_id: "run-completed",
+      unresolved_field_count: 0,
+    };
+    queryClient.setQueryData(["procurement-run", "run-completed"], {
+      id: "run-completed",
+      status: "completed",
+      error: null,
+    });
+    queryClient.setQueryData(["procurement-messages", "run-completed"], []);
+    queryClient.setQueryData(["procurement-tools", "run-completed"], []);
+
+    const html = renderToString(
+      <QueryClientProvider client={queryClient}>
+        <ProcurementConversation
+          request={completedRequest}
+          streamLive
+          onResume={async () => undefined}
+          onRecover={async () => undefined}
+          onOpenComparison={() => undefined}
+        />
+      </QueryClientProvider>
+    );
+
+    expect(html).toContain("采购决策已完成");
+    expect(html).not.toContain("等待运行");
+    expect(html).not.toContain("Agent 正在分析报价");
+  });
+
   it("uses the server quote limit for a 30-file blind-test batch", () => {
     const html = renderToString(
       <NewProcurementConversation
@@ -316,3 +353,225 @@ describe("procurement workflow views", () => {
     expect(markdown).toContain("分析运行 ID：run");
   });
 });
+describe("历史成交参考（stage-6 RAG）", () => {
+  function reference(index: number) {
+    const id = `chunk-${index}`;
+    return {
+      chunk_id: id,
+      chunk_sha256: id.padEnd(64, "0"),
+      request_reference: `RFQ-2026060${index}-HISTORY`,
+      decision_at: `2026-06-0${index}T00:00:00+00:00`,
+      supplier_name: `供应商${index}`,
+      item_name: "快递袋",
+      specification_summary: "250×350mm / 60μm / PE / 白色 / 1色",
+      unit_price: "0.42",
+      currency: "CNY",
+      landed_unit_cost: "0.4521",
+      lead_days: 10,
+      moq: 5000,
+      decision: "approved",
+      source_sha256: "9".repeat(64),
+      score: "0.93",
+      quality_flags: [],
+      text: `RFQ-2026060${index}-HISTORY 供应商${index} 快递袋`,
+    };
+  }
+
+  function references(count: number) {
+    return Array.from({ length: count }, (_, index) => reference(index + 1));
+  }
+
+  it("shows top-3 by default with traceable source and expandable top-5", () => {
+    const withHistory = analyzed();
+    withHistory.knowledge_references = references(5);
+    const html = renderToString(
+      <ComparisonView
+        request={withHistory}
+        busy={null}
+        onAnalyze={async () => undefined}
+        onApprove={async () => undefined}
+        onNoAward={async () => undefined}
+        onKnowledgeFeedback={() => undefined}
+      />
+    );
+    expect(html).toContain("历史成交参考");
+    expect(html).toContain("供应商1");
+    expect(html).toContain("供应商2");
+    expect(html).toContain("供应商3");
+    expect(html).not.toContain("供应商4");
+    expect(html).toContain("展开全部 5 条");
+    expect(html).toContain("已成交");
+    expect(html).toContain("RFQ-20260601-HISTORY");
+    expect(html).toContain("查看详情");
+    expect(html).toContain("有帮助");
+  });
+
+  it("shows the empty state when there is no similar history", () => {
+    const noHistory = analyzed();
+    noHistory.knowledge_references = [];
+    const html = renderToString(
+      <ComparisonView
+        request={noHistory}
+        busy={null}
+        onAnalyze={async () => undefined}
+        onApprove={async () => undefined}
+        onNoAward={async () => undefined}
+      />
+    );
+    expect(html).toContain("暂无相似历史成交");
+  });
+
+  it("expands from top-3 to top-5 and records viewed/adopted feedback", async () => {
+    const calls: Array<[string, string]> = [];
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <KnowledgeReferences
+          references={references(5)}
+          onFeedback={(chunkId, action) => calls.push([chunkId, action])}
+        />
+      );
+    });
+    expect(container.querySelectorAll(".proc-knowledge-table tbody tr").length).toBe(3);
+    const more = container.querySelector("button.proc-knowledge-more") as HTMLButtonElement;
+    await act(async () => {
+      more.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(container.querySelectorAll(".proc-knowledge-table tbody tr").length).toBe(5);
+
+    const viewButton = container.querySelector(
+      'button[aria-label^="查看详情"]'
+    ) as HTMLButtonElement;
+    await act(async () => {
+      viewButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const adoptButton = container.querySelector(
+      'button[aria-label^="有帮助"]'
+    ) as HTMLButtonElement;
+    await act(async () => {
+      adoptButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(calls).toEqual([
+      ["chunk-1".padEnd(64, "0"), "viewed"],
+      ["chunk-1".padEnd(64, "0"), "adopted"],
+    ]);
+    expect(container.textContent).toContain("来源哈希");
+    await act(async () => {
+      root.unmount();
+    });
+    document.body.removeChild(container);
+  });
+});
+
+  it("hides manual correction after approval and keeps cancel for review fields", () => {
+    const approvedRequest: ProcurementRequest = {
+      ...request,
+      status: "approved",
+      unresolved_field_count: 0,
+      quote_count: 2,
+      decision: {
+        id: "decision",
+        request_id: "request",
+        snapshot_id: "snapshot",
+        quote_id: "quote-alpha",
+        run_id: "run",
+        approval_id: "approval",
+        decision: "approved",
+        actor: "采购员",
+        created_at: "2026-07-27T00:00:03Z",
+      },
+    };
+    const html = renderToString(
+      <QuoteWorkspace
+        request={approvedRequest}
+        meta={meta}
+        busy={null}
+        onUpload={async () => undefined}
+        onCorrect={async () => undefined}
+        onAnalyze={async () => undefined}
+      />
+    );
+    // Accepted field: the pencil edit entry must disappear once approved.
+    expect(html).not.toContain('aria-label="修正报价"');
+    // needs_review field: the inline editor keeps a cancel affordance instead
+    // of trapping the buyer with no way out.
+    expect(html).toContain('aria-label="取消供应商修正"');
+  });
+
+  it("highlights the actually approved supplier after approval", () => {
+    const approvedRequest: ProcurementRequest = {
+      ...analyzed(),
+      status: "approved",
+      decision: {
+        id: "decision",
+        request_id: "request",
+        snapshot_id: "snapshot",
+        quote_id: "quote-delta",
+        run_id: "run",
+        approval_id: "approval",
+        decision: "approved",
+        actor: "采购员",
+        created_at: "2026-07-27T00:00:03Z",
+      },
+    };
+    const html = renderToString(
+      <ComparisonView
+        request={approvedRequest}
+        busy={null}
+        onAnalyze={async () => undefined}
+        onApprove={async () => undefined}
+        onNoAward={async () => undefined}
+      />
+    );
+    expect(html).toContain("供应商已人工批准：");
+    expect(html).toContain("Delta Factory");
+    expect(html).toContain('class="excluded selected"');
+    expect(html).not.toContain('class="eligible selected"');
+  });
+
+
+  it("renders the operations dashboard from cached metrics and runs", () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(["proc-runs"], {
+      items: [
+        {
+          id: "run-abc",
+          session_id: "s",
+          root_run_id: "run-abc",
+          status: "completed",
+          model: "procurement-fake-v1",
+          usage_json: JSON.stringify({ total_tokens: 1200, estimated_cost_usd: 0.5 }),
+          created_at: "2026-07-27T00:00:00Z",
+          updated_at: "2026-07-27T00:00:00Z",
+        },
+      ],
+      total: 1,
+      offset: 0,
+      has_more: false,
+    });
+    queryClient.setQueryData(["proc-metrics-summary"], {
+      runs: 1,
+      by_status: { completed: 1 },
+      by_model: { "procurement-fake-v1": 1 },
+      tokens: { input: 800, output: 400, cached_input: 0, total: 1200 },
+      model_turns: 2,
+      estimated_cost_usd: 0.5,
+      cost_unknown_runs: 0,
+      cache_hit_rate: 0.0,
+      avg_duration_ms: 1200,
+      duration_runs: 1,
+      budget_warnings: 0,
+    });
+
+    const html = renderToString(
+      <QueryClientProvider client={queryClient}>
+        <DashboardView />
+      </QueryClientProvider>
+    );
+    expect(html).toContain("运营仪表盘");
+    expect(html).toContain("run-abc");
+    expect(html).toContain("$0.5000");
+    expect(html).toContain("1,200");
+  });

@@ -5,22 +5,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from agentharness.contracts import Message, MessageRole, RunStatus
+from agentharness.contracts import Message, RunStatus
 
 # Statuses whose messages are eligible for multi-turn context splicing.
 HISTORY_ELIGIBLE_STATUSES = frozenset({RunStatus.completed.value})
 
-# Statuses excluded from context history (still shown in transcripts).
-HISTORY_EXCLUDED_STATUSES = frozenset(
-    {
-        RunStatus.failed.value,
-        RunStatus.cancelled.value,
-        RunStatus.interrupted.value,
-        RunStatus.pending.value,
-        RunStatus.running.value,
-        RunStatus.waiting_approval.value,
-    }
-)
 
 def collapse_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip())
@@ -66,13 +55,3 @@ def assemble_session_history_messages(
         msgs = messages_by_run.get(rid) or []
         out.extend(msgs)
     return out
-
-
-def first_user_content(messages: list[Message]) -> str | None:
-    for m in messages:
-        role = m.role.value if hasattr(m.role, "value") else m.role
-        if role == MessageRole.user.value or role == "user":
-            content = (m.content or "").strip()
-            if content:
-                return m.content
-    return None

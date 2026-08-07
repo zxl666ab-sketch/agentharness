@@ -112,6 +112,13 @@ class EventRepo:
         ).fetchone()
         return int(row[0])
 
+    def count_events_by_type(self, event_type: str) -> int:
+        """Global count of events of a type (used by the metrics summary)."""
+        row = self._reader().execute(
+            "SELECT COUNT(*) FROM events WHERE type = ?", (event_type,)
+        ).fetchone()
+        return int(row[0]) if row else 0
+
     def get_context_manifests(self, run_id: str) -> list[dict[str, Any]]:
         """Return redacted, ordered per-model-turn context manifests."""
         manifests: list[dict[str, Any]] = []

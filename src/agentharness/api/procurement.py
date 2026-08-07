@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import sqlite3
 from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
@@ -49,7 +50,7 @@ class ProcurementConstraints(BaseModel):
     max_lead_days: int = Field(default=15, ge=1, le=365)
     invoice_required: bool = True
     size_tolerance_mm: Decimal = Field(default=Decimal("2"), ge=0, le=100)
-    thickness_tolerance_um: Decimal = Field(default=Decimal("3"), ge=0, le=100)
+    thickness_tolerance_um: Decimal = Field(default=Decimal("3"), ge=0, le=5_000)
     max_landed_unit_cost: Decimal | None = Field(default=None, gt=0)
     destination: str = Field(default="", max_length=300)
     required_delivery_date: date | None = None
@@ -119,6 +120,13 @@ class ConversationAttachment(ImportQuoteBody):
     pass
 
 
+class KnowledgeFeedbackBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chunk_id: str = Field(min_length=64, max_length=64, pattern="^[0-9a-f]{64}$")
+    action: Literal["viewed", "adopted"]
+
+
 class StartProcurementConversationBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -175,6 +183,7 @@ class ApproveSupplierBody(BaseModel):
     confirmed: bool
     note: str | None = Field(default=None, max_length=2_000)
     actor: str = Field(default="采购员", min_length=1, max_length=100)
+    review_ack: bool = False
 
 
 class ProcurementModelConfigBody(BaseModel):
@@ -197,6 +206,7 @@ class ProcurementModelConfigBody(BaseModel):
     ai_review_enabled: bool | None = None
     review_provider: str | None = Field(default=None, max_length=100)
     review_model: str | None = Field(default=None, max_length=200)
+    review_policy: Literal["off", "evidence", "warn", "gate"] | None = None
 
     @field_validator("model")
     @classmethod
@@ -226,7 +236,16 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
                 actor=body.actor,
             )
         except (ProcurementError, QuoteParseError) as exc:
-            raise HTTPException(400, str(exc)) from exc
+            # Keep 400 for parse/validation failures but use 409 for the
+            # post-approval edit guard so the frontend treats it like the
+            # correction endpoint (semantically a state conflict).
+            status_code = (
+                409
+                if isinstance(exc, ProcurementError)
+                and "已形成审批结论" in str(exc)
+                else 400
+            )
+            raise HTTPException(status_code, str(exc)) from exc
 
     @router.post("/requests/{request_id}/cancel-run", status_code=200)
     async def cancel_run(request_id: str) -> dict[str, Any]:
@@ -312,7 +331,9 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
         try:
             data = body.decode()
             extracted = await asyncio.wait_for(
-                asyncio.to_thread(parse_quote, body.filename, data),
+                asyncio.to_thread(
+                    parse_quote, body.filename, data, time_budget_s=10.0
+                ),
                 timeout=10,
             )
             return await asyncio.to_thread(
@@ -327,7 +348,16 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
         except KeyError:
             raise HTTPException(404, "未找到采购需求") from None
         except (ProcurementError, QuoteParseError) as exc:
-            raise HTTPException(400, str(exc)) from exc
+            # Keep 400 for parse/validation failures but use 409 for the
+            # post-approval edit guard so the frontend treats it like the
+            # correction endpoint (semantically a state conflict).
+            status_code = (
+                409
+                if isinstance(exc, ProcurementError)
+                and "已形成审批结论" in str(exc)
+                else 400
+            )
+            raise HTTPException(status_code, str(exc)) from exc
 
     @router.post("/requests/{request_id}/quotes/{quote_id}/corrections")
     async def correct_quote(
@@ -345,6 +375,23 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
             )
         except KeyError:
             raise HTTPException(404, "未找到采购需求或报价") from None
+        except ProcurementError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/requests/{request_id}/knowledge/feedback")
+    async def knowledge_feedback(
+        request_id: str,
+        body: KnowledgeFeedbackBody,
+    ) -> dict[str, Any]:
+        try:
+            return service.record_knowledge_feedback(
+                request_id,
+                chunk_id=body.chunk_id,
+                action=body.action,
+                actor="采购员",
+            )
+        except KeyError:
+            raise HTTPException(404, "未找到采购需求") from None
         except ProcurementError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -379,18 +426,24 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
                 quote_id=body.quote_id,
                 note=body.note,
                 actor=body.actor,
+                review_ack=body.review_ack,
             )
         except KeyError:
             raise HTTPException(404, "未找到采购需求、比价快照或报价") from None
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "该采购需求已经形成审批结论") from None
         except (ProcurementError, RuntimeError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @router.get("/requests/{request_id}/report")
     async def audit_report(request_id: str) -> dict[str, Any]:
         try:
-            return service.audit_report(request_id)
+            report = service.audit_report(request_id)
         except KeyError:
             raise HTTPException(404, "未找到采购需求") from None
+        # Match /api/runs/*/report: strip absolute paths and other public
+        # redaction markers before serving the audit report.
+        return agent.harness.redactor.redact_public_obj(report)
 
     @router.get("/requests/{request_id}/purchase-order")
     async def purchase_order(request_id: str) -> dict[str, Any]:
@@ -430,6 +483,7 @@ __all__ = [
     "CorrectQuoteFieldBody",
     "ConversationAttachment",
     "ImportQuoteBody",
+    "KnowledgeFeedbackBody",
     "MAX_CONVERSATION_UPLOAD_BYTES",
     "ProcurementModelConfigBody",
     "ResumeProcurementConversationBody",

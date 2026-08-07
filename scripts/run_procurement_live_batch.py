@@ -1,4 +1,4 @@
-﻿"""Budget-constrained real-model acceptance batch for the procurement agent.
+"""Budget-constrained real-model acceptance batch for the procurement agent.
 
 Reproducible per-scenario metrics (turns, tool calls, duplicates, unauthorized
 calls, tokens, cost) plus an honest layered comparison against the deterministic
@@ -50,16 +50,22 @@ def _scenario_from_dir(scenario_dir: Path) -> dict[str, Any]:
     specs = request["specifications"]
     constraints = request["constraints"]
     fx = constraints.get("fx_rates") or {}
-    message = (
-        f"采购{request['quantity']}个{specs.get('material', 'PE')}"
-        f"{specs.get('color', '白色')}{request['item_name']}，"
-        f"规格{specs['width_mm']}x{specs['length_mm']}mm、厚{specs['thickness_um']}微米、"
-        f"{specs.get('print_colors', 0)}色印刷，{constraints['max_lead_days']}天内交付"
-        f"{constraints.get('destination', '')}，"
-        f"{'必须开票' if constraints.get('invoice_required', True) else '无需开票'}；"
-        f"USD/CNY按{fx.get('USD', '7.2')}，尺寸公差{constraints.get('size_tolerance_mm', '2')}mm、"
-        f"厚度公差{constraints.get('thickness_tolerance_um', '3')}微米。"
-    )
+    prompt_path = scenario_dir / "prompt.txt"
+    if prompt_path.is_file():
+        # 压测场景：优先使用场景目录内的原始提示词（20 个不同措辞），
+        # 覆盖真实模型对自然语言差异的抽取，而不是模板化拼接。
+        message = prompt_path.read_text(encoding="utf-8").strip()
+    else:
+        message = (
+            f"采购{request['quantity']}个{specs.get('material', 'PE')}"
+            f"{specs.get('color', '白色')}{request['item_name']}，"
+            f"规格{specs['width_mm']}x{specs['length_mm']}mm、厚{specs['thickness_um']}微米、"
+            f"{specs.get('print_colors', 0)}色印刷，{constraints['max_lead_days']}天内交付"
+            f"{constraints.get('destination', '')}，"
+            f"{'必须开票' if constraints.get('invoice_required', True) else '无需开票'}；"
+            f"USD/CNY按{fx.get('USD', '7.2')}，尺寸公差{constraints.get('size_tolerance_mm', '2')}mm、"
+            f"厚度公差{constraints.get('thickness_tolerance_um', '3')}微米。"
+        )
     quote_files = sorted(
         path
         for path in scenario_dir.iterdir()
@@ -117,6 +123,16 @@ def _build_scenarios(scenarios_dir: Path, limit: int | None) -> list[dict[str, A
     return scenarios
 
 
+def _tool_succeeded(harness: Harness, run_id: str, tool_name: str) -> bool:
+    """True when the named tool invocation succeeded in this run."""
+    for invocation in harness.storage.list_tool_invocations(run_id):
+        if invocation.tool_name != tool_name:
+            continue
+        if invocation.status.value in {"succeeded", "completed"} and not invocation.error_code:
+            return True
+    return False
+
+
 def _invocation_metrics(harness: Harness, run_id: str) -> dict[str, Any]:
     invocations = harness.storage.list_tool_invocations(run_id)
     events = harness.get_events(run_id=run_id, limit=10_000)
@@ -172,13 +188,52 @@ async def _run_scenario(
         run = harness.get_run(run_id)
         request = service.get_request(accepted["purchase_request_id"])
         comparison = request.get("comparison")
-        analysis_ok = run_result.status.value in {"completed", "require_human"} or (
-            comparison is not None
+        capture_ok = _tool_succeeded(harness, run_id, "procurement_capture_requirement")
+        execute_ok = _tool_succeeded(harness, run_id, "procurement_execute_analysis")
+        # 两阶段失败分离后，分析成功 = 产出比价快照；或 capture 与 execute_analysis
+        # 都成功且进入“待人工复核”的合法门禁。任何一步未成功都不得计为成功，
+        # 否则 require_human 会掩盖真实失败（历史口径曾把 100% 掩盖为通过）。
+        analysis_ok = comparison is not None or (
+            capture_ok
+            and execute_ok
+            and run_result.status.value in {"completed", "require_human"}
         )
         result["status"] = run_result.status.value
         result["error"] = run_result.error
+        result["capture_succeeded"] = capture_ok
+        result["execute_succeeded"] = execute_ok
         result["analysis_success"] = bool(analysis_ok)
         result["comparison_produced"] = comparison is not None
+        try:
+            from agentharness.contracts import MessageRole
+
+            final_text = ""
+            for message in harness.get_run_messages(run_id):
+                if message.role == MessageRole.assistant and message.content:
+                    final_text = str(message.content)
+            result["final_text_tail"] = final_text[-600:]
+        except Exception:  # noqa: BLE001 - best effort diagnostics
+            result["final_text_tail"] = None
+        if comparison is not None:
+            comp_result = comparison.get("result") or {}
+            comp_quotes = comp_result.get("quotes") or []
+            rec_id = comp_result.get("recommended_quote_id")
+            result["recommended_supplier"] = next(
+                (
+                    q.get("supplier_name")
+                    for q in comp_quotes
+                    if q.get("quote_id") == rec_id
+                ),
+                None,
+            )
+            result["eligible_count"] = comp_result.get("eligible_count")
+            result["excluded_count"] = comp_result.get("excluded_count")
+            result["exclusion_codes"] = {
+                str(q.get("supplier_name")): [
+                    str(e.get("code")) for e in q.get("exclusion_reasons") or []
+                ]
+                for q in comp_quotes
+            }
         result.update(_invocation_metrics(harness, run_id))
         usage = json.loads(run.get("usage_json") or "{}")
         result["model_turns"] = usage.get("model_turns", 0)

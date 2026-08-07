@@ -15,15 +15,22 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
-import type { ComparisonQuote, ProcurementRequest } from "./types";
+import { KnowledgeReferences } from "./KnowledgeReferences";
+import type {
+  ComparisonQuote,
+  KnowledgeFeedbackAction,
+  ProcurementRequest,
+} from "./types";
 
 type Props = {
   request: ProcurementRequest;
   busy: string | null;
   error?: string | null;
+  reviewPolicy?: string | null;
   onAnalyze: () => Promise<void>;
-  onApprove: (quoteId: string, note: string) => Promise<void>;
+  onApprove: (quoteId: string, note: string, reviewAck?: boolean) => Promise<void>;
   onNoAward: (note: string) => Promise<void>;
+  onKnowledgeFeedback?: (chunkId: string, action: KnowledgeFeedbackAction) => void;
 };
 
 function money(value: string, currency: string) {
@@ -47,22 +54,38 @@ function QuoteStatus({ quote }: { quote: ComparisonQuote }) {
   );
 }
 
-export function ComparisonView({ request, busy, error, onAnalyze, onApprove, onNoAward }: Props) {
+export function ComparisonView({
+  request,
+  busy,
+  error,
+  reviewPolicy,
+  onAnalyze,
+  onApprove,
+  onNoAward,
+  onKnowledgeFeedback,
+}: Props) {
   const snapshot = request.comparison;
   const result = snapshot?.result;
+  const terminal = request.status === "approved" || request.status === "no_award";
+  const decidedQuoteId = terminal ? request.decision?.quote_id || null : null;
   const [selectedId, setSelectedId] = useState<string | null>(
-    result?.recommended_quote_id || null
+    decidedQuoteId || result?.recommended_quote_id || null
   );
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [noAwardOpen, setNoAwardOpen] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [note, setNote] = useState("");
+  const [reviewAck, setReviewAck] = useState(false);
   useEffect(() => {
-    setSelectedId(result?.recommended_quote_id || null);
+    // After approval the table must highlight the supplier that was actually
+    // selected by the buyer, not the rule recommendation.
+    setSelectedId(decidedQuoteId || (!terminal ? result?.recommended_quote_id || null : null));
     setConfirmOpen(false);
     setNoAwardOpen(false);
     setConfirmed(false);
-  }, [request.status, snapshot?.id, result?.recommended_quote_id]);
+    setNote("");
+    setReviewAck(false);
+  }, [request.status, snapshot?.id, result?.recommended_quote_id, decidedQuoteId, terminal]);
   const rows = useMemo(
     () =>
       [...(result?.quotes || [])].sort((left, right) => {
@@ -73,7 +96,6 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove, onN
     [result?.quotes]
   );
   const selected = rows.find((quote) => quote.quote_id === selectedId) || null;
-  const terminal = request.status === "approved" || request.status === "no_award";
   const noEligibleQuotes = result?.eligible_count === 0;
 
   if (!snapshot || !result) {
@@ -92,6 +114,10 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove, onN
           生成比价
         </button>
         {error ? <p className="proc-inline-error" role="alert">{error}</p> : null}
+        <KnowledgeReferences
+          references={request.knowledge_references || []}
+          onFeedback={onKnowledgeFeedback}
+        />
       </section>
     );
   }
@@ -121,6 +147,11 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove, onN
         </div>
       </header>
 
+      <KnowledgeReferences
+        references={request.knowledge_references || []}
+        onFeedback={onKnowledgeFeedback}
+      />
+
       <div className="proc-comparison-table-wrap">
         <table className="proc-comparison-table">
           <thead>
@@ -135,7 +166,7 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove, onN
               <th>到货单价</th>
               <th>起订量（MOQ）</th>
               <th>交期</th>
-              <th>成本指数</th>
+              <th title="指数 = 最低到货成本 ÷ 当前到货成本 × 100，越高越优">性价比指数</th>
             </tr>
           </thead>
           <tbody>
@@ -203,7 +234,8 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove, onN
         {error ? <p className="proc-inline-error" role="alert">{error}</p> : <span />}
         {request.status === "approved" ? (
           <span className="proc-approved-banner">
-            <CheckCircle2 size={16} />供应商已人工批准
+            <CheckCircle2 size={16} />
+            供应商已人工批准：{rows.find((quote) => quote.quote_id === request.decision?.quote_id)?.supplier_name || "—"}
             <a
               className="proc-button secondary"
               href={`/api/procurement/requests/${request.id}/purchase-order.csv`}
@@ -219,7 +251,11 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove, onN
             className="proc-button primary"
             type="button"
             disabled={busy === "no_award"}
-            onClick={() => setNoAwardOpen(true)}
+            onClick={() => {
+              setConfirmed(false);
+              setNote("");
+              setNoAwardOpen(true);
+            }}
           >
             <ShieldAlert size={16} />确认无合格报价
           </button>
@@ -228,7 +264,12 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove, onN
             className="proc-button primary"
             type="button"
             disabled={!selected?.eligible || busy === "approve"}
-            onClick={() => setConfirmOpen(true)}
+            onClick={() => {
+              setConfirmed(false);
+              setNote("");
+              setReviewAck(false);
+              setConfirmOpen(true);
+            }}
           >
             <ShieldCheck size={16} />提交供应商审批
           </button>
@@ -252,14 +293,20 @@ export function ComparisonView({ request, busy, error, onAnalyze, onApprove, onN
               <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
               <span><strong>我已核对报价原件、硬性条件与到货成本</strong><small>该操作会形成正式供应商选定结论并写入审计记录</small></span>
             </label>
+            {reviewPolicy === "gate" ? (
+              <label className="proc-check approval-confirm">
+                <input type="checkbox" checked={reviewAck} onChange={(event) => setReviewAck(event.target.checked)} />
+                <span><strong>我已阅读独立评审异议并确认提交</strong><small>门禁模式下，独立评审提出异议时需勾选此确认</small></span>
+              </label>
+            ) : null}
             {error ? <p className="proc-form-error" role="alert"><AlertTriangle size={14} />{error}</p> : null}
             <footer>
               <button type="button" className="proc-button secondary" onClick={() => setConfirmOpen(false)}>取消</button>
               <button
                 type="button"
                 className="proc-button danger"
-                disabled={!confirmed || busy === "approve"}
-                onClick={() => void onApprove(selected.quote_id, note)}
+                disabled={!confirmed || (reviewPolicy === "gate" && !reviewAck) || busy === "approve"}
+                onClick={() => void onApprove(selected.quote_id, note, reviewAck)}
               >
                 {busy === "approve" ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}
                 确认选定

@@ -90,12 +90,16 @@ function FieldEditor({
   meta,
   field,
   saving,
+  hint,
+  readOnly,
   onSave,
 }: {
   name: string;
   meta: FieldMeta;
   field: QuoteField;
   saving: boolean;
+  hint?: string;
+  readOnly?: boolean;
   onSave: (value: string | number | boolean | null) => Promise<void>;
 }) {
   const rendered = displayValue(field.value, meta);
@@ -111,6 +115,19 @@ function FieldEditor({
   const canConfirmCurrentValue = needsReview && hasValue;
   const canSave = (changed || canConfirmCurrentValue) && !saving;
   const confidence = Math.round(field.confidence * 100);
+
+  async function handleSave(value: string | number | boolean | null) {
+    try {
+      await onSave(value);
+      // Close the inline editor after a successful save. The old effect only
+      // closed it when needs_review changed, which never happens for a field
+      // that was already accepted, leaving the editor open after saving.
+      setEditing(false);
+    } catch {
+      // The parent surfaces the error; keep the editor open so the buyer can
+      // correct the value and retry.
+    }
+  }
 
   return (
     <div data-field={name} className={`proc-field-row ${needsReview ? "needs-review" : ""}`}>
@@ -144,37 +161,37 @@ function FieldEditor({
               title={canConfirmCurrentValue && !changed ? "确认当前值并完成复核" : "保存人工修正"}
               aria-label={`保存${meta.label}修正`}
               disabled={!canSave}
-              onClick={() => void onSave(correctionValue(value, meta))}
+              onClick={() => void handleSave(correctionValue(value, meta))}
             >
               {saving ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}
             </button>
-            {!needsReview ? (
-              <button
-                type="button"
-                className="proc-icon-button compact"
-                title="取消修正"
-                aria-label={`取消${meta.label}修正`}
-                onClick={() => {
-                  setValue(rendered);
-                  setEditing(false);
-                }}
-              >
-                <X size={15} />
-              </button>
-            ) : null}
+            <button
+              type="button"
+              className="proc-icon-button compact"
+              title="取消修正"
+              aria-label={`取消${meta.label}修正`}
+              onClick={() => {
+                setValue(rendered);
+                setEditing(false);
+              }}
+            >
+              <X size={15} />
+            </button>
           </>
         ) : (
           <>
             <span className="proc-readonly-value">{rendered || "—"}</span>
-            <button
-              type="button"
-              className="proc-icon-button compact"
-              title="人工修正此字段"
-              aria-label={`修正${meta.label}`}
-              onClick={() => setEditing(true)}
-            >
-              <Pencil size={14} />
-            </button>
+            {!readOnly ? (
+              <button
+                type="button"
+                className="proc-icon-button compact"
+                title="人工修正此字段"
+                aria-label={`修正${meta.label}`}
+                onClick={() => setEditing(true)}
+              >
+                <Pencil size={14} />
+              </button>
+            ) : null}
           </>
         )}
       </div>
@@ -195,6 +212,7 @@ function FieldEditor({
           </ul>
         ) : null}
       </div>
+      {hint ? <p className="proc-field-hint" role="note">{hint}</p> : null}
     </div>
   );
 }
@@ -218,11 +236,19 @@ export function QuoteWorkspace({
   const selected = request.quotes.find((quote) => quote.id === selectedId) || null;
   const entries = useMemo(() => {
     if (!selected) return [];
+    const shippingIncluded =
+      selected.extracted.fields.shipping_included?.value === true;
     return FIELD_ORDER.flatMap((name) => {
       const field = selected.extracted.fields[name];
       const fieldMeta = meta.field_meta[name];
       if (!field || !fieldMeta || (onlyReview && field.status !== "needs_review")) return [];
-      return [{ name, field, meta: fieldMeta }];
+      const hint =
+        name === "shipping_fee" &&
+        shippingIncluded &&
+        field.status === "corrected"
+          ? "该报价“是否含运费”为“是”，运费已含在单价中，此修正不会额外计入到货成本；如需计入，请同时把“是否含运费”改为“否”。"
+          : undefined;
+      return [{ name, field, meta: fieldMeta, hint }];
     });
   }, [meta.field_meta, onlyReview, selected]);
   const informational = useMemo(() => {
@@ -235,7 +261,8 @@ export function QuoteWorkspace({
     request.quote_count >= 2 &&
     request.unresolved_field_count === 0 &&
     request.status !== "approved" &&
-    request.status !== "no_award";
+    request.status !== "no_award" &&
+    request.status !== "analyzed";
 
   return (
     <div className="proc-workspace-grid">
@@ -292,7 +319,7 @@ export function QuoteWorkspace({
 
         <div className="proc-analysis-bar">
           <div>
-            <strong>{request.unresolved_field_count ? `${request.unresolved_field_count} 项待复核` : "字段已就绪"}</strong>
+            <strong>{request.unresolved_field_count ? `${request.unresolved_field_count} 项待复核` : request.quote_count === 0 && request.status === "draft" ? "待 Agent 结构化需求" : "字段已就绪"}</strong>
               <span>{request.quote_count < 2 ? "至少需要 2 家报价" : "金额将由确定性规则核算"}</span>
           </div>
           <button
@@ -302,7 +329,7 @@ export function QuoteWorkspace({
             onClick={() => void onAnalyze()}
           >
             {busy === "analyze" ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}
-            {busy === "analyze" ? "分析中" : "开始比价"}
+            {busy === "analyze" ? "分析中" : request.status === "analyzed" ? "已比价" : "开始比价"}
           </button>
         </div>
         {error ? <p className="proc-inline-error" role="alert">{error}</p> : null}
@@ -341,13 +368,15 @@ export function QuoteWorkspace({
             </div>
             <div className="proc-field-table">
               <div className="proc-field-table-head"><span>字段</span><span>抽取值 / 修正值</span><span>来源证据</span></div>
-              {entries.map(({ name, field, meta: fieldMeta }) => (
+              {entries.map(({ name, field, meta: fieldMeta, hint }) => (
                 <FieldEditor
                   key={name}
                   name={name}
                   meta={fieldMeta}
                   field={field}
+                  hint={hint}
                   saving={busy === `field:${selected.id}:${name}`}
+                  readOnly={request.status === "approved" || request.status === "no_award"}
                   onSave={(value) => onCorrect(selected.id, name, value)}
                 />
               ))}

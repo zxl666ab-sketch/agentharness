@@ -139,7 +139,7 @@ export type RunReport = {
   evidence_sha256: string;
   run: RunRow;
   conclusion: {
-    status: "passed" | "failed" | "needs_review" | "pending" | "unverified" | "cancelled" | "interrupted" | "budget_stopped";
+    status: "passed" | "failed" | "needs_review" | "pending" | "require_human" | "unverified" | "cancelled" | "interrupted" | "budget_stopped";
     label: string;
     verified: boolean;
     reason: string;
@@ -178,6 +178,16 @@ export type RunReport = {
     }>;
   };
   usage: Record<string, unknown>;
+  versions?: {
+    prompt_version?: string | null;
+    prompt_sha256?: string | null;
+    tool_schema_version?: string | null;
+    tool_schema_sha256?: string | null;
+    parser_version?: string | null;
+    ruleset_version?: string | null;
+    provider?: string | null;
+    model?: string | null;
+  } | null;
   events: EventRow[];
   events_total: number;
   events_truncated: boolean;
@@ -192,7 +202,12 @@ export type RunReport = {
 };
 
 async function requestJson<T>(path: string): Promise<T> {
-  const response = await fetch(path);
+  let response: Response;
+  try {
+    response = await fetch(path);
+  } catch {
+    throw new Error("网络连接失败，请确认采购服务已启动");
+  }
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
     try {
@@ -211,6 +226,61 @@ export const api = {
   health: () => requestJson<HealthResponse>("/api/health"),
   run: (runId: string) => requestJson<RunRow>(`/api/runs/${runId}`),
   report: (runId: string) => requestJson<RunReport>(`/api/runs/${runId}/report`),
+  runs: (params?: { sessionId?: string; status?: string; limit?: number; offset?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.sessionId) query.set("session_id", params.sessionId);
+    if (params?.status) query.set("status", params.status);
+    if (params?.limit) query.set("limit", String(params.limit));
+    if (params?.offset) query.set("offset", String(params.offset));
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return requestJson<{
+      items: RunRow[];
+      total: number;
+      offset: number;
+      has_more: boolean;
+    }>(`/api/runs${suffix}`);
+  },
+  metricsSummary: () =>
+    requestJson<{
+      runs: number;
+      by_status: Record<string, number>;
+      by_model: Record<string, number>;
+      tokens: { input: number; output: number; cached_input: number; total: number };
+      model_turns: number;
+      estimated_cost_usd: number;
+      cost_unknown_runs: number;
+      cache_hit_rate: number | null;
+      avg_duration_ms: number | null;
+      duration_runs: number;
+      budget_warnings: number;
+    }>("/api/metrics/summary"),
+  timeline: (runId: string, limit = 1000) =>
+    requestJson<{
+      run_id: string;
+      items: Array<{
+        kind: "event" | "tool";
+        id: string;
+        seq: number;
+        run_seq: number;
+        at?: string | null;
+        type?: string;
+        summary?: Record<string, unknown>;
+        tool_name?: string;
+        tool_version?: string;
+        status?: string;
+        step?: number;
+        duration_ms?: number | null;
+        attempt_count?: number;
+        error_code?: string | null;
+        error_category?: string | null;
+        reason?: string | null;
+      }>;
+      total: number;
+      truncated: boolean;
+      event_count: number;
+      tool_count: number;
+      max_global_seq: number;
+    }>(`/api/runs/${runId}/timeline?limit=${limit}`),
   events: (runId: string, offset = 0, limit = 500) =>
     requestJson<{
       items: EventRow[];

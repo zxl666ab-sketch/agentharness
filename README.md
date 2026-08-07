@@ -55,16 +55,18 @@ flowchart TB
     class Agent,Gate,Report agent;
 ```
 
-### 健康度表（2026-08-06 复算）
+### 健康度表（2026-08-07 复算）
 
 | 项 | 状态 |
 |---|---|
-| Python 测试 | 248 passed / 1 skipped |
-| 覆盖率 | 81.07%（门槛 80%） |
+| Python 测试 | 277 passed / 1 skipped |
+| 覆盖率 | 81.64%（门槛 80%） |
 | Python 质量 | `ruff check .` 通过 |
-| Web 测试 / lint / build | 14 passed / 通过 / 通过（web_dist 已重建） |
+| Web 测试 / lint / build | 18 passed / 通过 / 通过（web_dist 已重建，确定性构建校验通过） |
 | 确定性冻结评测 | 617/620 字段抽取、31/31 成本计算、0 硬约束漏检（0 模型调用） |
-| 真实模型基线 | 由 `scripts/run_procurement_live_batch.py` 受预算约束跑批生成（诚实分层呈现，不与确定性结果混用） |
+| 历史行情 RAG（阶段六） | 混合召回 FTS5+结构化规格（无向量）→ rerank top-20→top-5 → 分级注入 top-3/展开 top-5 → 反馈闭环；检索冻结评测（0 模型调用）：recall@1 0.0714、precision@1 0.9286、MRR 0.9464、top-1 命中率 92.86%；确定性隔离：RAG 绝不进入 `input_sha256`/比价快照 |
+| 真实模型基线 | 由 `scripts/run_procurement_live_batch.py` / `scripts/run_rag_real_model.py` 受预算约束跑批生成（诚实分层呈现，不与确定性结果混用；阶段六 run `09528bf7…` 见 `docs/evidence/stage-6-real-model-2026-08-07.md`） |
+| 真人对照 | 阶段六 assisted vs assisted+RAG：**待实测**（无真人操作员，不虚构比例，见 `docs/evidence/stage-6-human-trial-2026-08-07.md`） |
 | Agent 行为回归 | 跳阶段 / 重复调用 / 编造参数 / 提前声称成功 4 类坏行为全部被拦截（`tests/test_agent_behavior_regression.py`） |
 
 ### 3 个可靠性案例（现象 → 根因 → 修复 → 回归）
@@ -249,6 +251,9 @@ POST /api/procurement/requests/{id}/analyze
 POST /api/procurement/requests/{id}/decision
 GET  /api/procurement/requests/{id}/report
 GET  /api/procurement/evaluation
+GET  /api/runs
+GET  /api/runs/{id}/timeline
+GET  /api/metrics/summary
 ```
 
 采购 Run 的只读审计接口提供 `GET /api/runs/{id}/report`、`GET /api/runs/{id}/checkpoint`、`GET /api/runs/{id}/approvals`、`GET /api/runs/{id}/messages`、`GET /api/runs/{id}/tool-invocations` 和 Artifact 读取。采购线不暴露通用 Run 创建、取消、恢复或事件控制端点；PUT、PATCH、DELETE 以及未列入白名单的 POST 返回 `405`。

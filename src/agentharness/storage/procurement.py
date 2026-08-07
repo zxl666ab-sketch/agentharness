@@ -7,6 +7,7 @@ from typing import Any
 
 from agentharness.security.redaction import Redactor
 from agentharness.storage.core import StorageCore, _dumps, _utcnow
+from agentharness.storage.rag import RagRepo
 
 
 def _decode_row(row: Any, *json_columns: str) -> dict[str, Any] | None:
@@ -243,26 +244,16 @@ class ProcurementRepo:
         ).fetchone()
         return _decode_row(row, "result_json")
 
-    def list_snapshots(self, request_id: str) -> list[dict[str, Any]]:
-        rows = self._reader().execute(
-            """SELECT * FROM procurement_comparison_snapshots
-               WHERE request_id = ? ORDER BY version DESC""",
-            (request_id,),
-        ).fetchall()
-        return [item for row in rows if (item := _decode_row(row, "result_json"))]
-
-    def create_decision(self, decision: dict[str, Any]) -> None:
-        safe = self.redactor.redact_obj(decision)
-        with self._lock:
-            self._insert_decision(safe)
-
     def commit_decision(
         self,
         decision: dict[str, Any],
         audit_event: dict[str, Any],
+        *,
+        rag_chunks: list[dict[str, Any]] | None = None,
     ) -> None:
         safe_decision = self.redactor.redact_obj(decision)
         safe_event = self.redactor.redact_obj(audit_event)
+        safe_chunks = self.redactor.redact_obj(rag_chunks or [])
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -272,7 +263,7 @@ class ProcurementRepo:
                 cursor = self._conn.execute(
                     """UPDATE procurement_requests
                        SET status = ?, approved_quote_id = ?, updated_at = ?
-                       WHERE id = ?""",
+                       WHERE id = ? AND status NOT IN ('approved', 'no_award')""",
                     (
                         status,
                         safe_decision.get("quote_id"),
@@ -283,6 +274,12 @@ class ProcurementRepo:
                 if cursor.rowcount != 1:
                     raise ValueError("采购任务不存在或已经完成审批")
                 self._insert_audit_event(safe_event)
+                if safe_chunks:
+                    # Same transaction: a failed approval must not leave
+                    # knowledge chunks behind (atomic index + business facts).
+                    rag = RagRepo(self._core, self.redactor)
+                    for chunk in safe_chunks:
+                        rag.upsert_chunk(chunk)
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -392,6 +389,7 @@ class ProcurementRepo:
                 self._conn.execute(
                     f"DELETE FROM {table} WHERE request_id = ?", (request_id,)
                 )
+            RagRepo(self._core, self.redactor).delete_chunks_for_request(request_id)
             self._conn.execute(
                 "DELETE FROM procurement_requests WHERE id = ?", (request_id,)
             )
@@ -425,6 +423,18 @@ class ProcurementRepo:
             return None
         payload = json.loads(row[0] or "{}")
         return payload if isinstance(payload, dict) else None
+
+    def list_knowledge_feedback_events(self) -> list[dict[str, Any]]:
+        rows = self._reader().execute(
+            """SELECT * FROM procurement_audit_events
+               WHERE type LIKE 'knowledge_reference_%'
+               ORDER BY created_at ASC, id ASC"""
+        ).fetchall()
+        return [
+            item
+            for row in rows
+            if (item := _decode_row(row, "payload_json")) is not None
+        ]
 
     def list_audit_events(self, request_id: str) -> list[dict[str, Any]]:
         rows = self._reader().execute(

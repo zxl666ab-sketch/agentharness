@@ -127,6 +127,39 @@ def test_procurement_profile_defaults_to_openai_and_is_priced_and_budgeted(
     assert request.metadata["procurement_provider_mode"] == "live"
 
 
+def test_procurement_prompt_and_schema_pin_fx_rate_direction(data_dir: Path) -> None:
+    """fx_rates must define 1 unit of the quoted currency -> base-currency units,
+    so real models do not invert USD/CNY when the base currency is not CNY."""
+    harness = Harness(data_dir=data_dir)
+    try:
+        agent = ProcurementAgent(
+            harness,
+            ProcurementService(harness),
+            run_profile=_fake_run_profile(),
+        )
+        request = agent._run_request(
+            request_id="request-fx",
+            session_id="session-fx",
+            message="分析报价",
+            source="procurement_structured",
+        )
+        system = request.system or ""
+        assert "1 单位该币种可兑换的本位币数量" in system
+        assert "USD: 7.2" in system
+        assert "CNY: 0.138888" in system
+        assert "不要写反方向" in system
+        schema = next(
+            tool.spec.parameters
+            for tool in agent.harness.tools.values()
+            if tool.spec.name == "procurement_capture_requirement"
+        )
+        fx_description = schema["properties"]["constraints"]["properties"]["fx_rates"]["description"]
+        assert "Never invert the direction" in fx_description
+        assert "USD/CNY=7.2" in fx_description
+    finally:
+        harness.close()
+
+
 @pytest.mark.asyncio
 async def test_procurement_model_config_redacts_api_key_and_applies_to_runs(
     data_dir: Path,
@@ -234,9 +267,11 @@ async def test_procurement_model_config_persists_and_restores_on_restart(
         await restored.aclose()
 
 
-def test_procurement_env_is_default_and_persisted_fields_override_it(
+def test_procurement_env_is_default_and_wins_over_persisted_ui_fields(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # .env is the single source of truth: a stale UI-saved config file must
+    # never override OPENAI_MODEL / OPENAI_BASE_URL / OPENAI_API_KEY.
     monkeypatch.setenv("AGENTHARNESS_PROCUREMENT_PROVIDER", "openai")
     monkeypatch.setenv("AGENTHARNESS_PROCUREMENT_MODEL", "env-default-model")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://env.example/v1")
@@ -248,7 +283,7 @@ def test_procurement_env_is_default_and_persisted_fields_override_it(
     harness = Harness(data_dir=data_dir)
     agent = ProcurementAgent(harness, ProcurementService(harness))
     try:
-        assert agent.run_profile.model == "ui-override-model"
+        assert agent.run_profile.model == "env-default-model"
         assert agent.run_profile.base_url == "https://env.example/v1"
         assert agent.run_profile.api_key == "sk-env-default"
     finally:
@@ -994,6 +1029,113 @@ def test_quote_parser_preserves_per_ten_thousand_price_basis() -> None:
     extracted = parse_quote("per-ten-thousand.xlsx", document)
 
     assert extracted["fields"]["price_basis"]["value"] == 10_000
+
+
+def test_quote_parser_recognizes_chinese_dimension_labels() -> None:
+    """Regression: 宽度（mm）/长度（mm） labels must map to width_mm/length_mm.
+
+    The Chinese labels normalize to 宽度mm/长度mm which were missing from the
+    alias table, so explicit dimension cells were silently ignored and the
+    parser fell back to description inference.
+    """
+    document = _xlsx_bytes(
+        [
+            ["供应商", "中文规格供应商"],
+            ["品名", "PE 白色快递袋 510x350mm 60um 单色印刷"],
+            ["材质", "PE"],
+            ["颜色", "白色"],
+            ["印刷色数", "1"],
+            ["币种", "CNY"],
+            ["单价", "500"],
+            ["计价数量", "1000"],
+            ["税率", "13%"],
+            ["是否含税", "是"],
+            ["是否包邮", "是"],
+            ["MOQ", "1000"],
+            ["交期", "7"],
+            ["是否可开票", "是"],
+            ["宽度（mm）", "510"],
+            ["长度（mm）", "350"],
+            ["厚度（微米）", "60"],
+        ]
+    )
+
+    extracted = parse_quote("chinese-dimension-labels.xlsx", document)
+    fields = extracted["fields"]
+
+    assert fields["width_mm"]["value"] == "510"
+    assert fields["width_mm"]["status"] == "accepted"
+    assert fields["length_mm"]["value"] == "350"
+    assert fields["length_mm"]["status"] == "accepted"
+    assert fields["thickness_um"]["value"] == "60"
+    assert fields["thickness_um"]["status"] == "accepted"
+    assert "width_mm" not in fields_requiring_review(extracted)
+    assert "length_mm" not in fields_requiring_review(extracted)
+
+
+def test_quote_parser_does_not_conflict_when_invoice_label_contains_positive_word() -> None:
+    """Regression: “是否可开票: 否” must stay accepted.
+
+    The label itself contains 可开, and the free-text inference regex matched
+    the label text, creating a false cross-source conflict that forced every
+    Chinese “cannot invoice” quote into human review.
+    """
+    document = _xlsx_bytes(
+        [
+            ["供应商", "不可开票供应商"],
+            ["品名", "PE 白色快递袋 250x350mm 60um 单色印刷"],
+            ["币种", "CNY"],
+            ["单价", "500"],
+            ["计价数量", "1000"],
+            ["税率", "13%"],
+            ["是否含税", "是"],
+            ["是否包邮", "是"],
+            ["MOQ", "1000"],
+            ["交期", "7"],
+            ["是否可开票", "否"],
+        ]
+    )
+
+    extracted = parse_quote("invoice-no-label.xlsx", document)
+    invoice = extracted["fields"]["supports_invoice"]
+
+    assert invoice["value"] is False
+    assert invoice["status"] == "accepted"
+    assert "conflicts" not in invoice
+    assert "supports_invoice" not in fields_requiring_review(extracted)
+
+
+def test_requirement_accepts_roll_goods_length_in_mm() -> None:
+    """Regression: roll goods (tape/film/foam) are quoted in mm with lengths
+    far above the old 10000 mm flat-sheet cap; they must not be rejected."""
+    from agentharness.procurement.service import _validated_requirement
+
+    payload = {
+        "title": "气泡膜卷材",
+        "item_name": "气泡膜",
+        "quantity": 1000,
+        "unit": "piece",
+        "specifications": {
+            "width_mm": "600",
+            "length_mm": "50000",
+            "thickness_um": "90",
+            "material": "PE",
+            "color": "透明",
+            "print_colors": 0,
+        },
+        "constraints": {
+            "base_currency": "CNY",
+            "fx_rates": {"CNY": "1"},
+            "max_lead_days": 14,
+            "invoice_required": True,
+        },
+    }
+    validated = _validated_requirement(payload)
+    assert validated["specifications"]["length_mm"] == "50000"
+
+    payload["specifications"]["length_mm"] = "1200000"
+    validated = _validated_requirement(payload)
+    assert validated["specifications"]["length_mm"] == "1200000"
 
 
 def test_material_identity_constraints_exclude_cheaper_wrong_product() -> None:
@@ -2056,7 +2198,7 @@ async def test_cancelled_approval_request_cannot_commit_in_background(
 
 
 @pytest.mark.asyncio
-async def test_complete_procurement_scenario_uses_one_run_and_three_model_turns(
+async def test_complete_procurement_scenario_uses_one_run_and_four_model_turns(
     data_dir: Path,
     workspace: Path,
 ) -> None:
@@ -2105,9 +2247,11 @@ async def test_complete_procurement_scenario_uses_one_run_and_three_model_turns(
             ).json()
 
             assert len(harness.list_runs()) == 1
-            assert runtime_report["usage"]["model_turns"] == 3
+            # 两阶段拆分后：capture -> execute_analysis -> 文本 -> approve = 4 轮
+            assert runtime_report["usage"]["model_turns"] == 4
             assert {item["tool_name"] for item in invocations} == {
                 "procurement_capture_requirement",
+                "procurement_execute_analysis",
                 "procurement_approve_supplier",
             }
             assert any(
@@ -2826,8 +2970,10 @@ async def test_procurement_conversation_uses_harness_and_pauses_for_quote_review
         assert detail["unresolved_field_count"] == 1
         assert detail["comparison"] is None
         assert checkpoint["status"] == "require_human"
+        # capture 只保存需求，execute_analysis 执行比价并停在待复核门禁
         assert [item["tool_name"] for item in invocations] == [
             "procurement_capture_requirement",
+            "procurement_execute_analysis",
         ]
 
     await app.state.run_supervisor.aclose()
@@ -2907,7 +3053,8 @@ async def test_procurement_human_review_resumes_same_run_and_builds_comparison(
         }
         assert "procurement_correct_quote" not in actual_tools
         usage = json.loads(run["usage_json"])
-        assert usage["model_turns"] <= 4
+        # 初始 capture+execute+文本=3，人工修正后 analyze 重跑 execute=2，合计 5
+        assert usage["model_turns"] <= 6
 
     await app.state.procurement_agent.aclose()
     await app.state.run_supervisor.aclose()
@@ -3000,7 +3147,8 @@ async def test_procurement_supplier_decision_is_a_harness_approval(
         assert report["decision"]["approval_id"] == approvals[-1]["id"]
         assert report["runtime"]["run_id"] == run_id
         usage = json.loads(completed["usage_json"])
-        assert usage["model_turns"] <= 5
+        # 初始 capture+execute+文本=3，修正后 execute=1，analyze 重跑 execute=1，审批=1 → 6
+        assert usage["model_turns"] <= 7
 
     await app.state.procurement_agent.aclose()
     await app.state.run_supervisor.aclose()
@@ -3240,6 +3388,111 @@ async def test_procurement_quote_change_invalidates_stale_snapshot(
         assert stale_after_reanalysis.status_code == 409
         assert (await client.get(f"/api/runs/{run_id}/approvals")).json() == []
 
+    await app.state.procurement_agent.aclose()
+    await app.state.run_supervisor.aclose()
+    await harness.aclose()
+
+
+class _RefusingResumeProvider(ProcurementFakeProvider):
+    """Fake provider that refuses to repeat the analysis tool on resume,
+    mimicking real-model behavior observed after a correction invalidated
+    the comparison snapshot."""
+
+    async def stream(self, request: ModelRequest):
+        user_text = "".join(
+            message.content
+            for message in request.messages
+            if message.role == MessageRole.user
+        )
+        if (
+            sum(1 for m in request.messages if m.role == MessageRole.user) > 1
+            and "[procurement_supplier_selection]" not in user_text
+        ):
+            async for item in self._text(
+                "比价此前已执行完毕且复算通过，本轮不重复调用分析工具。"
+            ):
+                yield item
+            return
+        async for item in super().stream(request):
+            yield item
+
+
+@pytest.mark.asyncio
+async def test_reanalysis_after_correction_is_deterministic_when_model_refuses(
+    data_dir, workspace
+) -> None:
+    """开始比价 must regenerate the comparison even when the resumed model
+    refuses to repeat the analysis tool (real-model behavior observed after a
+    correction invalidated the snapshot)."""
+    truth = load_frozen_truth()
+    cases = [
+        next(item for item in truth["quotes"] if item["id"] == case_id)
+        for case_id in ("q-alpha", "q-beta")
+    ]
+    harness = Harness(
+        data_dir=data_dir,
+        providers={"procurement_fake": _RefusingResumeProvider()},
+    )
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        started = await client.post(
+            "/api/procurement/conversations",
+            json={
+                "message": (
+                    "采购10000个PE白色快递袋，规格250x350mm、厚60微米、单色印刷，"
+                    "15天内交付上海松江，必须开票；USD/CNY按7.2，尺寸公差2mm、"
+                    "厚度公差3微米。请比较附件报价并推荐供应商。"
+                ),
+                "attachments": [_upload(case) for case in cases],
+            },
+        )
+        assert started.status_code == 202
+        accepted = started.json()
+        request_id = accepted["purchase_request_id"]
+        run_id = accepted["run_id"]
+        await _wait_for_run_status(client, run_id, {"require_human"})
+        detail = (await client.get(f"/api/procurement/requests/{request_id}")).json()
+        old_snapshot = detail["comparison"]
+        alpha = next(
+            item
+            for item in detail["quotes"]
+            if item["source_filename"] == cases[0]["filename"]
+        )
+        service = app.state.procurement_service
+        assert service.agent_state(request_id)["requires_reanalysis"] is False
+
+        corrected = await client.post(
+            f"/api/procurement/requests/{request_id}/quotes/{alpha['id']}/corrections",
+            json={"field": "shipping_fee", "value": "25", "actor": "采购员王敏"},
+        )
+        assert corrected.status_code == 200
+        invalidated = (await client.get(f"/api/procurement/requests/{request_id}")).json()
+        assert invalidated["status"] == "ready"
+        assert invalidated["current_snapshot_id"] is None
+        assert service.agent_state(request_id)["requires_reanalysis"] is True
+
+        resumed = await client.post(f"/api/procurement/requests/{request_id}/analyze")
+        assert resumed.status_code == 202
+        assert resumed.json()["run_id"] == run_id
+
+        refreshed = await _wait_for_comparison(
+            client, request_id, run_id=run_id, timeout_s=10
+        )
+        await _wait_for_run_status(client, run_id, {"require_human"})
+        new_snapshot = refreshed["comparison"]
+        assert refreshed["status"] == "analyzed"
+        assert new_snapshot["version"] == old_snapshot["version"] + 1
+        assert new_snapshot["id"] != old_snapshot["id"]
+        assert new_snapshot["input_sha256"] != old_snapshot["input_sha256"]
+        # The deterministic fallback must publish a refresh event so the web UI
+        # notices the new snapshot without an extra model turn.
+        events = (await client.get(f"/api/runs/{run_id}/events?limit=2000")).json()["items"]
+        assert any(
+            event["type"] == "run_status"
+            and event["payload"].get("reason") == "比价快照已重新生成，等待人工选择供应商"
+            for event in events
+        )
     await app.state.procurement_agent.aclose()
     await app.state.run_supervisor.aclose()
     await harness.aclose()
@@ -3486,6 +3739,9 @@ async def test_failed_capture_terminates_at_require_human(data_dir: Path) -> Non
         # Natural-language dimensions are not extracted, so the captured width is 0
         # and fails the domain's exclusive-minimum validation.
         assert "宽度" in failed.result.content
+        # 两阶段失败分离：校验失败必须带字段级原因与可操作修正提示
+        assert "需求结构化校验失败" in failed.result.content
+        assert "请修正" in failed.result.content
 
         run = harness.get_run(run_id)
         assert run["status"] == "require_human"

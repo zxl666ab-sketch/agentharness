@@ -171,6 +171,7 @@ export const procurementApi = {
       quote_id?: string;
       confirmed: boolean;
       note?: string;
+      review_ack?: boolean;
     }
   ) =>
     postJson<ProcurementRequest>(`/api/procurement/requests/${requestId}/decision`, {
@@ -189,4 +190,13 @@ export const procurementApi = {
   cleanDemo: () =>
     postJson<{ removed: number; skipped: number }>("/api/procurement/demo/clean"),
   evaluation: () => requestJson<EvaluationResult>("/api/procurement/evaluation"),
+  knowledgeFeedback: (
+    requestId: string,
+    chunkId: string,
+    action: "viewed" | "adopted"
+  ) =>
+    postJson<{ ok: boolean; request_id: string; chunk_id: string; action: string }>(
+      `/api/procurement/requests/${requestId}/knowledge/feedback`,
+      { chunk_id: chunkId, action }
+    ),
 };

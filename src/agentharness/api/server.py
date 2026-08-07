@@ -22,7 +22,11 @@ from agentharness.api.execution import (
     WebRunSupervisor,
 )
 from agentharness.api.procurement import procurement_router
-from agentharness.api.reporting import build_run_report
+from agentharness.api.reporting import (
+    build_run_report,
+    build_run_timeline,
+    build_usage_summary,
+)
 from agentharness.harness import Harness
 from agentharness.procurement import ProcurementService
 from agentharness.procurement.agent import ProcurementAgent
@@ -218,6 +222,32 @@ def create_app(
             }
         )
 
+    @app.get("/api/runs")
+    async def runs(
+        session_id: str | None = Query(None),
+        status: str | None = Query(None),
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ) -> dict[str, Any]:
+        items = runtime.storage.runs.list_runs(
+            session_id=session_id or None,
+            status=status or None,
+            limit=limit,
+            offset=offset,
+        )
+        return public_redact(
+            {
+                "items": items,
+                "total": len(items),
+                "offset": offset,
+                "has_more": len(items) == limit,
+            }
+        )
+
+    @app.get("/api/metrics/summary")
+    async def metrics_summary() -> dict[str, Any]:
+        return public_redact(build_usage_summary(runtime))
+
     @app.get("/api/runs/{run_id}")
     async def run(run_id: str) -> dict[str, Any]:
         row = runtime.get_run(run_id)
@@ -231,6 +261,16 @@ def create_app(
         if report is None:
             raise HTTPException(404, "run not found")
         return public_redact(report)
+
+    @app.get("/api/runs/{run_id}/timeline")
+    async def run_timeline(
+        run_id: str,
+        limit: int = Query(1_000, ge=10, le=5_000),
+    ) -> dict[str, Any]:
+        timeline = build_run_timeline(runtime, run_id, limit=limit)
+        if timeline is None:
+            raise HTTPException(404, "run not found")
+        return public_redact(timeline)
 
     @app.get("/api/runs/{run_id}/events")
     async def run_events(

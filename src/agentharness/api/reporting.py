@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from typing import Any
 
 from agentharness.contracts import EventEnvelope, EventType, ToolInvocationRecord
@@ -241,6 +242,176 @@ def _tool_payload(runtime: Harness, invocation: ToolInvocationRecord) -> dict[st
     return payload
 
 
+def _event_summary(event: EventEnvelope) -> dict[str, Any]:
+    """Compact, human-oriented summary for a timeline event row."""
+    payload = event.payload or {}
+    event_type = _event_type(event)
+    if event_type == "run_status":
+        return {
+            "status": payload.get("status"),
+            "reason": str(payload.get("reason") or "")[:200] or None,
+        }
+    if event_type in {
+        "tool_call_start",
+        "tool_call_end",
+        "tool_result",
+        "tool_stage_denied",
+        "tool_call_duplicate",
+        "approval_requested",
+        "approval_resolved",
+    }:
+        return {
+            "tool_name": payload.get("tool_name"),
+            "status": payload.get("status"),
+        }
+    if event_type == "budget_warning":
+        return {
+            "tokens": payload.get("tokens"),
+            "cost_usd": payload.get("cost"),
+        }
+    if event_type in {"verification_started", "verification_result"}:
+        return {
+            "attempt": payload.get("attempt"),
+            "step": payload.get("step"),
+            "action": payload.get("action"),
+        }
+    if event_type in {"model_turn_start", "model_turn_end"}:
+        return {"step": payload.get("step")}
+    return {}
+
+
+def build_run_timeline(
+    runtime: Harness, run_id: str, *, limit: int = 1_000
+) -> dict[str, Any] | None:
+    """Read-only merged timeline of run events and tool invocations.
+
+    Events and tool calls are merged into one ordered list so a failure can be
+    traced to "which step / which tool / which attempt / what error". The list
+    is bounded (newest retained) and everything derives from persisted facts.
+    """
+    run = runtime.get_run(run_id)
+    if run is None:
+        return None
+    events = runtime.get_events(run_id=run_id, limit=10_000)
+    tools = runtime.list_tool_invocations(run_id)
+    items: list[dict[str, Any]] = []
+    for event in events:
+        items.append(
+            {
+                "kind": "event",
+                "id": event.event_id,
+                "seq": event.global_seq,
+                "run_seq": event.run_seq,
+                "at": event.timestamp.isoformat(),
+                "type": _event_type(event),
+                "summary": _event_summary(event),
+            }
+        )
+    for invocation in tools:
+        result = invocation.result
+        at = (
+            (invocation.finished_at or invocation.created_at).isoformat()
+            if (invocation.finished_at or invocation.created_at)
+            else None
+        )
+        items.append(
+            {
+                "kind": "tool",
+                "id": invocation.id,
+                "seq": invocation.ordinal,
+                "run_seq": invocation.step,
+                "at": at,
+                "tool_name": invocation.tool_name,
+                "tool_version": invocation.tool_version,
+                "status": invocation.status.value,
+                "step": invocation.step,
+                "ordinal": invocation.ordinal,
+                "duration_ms": result.duration_ms if result else None,
+                "attempt_count": invocation.attempt_count,
+                "error_code": invocation.error_code,
+                "error_category": invocation.error_category,
+                "reason": invocation.reason,
+                "attempts_audit": runtime.list_tool_attempts(invocation.id),
+            }
+        )
+    items.sort(key=lambda item: (item.get("at") or "", item.get("kind") or ""))
+    total = len(items)
+    retained = items[-limit:]
+    return {
+        "run_id": run_id,
+        "items": retained,
+        "total": total,
+        "truncated": total > len(retained),
+        "event_count": len(events),
+        "tool_count": len(tools),
+        "max_global_seq": max((event.global_seq for event in events), default=0),
+    }
+
+
+def build_usage_summary(runtime: Harness, *, limit: int = 10_000) -> dict[str, Any]:
+    """Aggregate token / cost / duration / cache metrics across runs."""
+    rows = runtime.storage.runs.list_runs_for_metrics(limit=limit)
+    by_status: dict[str, int] = {}
+    by_model: dict[str, int] = {}
+    input_tokens = output_tokens = cached_input_tokens = total_tokens = 0
+    model_turns = 0
+    estimated_cost_usd = 0.0
+    cost_unknown_runs = 0
+    cache_rates: list[float] = []
+    durations_ms: list[int] = []
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        by_status[status] = by_status.get(status, 0) + 1
+        model = str(row.get("model") or "unknown")
+        by_model[model] = by_model.get(model, 0) + 1
+        usage = _json_object(row.get("usage_json"))
+        input_tokens += _integer(usage.get("input_tokens"))
+        output_tokens += _integer(usage.get("output_tokens"))
+        cached_input_tokens += _integer(usage.get("cached_input_tokens"))
+        total_tokens += _integer(usage.get("total_tokens"))
+        model_turns += _integer(usage.get("model_turns"))
+        cost = usage.get("estimated_cost_usd")
+        if isinstance(cost, (int, float)) and cost > 0:
+            estimated_cost_usd += float(cost)
+        else:
+            cost_unknown_runs += 1
+        rate = usage.get("cache_hit_rate")
+        if isinstance(rate, (int, float)):
+            cache_rates.append(float(rate))
+        created = row.get("created_at")
+        finished = row.get("finished_at") or row.get("updated_at")
+        if created and finished:
+            try:
+                start = datetime.fromisoformat(str(created))
+                end = datetime.fromisoformat(str(finished))
+                durations_ms.append(int((end - start).total_seconds() * 1000))
+            except (TypeError, ValueError):
+                pass
+    budget_warnings = runtime.storage.events.count_events_by_type("budget_warning")
+    return {
+        "runs": len(rows),
+        "by_status": by_status,
+        "by_model": by_model,
+        "tokens": {
+            "input": input_tokens,
+            "output": output_tokens,
+            "cached_input": cached_input_tokens,
+            "total": total_tokens,
+        },
+        "model_turns": model_turns,
+        "estimated_cost_usd": round(estimated_cost_usd, 6),
+        "cost_unknown_runs": cost_unknown_runs,
+        "cache_hit_rate": (
+            round(sum(cache_rates) / len(cache_rates), 4) if cache_rates else None
+        ),
+        "avg_duration_ms": (
+            round(sum(durations_ms) / len(durations_ms)) if durations_ms else None
+        ),
+        "duration_runs": len(durations_ms),
+        "budget_warnings": budget_warnings,
+    }
+
+
 def build_run_report(runtime: Harness, run_id: str) -> dict[str, Any] | None:
     """Project a durable report without introducing a second state owner."""
     run = runtime.get_run(run_id)
@@ -306,6 +477,16 @@ def build_run_report(runtime: Harness, run_id: str) -> dict[str, Any] | None:
         "tools": tools,
         "approvals": approvals,
         "artifacts": artifacts,
+        "versions": {
+            "prompt_version": metadata.get("procurement_prompt_version"),
+            "prompt_sha256": metadata.get("procurement_prompt_sha256"),
+            "tool_schema_version": metadata.get("procurement_tool_schema_version"),
+            "tool_schema_sha256": metadata.get("procurement_tool_schema_sha256"),
+            "parser_version": metadata.get("procurement_parser_version"),
+            "ruleset_version": metadata.get("procurement_ruleset_version"),
+            "provider": run.get("provider"),
+            "model": run.get("model"),
+        },
         "usage": _json_object(run.get("usage_json")),
         "convergence": _convergence(
             run=run,
