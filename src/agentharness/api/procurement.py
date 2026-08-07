@@ -50,7 +50,7 @@ class ProcurementConstraints(BaseModel):
     max_lead_days: int = Field(default=15, ge=1, le=365)
     invoice_required: bool = True
     size_tolerance_mm: Decimal = Field(default=Decimal("2"), ge=0, le=100)
-    thickness_tolerance_um: Decimal = Field(default=Decimal("3"), ge=0, le=100)
+    thickness_tolerance_um: Decimal = Field(default=Decimal("3"), ge=0, le=5_000)
     max_landed_unit_cost: Decimal | None = Field(default=None, gt=0)
     destination: str = Field(default="", max_length=300)
     required_delivery_date: date | None = None

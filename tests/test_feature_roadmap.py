@@ -336,3 +336,114 @@ async def test_review_policy_roundtrip_via_config(data_dir) -> None:  # type: ig
     finally:
         await agent.aclose()
         await harness.aclose()
+
+
+# ---------------------------------------------------------------- cardboard-box bug fixes
+def _carton_requirement() -> dict:
+    return {
+        "title": "苏州工厂出口瓦楞纸箱采购",
+        "item_name": "五层瓦楞纸箱",
+        "quantity": 5000,
+        "unit": "piece",
+        "specifications": {
+            "width_mm": "400",
+            "length_mm": "300",
+            "thickness_um": "5000",
+            "material": "瓦楞纸",
+            "color": "牛皮色",
+            "print_colors": 1,
+        },
+        "constraints": {
+            "base_currency": "CNY",
+            "fx_rates": {"CNY": "1", "USD": "7.2"},
+            "max_lead_days": 20,
+            "invoice_required": True,
+            "size_tolerance_mm": "3",
+            "thickness_tolerance_um": "500",
+            "max_landed_unit_cost": "3.50",
+            "destination": "苏州工厂",
+        },
+    }
+
+
+def test_thickness_tolerance_accepts_thick_materials() -> None:
+    from agentharness.procurement.service import ProcurementError, _validated_requirement
+
+    payload = _carton_requirement()
+    validated = _validated_requirement(payload)
+    assert validated["constraints"]["thickness_tolerance_um"] == "500"
+
+    payload["constraints"]["thickness_tolerance_um"] = "5000"
+    validated = _validated_requirement(payload)
+    assert validated["constraints"]["thickness_tolerance_um"] == "5000"
+
+    payload["constraints"]["thickness_tolerance_um"] = "5001"
+    with pytest.raises(ProcurementError):
+        _validated_requirement(payload)
+
+
+@pytest.mark.asyncio
+async def test_api_accepts_carton_request_with_500um_tolerance(data_dir, workspace) -> None:  # type: ignore[no-untyped-def]
+    from httpx import ASGITransport, AsyncClient
+
+    from agentharness.api.server import create_app
+
+    harness = Harness(data_dir=data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/procurement/requests",
+                json=_carton_requirement(),
+            )
+            assert response.status_code == 201, response.text
+            body = response.json()
+            assert body["constraints"]["thickness_tolerance_um"] == "500"
+            assert body["specifications"]["width_mm"] == "400"
+            assert body["specifications"]["length_mm"] == "300"
+    finally:
+        await app.state.procurement_agent.aclose()
+        await app.state.run_supervisor.aclose()
+        await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_procurement_prompt_pins_spec_orientation(data_dir) -> None:  # type: ignore[no-untyped-def]
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    agent = ProcurementAgent(harness, service, run_profile=_fake_run_profile())
+    try:
+        request = agent._run_request(
+            request_id="a" * 32,
+            session_id="session",
+            message="x",
+            source="procurement_conversation",
+        )
+        assert "第一个数字是宽度" in request.system
+        assert "不要把宽度与长度写反" in request.system
+        assert request.metadata["procurement_prompt_version"] == PROCUREMENT_PROMPT_VERSION
+        assert request.metadata["procurement_prompt_version"] == "procurement-prompt-v2"
+    finally:
+        await agent.aclose()
+        await harness.aclose()
+
+
+def test_fake_extraction_keeps_spec_orientation() -> None:
+    from agentharness.contracts import Message, MessageRole
+    from agentharness.procurement.agent import ProcurementFakeProvider
+
+    text = (
+        "采购5000个五层瓦楞纸箱，规格400x300x250mm、厚度5000微米、材质瓦楞纸、牛皮色、单色印刷，"
+        "20天内交付苏州工厂，必须开票；USD/CNY按7.2，尺寸公差3mm、厚度公差500微米，"
+        "到货单价预算上限3.50元。请比较附件报价并推荐供应商。"
+    )
+    requirement = ProcurementFakeProvider._extract_requirement(
+        [Message(role=MessageRole.user, content=text)]
+    )
+    assert requirement["specifications"]["width_mm"] == "400"
+    assert requirement["specifications"]["length_mm"] == "300"
+    assert requirement["specifications"]["thickness_um"] == "5000"
+    assert requirement["constraints"]["thickness_tolerance_um"] == "500"
+    assert requirement["constraints"]["max_landed_unit_cost"] == "3.50"
+

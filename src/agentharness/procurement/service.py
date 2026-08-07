@@ -205,7 +205,7 @@ def _validated_requirement(payload: dict[str, Any]) -> dict[str, Any]:
             ),
             "厚度公差",
             minimum=Decimal("0"),
-            maximum=Decimal("100"),
+            maximum=Decimal("5000"),
         ),
     }
     max_unit_cost = raw_constraints.get("max_landed_unit_cost")
