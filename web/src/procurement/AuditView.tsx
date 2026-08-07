@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Activity, AlertTriangle, CheckCircle2, Clock3, Database, FlaskConical, Gauge, ShieldCheck } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle2, Clock3, Database, FlaskConical, Gauge, ShieldCheck, Wrench, Zap } from "lucide-react";
 
 import { api } from "../api/client";
 import { RunReport } from "../components/RunReport";
@@ -24,10 +24,15 @@ export function AuditView({ request }: Props) {
     queryFn: () => api.checkpoint(runId!),
     enabled: !!runId,
   });
+  const timelineQuery = useQuery({
+    queryKey: ["run-timeline", runId],
+    queryFn: () => api.timeline(runId!),
+    enabled: !!runId,
+  });
   const evaluation = useQuery({
     queryKey: ["procurement-evaluation"],
     queryFn: procurementApi.evaluation,
-    staleTime: 60_000,
+    staleTime: 5 * 60_000,
   });
   const usage = runReport.data?.usage;
   const modelTurns = Number(usage?.model_turns || 0);
@@ -135,6 +140,15 @@ export function AuditView({ request }: Props) {
             <div><ShieldCheck size={17} /><span><small>人工审批</small><strong>{approvalLabel}</strong></span></div>
             <div><Gauge size={17} /><span><small>模型回合 / 成本</small><strong>{modelTurns} · {costLabel}</strong></span></div>
           </section>
+          {runReport.data?.versions ? (
+            <section className="proc-version-strip" aria-label="本次运行配置">
+              <span><small>Prompt</small><code title={runReport.data.versions.prompt_sha256 || ""}>{runReport.data.versions.prompt_version || "—"}</code></span>
+              <span><small>工具 Schema</small><code title={runReport.data.versions.tool_schema_sha256 || ""}>{runReport.data.versions.tool_schema_version || "—"}</code></span>
+              <span><small>解析器</small><strong>{runReport.data.versions.parser_version || "—"}</strong></span>
+              <span><small>规则集</small><strong>{runReport.data.versions.ruleset_version || "—"}</strong></span>
+              <span><small>模型</small><strong>{runReport.data.versions.model || "—"}</strong></span>
+            </section>
+          ) : null}
           <section className="proc-review-section">
             <header>
               <div><ShieldCheck size={17} /><h2>独立评审</h2></div>
@@ -152,7 +166,8 @@ export function AuditView({ request }: Props) {
                       </strong>
                       <p>{String(review.payload.reason || "（无理由）")}</p>
                       <small>
-                        模型 {String(review.payload.model || "—")} · 审批 {String(review.payload.approval_id || "").slice(0, 8)} ·{" "}
+                        模型 {String(review.payload.model || "—")} · 策略 {String(review.payload.policy || "—")}
+                        {review.payload.before_approval === true ? " · 审批前" : ""} · 审批 {String(review.payload.approval_id || "").slice(0, 8)} ·{" "}
                         {new Date(review.created_at).toLocaleString("zh-CN")}
                       </small>
                     </li>
@@ -165,6 +180,58 @@ export function AuditView({ request }: Props) {
               </p>
             )}
           </section>
+          <details className="proc-timeline-detail">
+            <summary>
+              <Activity size={15} />运行时间线
+              <span>
+                {timelineQuery.isPending
+                  ? "加载中…"
+                  : timelineQuery.data
+                    ? `${timelineQuery.data.total} 条 · 工具 ${timelineQuery.data.tool_count}`
+                    : "—"}
+              </span>
+            </summary>
+            <div className="proc-timeline-body">
+              {timelineQuery.isError ? (
+                <p className="proc-inline-error" role="alert">时间线加载失败</p>
+              ) : null}
+              {timelineQuery.data ? (
+                <>
+                  {timelineQuery.data.truncated ? (
+                    <p className="proc-timeline-note">仅显示最近 {timelineQuery.data.items.length} 条（共 {timelineQuery.data.total} 条）。</p>
+                  ) : null}
+                  <ul className="proc-timeline-list">
+                    {timelineQuery.data.items.map((item) => (
+                      <li key={`${item.kind}-${item.id}`} className={`proc-timeline-item ${item.kind}`}>
+                        <span className="proc-timeline-icon">
+                          {item.kind === "tool" ? <Wrench size={13} /> : <Zap size={13} />}
+                        </span>
+                        <span className="proc-timeline-main">
+                          {item.kind === "tool" ? (
+                            <>
+                              <strong>{item.tool_name}</strong>
+                              <small>
+                                {item.status} · {item.duration_ms != null ? `${Math.round(item.duration_ms)} ms` : "—"}
+                                {item.attempt_count ? ` · ${item.attempt_count} 次尝试` : ""}
+                                {item.error_code ? ` · ${item.error_code}` : ""}
+                              </small>
+                            </>
+                          ) : (
+                            <>
+                              <strong>{item.type}</strong>
+                              {item.summary?.status ? <small>{String(item.summary.status)}</small> : null}
+                              {item.summary?.tool_name ? <small>{String(item.summary.tool_name)}</small> : null}
+                            </>
+                          )}
+                        </span>
+                        <time>{item.at ? new Date(item.at).toLocaleTimeString("zh-CN") : "—"}</time>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : null}
+            </div>
+          </details>
           <div className="proc-runtime-report">
             <RunReport
               report={runReport.data || null}

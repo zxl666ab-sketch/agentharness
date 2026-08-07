@@ -3,6 +3,7 @@ import {
   Activity,
   AlertTriangle,
   Archive,
+  BarChart3,
   CheckCircle2,
   FileCheck2,
   Files,
@@ -26,6 +27,7 @@ import { useAgentStream } from "../useAgentStream";
 import { AuditView } from "./AuditView";
 import { friendlyProcurementError, procurementApi } from "./api";
 import { ComparisonView } from "./ComparisonView";
+import { DashboardView } from "./DashboardView";
 import {
   NewProcurementConversation,
   ProcurementConversation,
@@ -66,6 +68,15 @@ const STATUS: Record<ProcurementStatus, { label: string; tone: string; step: num
 
 const STEPS = ["创建需求", "上传报价", "字段复核", "供应商比价", "人工审批"];
 
+const TERMINAL_RUN_STATUSES = [
+  "completed",
+  "failed",
+  "require_human",
+  "cancelled",
+  "interrupted",
+  "budget_stopped",
+];
+
 function errorText(error: unknown) {
   return friendlyProcurementError(error instanceof Error ? error.message : String(error || "操作失败"));
 }
@@ -87,6 +98,7 @@ const DEFAULT_CONFIG_FORM: ProcurementModelConfigUpdate = {
   ai_review_enabled: false,
   review_provider: "openai",
   review_model: null,
+  review_policy: "evidence",
 };
 
 function configFormFrom(config: ProcurementModelConfig): ProcurementModelConfigUpdate {
@@ -103,6 +115,7 @@ function configFormFrom(config: ProcurementModelConfig): ProcurementModelConfigU
     ai_review_enabled: config.ai_review_enabled,
     review_provider: config.review_provider || "openai",
     review_model: config.review_model,
+    review_policy: config.review_policy || "evidence",
   };
 }
 
@@ -111,6 +124,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("quotes");
   const [showCreate, setShowCreate] = useState(false);
+  const [showDashboard, setShowDashboard] = useState(false);
   const [pendingRunId, setPendingRunId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState<BusyAction | null>(null);
@@ -122,6 +136,8 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   const [cleanArmed, setCleanArmed] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
   const [configNotice, setConfigNotice] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const configFormReady = useRef(false);
 
   const metaQuery = useQuery({ queryKey: ["procurement-meta"], queryFn: procurementApi.meta });
   const configQuery = useQuery({ queryKey: ["procurement-config"], queryFn: procurementApi.config });
@@ -157,7 +173,16 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
 
   const currentRunId = detailQuery.data?.analysis_run_id || pendingRunId;
   const latestEvent = stream.events.at(-1);
+  const refreshKeyRef = useRef<string>("");
   useEffect(() => {
+    const key = `${selectedId}:${currentRunId}`;
+    if (key !== refreshKeyRef.current) {
+      if (streamRefreshTimer.current !== null) {
+        window.clearTimeout(streamRefreshTimer.current);
+        streamRefreshTimer.current = null;
+      }
+      refreshKeyRef.current = key;
+    }
     if (!latestEvent || latestEvent.run_id !== currentRunId || !selectedId) return;
     if (streamRefreshTimer.current !== null) return;
     streamRefreshTimer.current = window.setTimeout(() => {
@@ -173,6 +198,18 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
       ]);
     }, 500);
   }, [currentRunId, latestEvent, queryClient, selectedId]);
+
+  useEffect(() => {
+    if (!latestEvent || latestEvent.run_id !== currentRunId) return;
+    const payload = latestEvent.payload as { status?: string } | undefined;
+    if (
+      latestEvent.type === "run_status" &&
+      payload?.status &&
+      TERMINAL_RUN_STATUSES.includes(payload.status)
+    ) {
+      setBusy((current) => (current === "analyze" ? null : current));
+    }
+  }, [currentRunId, latestEvent]);
 
   useEffect(() => () => {
     if (streamRefreshTimer.current !== null) window.clearTimeout(streamRefreshTimer.current);
@@ -194,6 +231,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   async function startConversation(message: string, files: File[]) {
     setBusy("conversation");
     setActionError(null);
+    setActionNotice(null);
     try {
       const accepted = await procurementApi.startConversation(message, files);
       setPendingRunId(accepted.run_id);
@@ -215,14 +253,20 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     if (!selectedId) return;
     setBusy("upload");
     setActionError(null);
+    setActionNotice(null);
     try {
       for (const file of files) await procurementApi.uploadQuote(selectedId, file);
       const updated = await procurementApi.request(selectedId);
       await commit(updated);
     } catch (error) {
       setActionError(errorText(error));
-      const updated = await procurementApi.request(selectedId);
-      await commit(updated);
+      try {
+        const updated = await procurementApi.request(selectedId);
+        await commit(updated);
+      } catch {
+        // Keep the original upload error; a failed refresh must not surface
+        // as an unhandled rejection.
+      }
     } finally {
       setBusy(null);
     }
@@ -236,6 +280,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     if (!selectedId) return;
     setBusy(`field:${quoteId}:${field}`);
     setActionError(null);
+    setActionNotice(null);
     try {
       await procurementApi.correctField(selectedId, quoteId, field, value);
       await commit(await procurementApi.request(selectedId));
@@ -259,6 +304,8 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     if (!selectedId) return;
     setBusy("analyze");
     setActionError(null);
+    setActionNotice(null);
+    setActionNotice(null);
     try {
       const accepted = await procurementApi.analyze(selectedId);
       setPendingRunId(accepted.run_id);
@@ -267,7 +314,6 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
       setActiveTab("compare");
     } catch (error) {
       setActionError(errorText(error));
-    } finally {
       setBusy(null);
     }
   }
@@ -275,6 +321,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   async function resume(message: string) {
     if (!selectedId) return;
     setActionError(null);
+    setActionNotice(null);
     try {
       const accepted = await procurementApi.resume(selectedId, message);
       setPendingRunId(accepted.run_id);
@@ -291,11 +338,12 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     }
   }
 
-  async function approve(quoteId: string, note: string) {
+  async function approve(quoteId: string, note: string, reviewAck = false) {
     const detail = detailQuery.data;
     if (!selectedId || !detail?.comparison) return;
     setBusy("approve");
     setActionError(null);
+    setActionNotice(null);
     try {
       const updated = await procurementApi.approve(selectedId, {
         snapshot_id: detail.comparison.id,
@@ -303,6 +351,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
         quote_id: quoteId,
         confirmed: true,
         note,
+        review_ack: reviewAck,
       });
       await commit(updated);
       setActiveTab("report");
@@ -318,6 +367,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     if (!selectedId || !detail?.comparison) return;
     setBusy("no_award");
     setActionError(null);
+    setActionNotice(null);
     try {
       const updated = await procurementApi.approve(selectedId, {
         snapshot_id: detail.comparison.id,
@@ -339,11 +389,25 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   const status = detail ? STATUS[detail.status] : null;
 
   function openConfig() {
-    if (configQuery.data) setConfigForm(configFormFrom(configQuery.data));
+    configFormReady.current = false;
+    if (configQuery.data) {
+      setConfigForm(configFormFrom(configQuery.data));
+      configFormReady.current = true;
+    }
     setConfigError(null);
     setConfigNotice(null);
     setShowConfig(true);
   }
+
+  useEffect(() => {
+    // Sync the drawer form as soon as the config query resolves, even when the
+    // drawer was opened before the response arrived. Without this the form
+    // keeps DEFAULT_CONFIG_FORM and saving silently overwrites the real config.
+    if (showConfig && !configFormReady.current && configQuery.data) {
+      setConfigForm(configFormFrom(configQuery.data));
+      configFormReady.current = true;
+    }
+  }, [configQuery.data, showConfig]);
 
   function updateConfigField<K extends keyof ProcurementModelConfigUpdate>(
     field: K,
@@ -355,6 +419,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   async function createDemoTask() {
     setDemoBusy("create");
     setActionError(null);
+    setActionNotice(null);
     try {
       const accepted = await procurementApi.createDemo();
       await requestsQuery.refetch();
@@ -375,10 +440,28 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     setCleanArmed(false);
     setDemoBusy("clean");
     setActionError(null);
+    setActionNotice(null);
+    setActionNotice(null);
     try {
       const result = await procurementApi.cleanDemo();
-      await requestsQuery.refetch();
-      setActionError(
+      const listResult = await requestsQuery.refetch();
+      const removedSelected =
+        !!selectedId && !(listResult.data || []).some((row) => row.id === selectedId);
+      if (selectedId) {
+        // The deleted request must not keep rendering from the stale detail
+        // cache (subsequent tabs would 404).
+        queryClient.removeQueries({ queryKey: ["procurement-request", selectedId] });
+        queryClient.removeQueries({ queryKey: ["procurement-report", selectedId] });
+        if (!removedSelected) {
+          await queryClient.invalidateQueries({ queryKey: ["procurement-request", selectedId] });
+        }
+      }
+      if (removedSelected) {
+        setSelectedId(null);
+        setPendingRunId(null);
+        setActiveTab("quotes");
+      }
+      setActionNotice(
         result.skipped > 0
           ? `已清理 ${result.removed} 个演示任务；${result.skipped} 个正在运行的任务已保留。`
           : null
@@ -417,6 +500,9 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
         </div>
         <div className="proc-topbar-meta">
           <span className="proc-runtime-state"><Wifi size={14} />采购服务 {backendVersion}</span>
+          <button className="proc-icon-button" type="button" title="运营仪表盘" aria-label="运营仪表盘" onClick={() => setShowDashboard((value) => !value)}>
+            <BarChart3 size={16} />
+          </button>
           <button className="proc-icon-button" type="button" title="API / 模型配置" aria-label="API / 模型配置" onClick={openConfig}>
             <Settings size={16} />
           </button>
@@ -438,7 +524,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                 {demoBusy === "clean" ? <LoaderCircle className="spin" size={13} /> : <Trash2 size={13} />}
                 {cleanArmed ? "确认清理？" : "清理"}
               </button>
-              <button className="proc-icon-button primary-icon" type="button" title="新建采购对话" aria-label="新建采购对话" onClick={() => { setActionError(null); setSelectedId(null); setShowCreate(true); }}>
+              <button className="proc-icon-button primary-icon" type="button" title="新建采购对话" aria-label="新建采购对话" onClick={() => { setActionError(null); setSelectedId(null); setShowCreate(true); setShowDashboard(false); }}>
                 <Plus size={17} />
               </button>
             </div>
@@ -461,7 +547,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                   type="button"
                   className={`proc-request-item ${selectedId === request.id ? "selected" : ""}`}
                   key={request.id}
-                  onClick={() => { setSelectedId(request.id); setShowCreate(false); setActiveTab("quotes"); setActionError(null); }}
+                  onClick={() => { setSelectedId(request.id); setShowCreate(false); setShowDashboard(false); setActiveTab("quotes"); setActionError(null); }}
                 >
                   <span className="proc-request-row"><code>{request.reference}</code><small>{requestDate(request.updated_at)}</small></span>
                   <strong>{request.title}</strong>
@@ -476,6 +562,11 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
         </aside>
 
         <section className="proc-main">
+          {actionNotice && !showDashboard ? <p className="proc-inline-success" role="status">{actionNotice}</p> : null}
+          {showDashboard ? (
+            <DashboardView />
+          ) : (
+            <>
           {showCreate || (!selectedId && !detail) ? (
             <NewProcurementConversation
               busy={busy === "conversation"}
@@ -541,7 +632,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                       </section>
                     ) : null}
                     {activeTab === "compare" ? (
-                      <ComparisonView request={detail} busy={busy} error={actionError} onAnalyze={analyze} onApprove={approve} onNoAward={noAward} onKnowledgeFeedback={knowledgeFeedback} />
+                      <ComparisonView request={detail} busy={busy} error={actionError} reviewPolicy={configQuery.data?.review_policy || "evidence"} onAnalyze={analyze} onApprove={approve} onNoAward={noAward} onKnowledgeFeedback={knowledgeFeedback} />
                     ) : null}
                     {activeTab === "report" ? (
                       <ReportView request={detail} report={reportQuery.data || null} loading={reportQuery.isPending} error={reportQuery.isError ? errorText(reportQuery.error) : null} />
@@ -561,6 +652,8 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
           ) : detailQuery.isPending && selectedId ? (
             <div className="proc-loading-state">正在恢复采购任务…</div>
           ) : null}
+            </>
+          )}
         </section>
       </main>
 
@@ -676,6 +769,15 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                     <label className="proc-field">
                       <span>独立评审模型（留空用主模型）</span>
                       <input value={configForm.review_model || ""} onChange={(event) => updateConfigField("review_model", event.target.value)} placeholder="例如 deepseek-v4-flash" />
+                    </label>
+                    <label className="proc-field">
+                      <span>评审策略</span>
+                      <select value={configForm.review_policy || "evidence"} onChange={(event) => updateConfigField("review_policy", event.target.value as "off" | "evidence" | "warn" | "gate")}>
+                        <option value="off">关闭（不评审）</option>
+                        <option value="evidence">仅记录证据</option>
+                        <option value="warn">异议告警（不阻塞）</option>
+                        <option value="gate">门禁（异议需人工确认）</option>
+                      </select>
                     </label>
                   </section>
 

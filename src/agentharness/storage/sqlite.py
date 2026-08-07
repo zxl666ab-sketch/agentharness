@@ -216,7 +216,7 @@ class Storage:
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        return self.runs.list_runs(session_id, limit, offset)
+        return self.runs.list_runs(session_id=session_id, limit=limit, offset=offset)
 
     def get_run_tree(self, run_id: str) -> list[dict[str, Any]]:
         return self.runs.get_run_tree(run_id)

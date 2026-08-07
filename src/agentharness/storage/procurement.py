@@ -263,7 +263,7 @@ class ProcurementRepo:
                 cursor = self._conn.execute(
                     """UPDATE procurement_requests
                        SET status = ?, approved_quote_id = ?, updated_at = ?
-                       WHERE id = ?""",
+                       WHERE id = ? AND status NOT IN ('approved', 'no_award')""",
                     (
                         status,
                         safe_decision.get("quote_id"),

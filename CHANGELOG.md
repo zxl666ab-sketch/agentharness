@@ -4,7 +4,26 @@ All notable changes are documented here. The project follows semantic versioning
 
 ## [Unreleased]
 
+### Added
+
+- Run timeline endpoint `GET /api/runs/{id}/timeline` and a timeline panel in 运行审计：事件与工具调用合并排序，附每工具耗时/尝试次数/错误码，用于失败归因。
+- Usage & cost dashboard：`GET /api/runs`（列表，支持 session/status 过滤）与 `GET /api/metrics/summary`（Token/成本/耗时/缓存命中/预算告警聚合），前端新增“运营仪表盘”页与 CSV 导出。
+- Prompt / 工具 Schema / 解析器 / 规则集版本化：每次采购 Run 记录 prompt 与工具 schema 的版本与 SHA-256 指纹，运行报告输出 `versions` 段，运行审计展示“本次运行配置”。
+- 独立评审产品化：`review_policy`（off / evidence / warn / gate）配置项；warn/gate 在审批提交前运行独立评审，gate 在评审异议时要求采购员显式勾选确认（`review_ack`），评审事件记录策略与是否审批前。
+
 ### Fixed
+
+- 工具结果超过内联预算被截断后，阶段机 `advance_on_result` 不再因非法 JSON 失效：`_invocation_stage` 对截断内容做 stage 标记回退解析，修复“对话/演示流审批永远 409”的卡死（回归测试：截断 capture 结果仍能完成审批）。
+- 非回环绑定（`--host 0.0.0.0` 等）未显式 `--allow-remote-execution` 时直接拒绝启动，避免读接口/SSE 在无认证下暴露。
+- API Key 改为加密落盘（Fernet + 数据目录内密钥文件），配置文件不再出现明文；旧明文文件仍可读取迁移。
+- 审批与修正/导入的 TOCTOU：写事务内重检 decision，`commit_decision` 的 UPDATE 增加状态守卫；并发重复审批的 `sqlite3.IntegrityError` 归一为 409。
+- 对话流附件被解析为报价后不再残留 staged 记录（attachments 与 quotes 重复展示）。
+- 快照失效后新建运行增加确定性兜底守护：run 结束后仍无快照则直接重跑确定性流水线。
+- 解析器内置墙钟预算（`time_budget_s`，API 与对话路径默认 10s），解析线程即使不可取消也会自行中止。
+- 报价导入在审批后返回 409（与修正接口一致）；模型配置抽屉在加载完成前打开时同步真实配置、加载中禁用保存；审批后字段修正入口只读化并为待复核字段提供取消按钮；清理演示任务后失效详情缓存并重置选中项；比价页审批后高亮实际批准供应商并在页脚显示名称。
+- 采购审计报告接口统一走 public_redact；RAG LIKE 回退转义 `%`/`_`；`supports_invoice` 解析优先识别“可开/专票”正特征；移除 `correct_field` 中不可达的 RAG 同步调用（工具函数保留并继续有测试覆盖）。
+- 前端小修：清理成功提示不再用红色错误样式、审批弹窗关闭重开重置、分析中按钮保持禁用直到 run 终态、`waiting_approval` 可停止、通用 API 网络错误中文提示、draft 报价面板显示“待 Agent 结构化需求”、RunReport 审批数 0 时显示 `N / —`、上传失败兜底请求不再产生 unhandled rejection、SSE 刷新定时器随任务切换重新武装。
+
 
 - Re-analysis after a quote correction is now deterministic: “开始比价” regenerates the comparison snapshot even when the resumed model refuses to repeat the analysis tool. The backend resumes with an explicit “snapshot invalidated, must re-run” instruction, exposes `requires_reanalysis` in the agent state, and falls back to the deterministic pipeline (with a UI-refresh run event) when the resumed run ends without a fresh snapshot.
 - Quote correction inline editors now collapse after a successful save instead of staying open on already-accepted fields.

@@ -265,7 +265,7 @@ export function RunReport({ report, loading = false, error = null }: Props) {
         <details className="report-section">
           <summary>
             <span><Terminal size={15} />工具与审批</span>
-            <span>{report.tools.length} / {report.approvals.length}</span>
+            <span>{report.tools.length} / {report.approvals.length ? report.approvals.length : "—"}</span>
             <ChevronRight size={15} />
           </summary>
           <div className="report-section-body report-audit-groups">

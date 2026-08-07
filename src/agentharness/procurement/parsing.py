@@ -183,6 +183,43 @@ def _boolean(value: Any) -> bool | None:
     return None
 
 
+_INVOICE_NEGATIVE = (
+    "不可开票",
+    "不能开票",
+    "不开票",
+    "不提供发票",
+    "不提供专票",
+    "不支持开票",
+    "noinvoice",
+    "invoiceunavailable",
+)
+_INVOICE_POSITIVE = (
+    "可开",
+    "专票",
+    "普票",
+    "能开",
+    "可开发票",
+    "invoiceavailable",
+    "invoicesupport",
+)
+
+
+def _supports_invoice(value: Any) -> bool | None:
+    """Boolean parse for supports_invoice that prioritises invoice-specific
+    markers over generic negation tokens such as 不含税 ("不含税可开专票" must
+    be treated as invoice-capable, not as "cannot invoice")."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    text = _key(value)
+    if any(token in text for token in _INVOICE_NEGATIVE):
+        return False
+    if any(token in text for token in _INVOICE_POSITIVE):
+        return True
+    return _boolean(text)
+
+
 def _currency(value: Any) -> str | None:
     text = str(value or "").strip().upper()
     if not text:
@@ -273,7 +310,11 @@ def coerce_field_value(field: str, value: Any) -> Any:
             return None
         return result
     if kind == "boolean":
-        return _boolean(value)
+        return (
+            _supports_invoice(value)
+            if field == "supports_invoice"
+            else _boolean(value)
+        )
     if kind == "currency":
         return _currency(value)
     if kind == "rate":
@@ -666,9 +707,23 @@ def _validate_xlsx_archive(data: bytes) -> None:
                     raise QuoteParseError("XLSX 压缩比异常")
 
 
-def _xlsx_quote(filename: str, data: bytes) -> dict[str, Any]:
+def _deadline(budget_s: float | None) -> float | None:
+    if budget_s is None:
+        return None
+    return time.monotonic() + budget_s
+
+
+def _check_deadline(deadline: float | None, *, what: str) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise QuoteParseError(f"{what}解析超过时间预算，已中止（请检查文件）")
+
+
+def _xlsx_quote(
+    filename: str, data: bytes, *, time_budget_s: float | None = None
+) -> dict[str, Any]:
     started = time.perf_counter()
     _validate_xlsx_archive(data)
+    deadline = _deadline(time_budget_s)
     try:
         workbook = load_workbook(
             io.BytesIO(data), read_only=True, data_only=True, keep_links=False
@@ -682,6 +737,7 @@ def _xlsx_quote(filename: str, data: bytes) -> dict[str, Any]:
         informational: dict[str, Any] = {}
         document_lines: list[str] = []
         for sheet in workbook.worksheets:
+            _check_deadline(deadline, what="XLSX")
             if int(sheet.max_row or 0) > MAX_XLSX_ROWS:
                 raise QuoteParseError(f"XLSX 每个工作表不得超过 {MAX_XLSX_ROWS} 行")
             if int(sheet.max_column or 0) > MAX_XLSX_COLUMNS:
@@ -696,6 +752,8 @@ def _xlsx_quote(filename: str, data: bytes) -> dict[str, Any]:
                 )
             )
             for row_index, row in enumerate(rows, start=1):
+                if row_index % 50 == 0:
+                    _check_deadline(deadline, what="XLSX")
                 populated = [(index + 1, value) for index, value in enumerate(row) if value not in (None, "")]
                 if populated:
                     document_lines.append(" | ".join(str(value) for _column, value in populated))
@@ -863,8 +921,11 @@ def _pdf_delimited_tables(
                 )
 
 
-def _pdf_quote(filename: str, data: bytes) -> dict[str, Any]:
+def _pdf_quote(
+    filename: str, data: bytes, *, time_budget_s: float | None = None
+) -> dict[str, Any]:
     started = time.perf_counter()
+    deadline = _deadline(time_budget_s)
     try:
         reader = PdfReader(io.BytesIO(data), strict=True)
     except Exception as exc:  # noqa: BLE001
@@ -878,6 +939,7 @@ def _pdf_quote(filename: str, data: bytes) -> dict[str, Any]:
     all_text: list[str] = []
     total_chars = 0
     for page_number, page in enumerate(reader.pages, start=1):
+        _check_deadline(deadline, what="PDF")
         try:
             text = page.extract_text() or ""
         except Exception as exc:  # noqa: BLE001
@@ -889,6 +951,8 @@ def _pdf_quote(filename: str, data: bytes) -> dict[str, Any]:
         lines = text.splitlines()
         _pdf_delimited_tables(fields, informational, lines, page_number)
         for line_number, line in enumerate(lines, start=1):
+            if line_number % 200 == 0:
+                _check_deadline(deadline, what="PDF")
             clean = line.strip()
             if not clean:
                 continue
@@ -937,11 +1001,13 @@ def _pdf_quote(filename: str, data: bytes) -> dict[str, Any]:
     )
 
 
-def parse_quote(filename: str, data: bytes) -> dict[str, Any]:
+def parse_quote(
+    filename: str, data: bytes, *, time_budget_s: float | None = None
+) -> dict[str, Any]:
     suffix = _validate_file(filename, data)
     if suffix == ".xlsx":
-        return _xlsx_quote(filename, data)
-    return _pdf_quote(filename, data)
+        return _xlsx_quote(filename, data, time_budget_s=time_budget_s)
+    return _pdf_quote(filename, data, time_budget_s=time_budget_s)
 
 
 def fields_requiring_review(extracted: dict[str, Any]) -> list[str]:

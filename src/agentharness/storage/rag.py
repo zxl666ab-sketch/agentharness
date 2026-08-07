@@ -201,10 +201,17 @@ class RagRepo:
         return self._like_search(query, limit=limit)
 
     def _like_search(self, query: str, *, limit: int) -> list[dict[str, Any]]:
-        pattern = f"%{query}%"
+        escaped = (
+            str(query or "")
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
         rows = self._reader().execute(
             """SELECT * FROM rag_chunks
-               WHERE item_name LIKE ? OR supplier_name LIKE ? OR content LIKE ?
+               WHERE item_name LIKE ? ESCAPE '\\' OR supplier_name LIKE ? ESCAPE '\\'
+                  OR content LIKE ? ESCAPE '\\'
                ORDER BY decision_at DESC, chunk_sha256 ASC LIMIT ?""",
             (pattern, pattern, pattern, limit),
         ).fetchall()

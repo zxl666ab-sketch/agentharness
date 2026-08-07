@@ -196,27 +196,40 @@ class RunRepo:
     def list_runs(
         self,
         session_id: str | None = None,
+        status: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         reader = self._reader()
+        where: list[str] = []
+        values: list[Any] = []
         if session_id:
-            rows = reader.execute(
-                self._RUN_PROJECTION
-                + " WHERE r.session_id = ? "
-                "ORDER BY r.created_at DESC, r.rowid DESC LIMIT ? OFFSET ?",
-                (session_id, limit, offset),
-            ).fetchall()
-        else:
-            rows = reader.execute(
-                self._RUN_PROJECTION
-                + " ORDER BY r.created_at DESC, r.rowid DESC LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
+            where.append("r.session_id = ?")
+            values.append(session_id)
+        if status:
+            where.append("r.status = ?")
+            values.append(status)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        rows = reader.execute(
+            self._RUN_PROJECTION
+            + clause
+            + " ORDER BY r.created_at DESC, r.rowid DESC LIMIT ? OFFSET ?",
+            (*values, limit, offset),
+        ).fetchall()
         result = [dict(r) for r in rows]
         for row in result:
             self._decorate_run_observability(row)
         return result
+
+    def list_runs_for_metrics(self, limit: int = 10_000) -> list[dict[str, Any]]:
+        """Flat run rows for aggregation without per-row observability queries."""
+        rows = self._reader().execute(
+            """SELECT id, session_id, status, provider, model, usage_json,
+                      created_at, updated_at, finished_at
+               FROM runs ORDER BY created_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def _decorate_run_observability(self, row: dict[str, Any]) -> None:
         metadata: dict[str, Any] = {}

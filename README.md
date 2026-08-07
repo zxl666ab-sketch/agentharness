@@ -251,6 +251,9 @@ POST /api/procurement/requests/{id}/analyze
 POST /api/procurement/requests/{id}/decision
 GET  /api/procurement/requests/{id}/report
 GET  /api/procurement/evaluation
+GET  /api/runs
+GET  /api/runs/{id}/timeline
+GET  /api/metrics/summary
 ```
 
 采购 Run 的只读审计接口提供 `GET /api/runs/{id}/report`、`GET /api/runs/{id}/checkpoint`、`GET /api/runs/{id}/approvals`、`GET /api/runs/{id}/messages`、`GET /api/runs/{id}/tool-invocations` 和 Artifact 读取。采购线不暴露通用 Run 创建、取消、恢复或事件控制端点；PUT、PATCH、DELETE 以及未列入白名单的 POST 返回 `405`。
