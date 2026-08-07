@@ -42,7 +42,7 @@
 - 工作量：0.5 天
 - 验收：设计文档定稿，检索键 / 评分 / 证据格式 / 指标全部可执行；本阶段后续待办引用该文档。
 
-### 1.2 [ ] 语料与索引存储（schema v15）
+### 1.2 [x] 语料与索引存储（schema v15）【已完成 · 2026-08-07 / 66ead65 / EVIDENCE_COMMIT_PENDING / docs/evidence/stage-6-schema-v15-rag-2026-08-07.md】
 - 目标/做法：`src/agentharness/storage/rag.py` 新增 `RagRepo`（唯一 SQL 所有者）；`src/agentharness/storage/migrations.py` `SCHEMA_VERSION 14 → 15`：新增 `rag_chunks`（`chunk_sha256` 唯一、`request_id/quote_id/artifact_id/artifact_sha256/request_reference/supplier_name/item_name/category/specifications_json/unit_price/currency/landed_unit_cost/lead_days/moq/decision/decision_at/content/embedding BLOB NULL/created_at`）+ 必要索引（supplier_name、item_name、category、decision_at）；`src/agentharness/storage/sqlite.py` 挂载 `self.rag` 委托。
 - 加分点：延续「每个域唯一 SQL 所有者 + 版本化迁移」约定；迁移本身可测。
 - 工作量：0.5–1 天
@@ -103,6 +103,7 @@
 ## 3. 阶段完成门槛
 
 阶段内全部待办满足自身验收和每条硬门槛后，才可进入该阶段真实模型验证。阶段验证成功、或已按外部阻塞规则如实记录为 `blocked`/`failed` 后，才能进入下一阶段；外部阻塞不得被伪装成成功。
+
 
 
 
