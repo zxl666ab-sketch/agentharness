@@ -32,10 +32,10 @@
 
 截图：`docs/evidence/stage-6-rag-ui-history-2026-08-07.png`、`docs/evidence/stage-6-rag-ui-empty-2026-08-07.png`。
 
-复现命令（2026-08-07 修订：演示数据供应商已应用中文演示名，移除会造成“全部淘汰”的不匹配请求）：
+复现命令（2026-08-07 修订：演示数据供应商已应用中文演示名，移除会造成“全部淘汰”的不匹配请求；匹配请求经真实 fake-provider Agent 运行，状态为 require_human 且带检查点，可直接走「提交供应商审批」恢复链路）：
 
 ```powershell
 uv run python scripts/setup_rag_demo.py --data-dir output/rag-ui-data --force
 uv run agentharness --workspace . --data-dir output/rag-ui-data --port 8741 --no-open
-# 浏览器打开 http://127.0.0.1:8741，选择 RFQ-20260807-21AC36 → 供应商比价
+# 浏览器打开 http://127.0.0.1:8741，选择「待审批」的匹配请求 → 供应商比价
 ```
