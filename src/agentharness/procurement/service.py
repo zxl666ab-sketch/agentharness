@@ -41,6 +41,28 @@ MAX_QUOTES_PER_REQUEST = 50
 DEFAULT_SIZE_TOLERANCE_MM = Decimal("2")
 DEFAULT_THICKNESS_TOLERANCE_UM = Decimal("3")
 
+# 领域需求的字段清单（唯一真源）。Agent 工具 schema 必须覆盖这些字段，
+# create_procurement_tools 会在构建时强制校验，防止“服务端已支持但工具
+# schema 没同步”的静默漂移（例如 required_delivery_date 曾缺失）。
+REQUIRED_REQUIREMENT_FIELDS = frozenset(
+    {"title", "item_name", "quantity", "unit", "specifications", "constraints"}
+)
+REQUIRED_SPEC_FIELDS = frozenset(
+    {"width_mm", "length_mm", "thickness_um", "material", "color", "print_colors"}
+)
+REQUIRED_CONSTRAINT_FIELDS = frozenset(
+    {"base_currency", "fx_rates", "max_lead_days", "invoice_required"}
+)
+SUPPORTED_CONSTRAINT_FIELDS = REQUIRED_CONSTRAINT_FIELDS | frozenset(
+    {
+        "size_tolerance_mm",
+        "thickness_tolerance_um",
+        "max_landed_unit_cost",
+        "destination",
+        "required_delivery_date",
+    }
+)
+
 
 class ProcurementError(ValueError):
     pass
@@ -90,7 +112,7 @@ def _domain_integer(
 
 
 def _validated_requirement(payload: dict[str, Any]) -> dict[str, Any]:
-    required = {"title", "item_name", "quantity", "unit", "specifications", "constraints"}
+    required = REQUIRED_REQUIREMENT_FIELDS
     missing = sorted(required - payload.keys())
     if missing:
         raise ProcurementError("采购需求缺少字段：" + ", ".join(missing))
@@ -108,14 +130,7 @@ def _validated_requirement(payload: dict[str, Any]) -> dict[str, Any]:
     raw_specs = payload["specifications"]
     if not isinstance(raw_specs, dict):
         raise ProcurementError("采购规格必须是对象")
-    required_specs = {
-        "width_mm",
-        "length_mm",
-        "thickness_um",
-        "material",
-        "color",
-        "print_colors",
-    }
+    required_specs = REQUIRED_SPEC_FIELDS
     missing_specs = sorted(required_specs - raw_specs.keys())
     if missing_specs:
         raise ProcurementError("采购规格缺少字段：" + ", ".join(missing_specs))
@@ -152,12 +167,7 @@ def _validated_requirement(payload: dict[str, Any]) -> dict[str, Any]:
     raw_constraints = payload["constraints"]
     if not isinstance(raw_constraints, dict):
         raise ProcurementError("采购约束必须是对象")
-    required_constraints = {
-        "base_currency",
-        "fx_rates",
-        "max_lead_days",
-        "invoice_required",
-    }
+    required_constraints = REQUIRED_CONSTRAINT_FIELDS
     missing_constraints = sorted(required_constraints - raw_constraints.keys())
     if missing_constraints:
         raise ProcurementError("采购约束缺少字段：" + ", ".join(missing_constraints))
@@ -1730,4 +1740,12 @@ class ProcurementService:
             }
         )
 
-__all__ = ["MAX_QUOTES_PER_REQUEST", "ProcurementError", "ProcurementService"]
+__all__ = [
+    "MAX_QUOTES_PER_REQUEST",
+    "REQUIRED_REQUIREMENT_FIELDS",
+    "REQUIRED_SPEC_FIELDS",
+    "REQUIRED_CONSTRAINT_FIELDS",
+    "SUPPORTED_CONSTRAINT_FIELDS",
+    "ProcurementError",
+    "ProcurementService",
+]

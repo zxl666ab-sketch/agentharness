@@ -43,6 +43,8 @@ from agentharness.procurement.parsing import PARSER_VERSION
 from agentharness.procurement.service import (
     DEFAULT_SIZE_TOLERANCE_MM,
     DEFAULT_THICKNESS_TOLERANCE_UM,
+    REQUIRED_SPEC_FIELDS,
+    SUPPORTED_CONSTRAINT_FIELDS,
     ProcurementError,
     ProcurementService,
 )
@@ -557,6 +559,15 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
         ],
         "additionalProperties": False,
     }
+    spec_props = set(capture_schema["properties"]["specifications"]["properties"])
+    constraint_props = set(capture_schema["properties"]["constraints"]["properties"])
+    missing_specs = REQUIRED_SPEC_FIELDS - spec_props
+    missing_constraints = SUPPORTED_CONSTRAINT_FIELDS - constraint_props
+    if missing_specs or missing_constraints:
+        raise RuntimeError(
+            "采购工具 schema 与领域字段不一致（领域新增了字段但没有同步工具 schema）："
+            + ", ".join(sorted(missing_specs | missing_constraints))
+        )
     tools = [
         _ProcurementTool(
             name="procurement_read_request",
