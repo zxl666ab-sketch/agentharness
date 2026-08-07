@@ -447,3 +447,85 @@ def test_fake_extraction_keeps_spec_orientation() -> None:
     assert requirement["constraints"]["thickness_tolerance_um"] == "500"
     assert requirement["constraints"]["max_landed_unit_cost"] == "3.50"
 
+
+
+# ---------------------------------------------------------------- env config is source of truth
+@pytest.mark.asyncio
+async def test_env_config_wins_over_persisted_ui_config(data_dir, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import json as _json
+
+    monkeypatch.setenv("AGENTHARNESS_PROCUREMENT_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env-test-1234")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://env.example/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "env-model")
+
+    # Write a stale UI-saved config that must NOT override .env.
+    stale = {
+        "source": "ui",
+        "provider": "openai",
+        "model": "stale-model",
+        "base_url": "https://stale.example/v1",
+        "api_key": "sk-stale-key",
+        "api_mode": "chat",
+    }
+    config_path = data_dir / "procurement-model-config.json"
+    config_path.write_text(_json.dumps(stale), encoding="utf-8")
+
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    agent = ProcurementAgent(harness, service, run_profile=None)
+    try:
+        config = agent.model_config()
+        assert config["model"] == "env-model"
+        assert config["base_url"] == "https://env.example/v1"
+        assert config["api_key_configured"] is True
+
+        # Saving from the drawer must not write a masking override while .env
+        # is configured: the stale file stays untouched.
+        await agent.configure_model(
+            provider="procurement_fake",
+            model="procurement-fake-v1",
+            base_url=None,
+            api_key=None,
+            api_mode="auto",
+            reasoning_effort=None,
+            input_price_per_million_usd=0,
+            output_price_per_million_usd=0,
+            cached_input_price_per_million_usd=0,
+            max_cost_usd=None,
+        )
+        assert "stale-model" in config_path.read_text(encoding="utf-8")
+    finally:
+        await agent.aclose()
+        await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_configure_model_blank_key_falls_back_to_env(data_dir, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("AGENTHARNESS_PROCUREMENT_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env-fallback-5678")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://env.example/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "env-model")
+
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    agent = ProcurementAgent(harness, service, run_profile=None)
+    try:
+        config = await agent.configure_model(
+            provider="openai",
+            model="env-model",
+            base_url=None,
+            api_key=None,
+            api_mode="auto",
+            reasoning_effort=None,
+            input_price_per_million_usd=0,
+            output_price_per_million_usd=0,
+            cached_input_price_per_million_usd=0,
+            max_cost_usd=None,
+        )
+        assert config["api_key_configured"] is True
+        assert config["base_url"] == "https://env.example/v1"
+        assert config["model"] == "env-model"
+    finally:
+        await agent.aclose()
+        await harness.aclose()

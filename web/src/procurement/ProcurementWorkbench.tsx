@@ -691,7 +691,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
               {!configQuery.isPending && !configQuery.isError ? (
                 <>
                   <section className="proc-config-section">
-                    <div className="proc-config-section-title"><strong>模型服务</strong><span>默认读取环境变量；保存后由本机配置覆盖</span></div>
+                    <div className="proc-config-section-title"><strong>模型服务</strong><span>检测到 .env 模型配置时以 .env 为准（本机保存仅当前会话生效）</span></div>
                     <label className="proc-field proc-span-2">
                       <span>Provider</span>
                       <select value={configForm.provider} onChange={(event) => {

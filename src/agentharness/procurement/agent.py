@@ -960,6 +960,50 @@ class ProcurementAgent:
         except (InvalidToken, Exception):  # noqa: BLE001 - corrupt value is dropped
             return None
 
+    @staticmethod
+    def _env_model_config_present() -> bool:
+        """True when the process environment defines a model configuration.
+
+        When the operator configures .env (OPENAI_* / AGENTHARNESS_PROCUREMENT_*),
+        the environment is the single source of truth: a stale UI-saved
+        procurement-model-config.json must never silently mask it.
+        """
+        return any(
+            os.environ.get(key, "").strip()
+            for key in (
+                "OPENAI_API_KEY",
+                "OPENAI_BASE_URL",
+                "OPENAI_MODEL",
+                "OPENAI_API_MODE",
+                "AGENTHARNESS_PROCUREMENT_MODEL",
+                "AGENTHARNESS_PROCUREMENT_BASE_URL",
+                "AGENTHARNESS_PROCUREMENT_REASONING_EFFORT",
+            )
+        )
+
+    def _register_env_provider(self) -> None:
+        """Register the OpenAI adapter backed by .env (use_env=True).
+
+        An explicitly registered provider (tests or a pre-wired gateway) takes
+        precedence and is never overwritten.
+        """
+        if self.run_profile.provider != PROCUREMENT_LIVE_PROVIDER:
+            return
+        if PROCUREMENT_LIVE_PROVIDER in self.harness.providers:
+            return
+        from agentharness.providers.openai_adapter import OpenAIResponsesAdapter
+
+        self.harness.register_provider(
+            PROCUREMENT_LIVE_PROVIDER,
+            OpenAIResponsesAdapter(
+                api_key="",
+                base_url=None,
+                default_model=self.run_profile.model,
+                api_mode=self.run_profile.api_mode or "auto",
+                use_env=True,
+            ),
+        )
+
     def _read_persisted_model_config(self) -> dict[str, Any] | None:
         try:
             payload = json.loads(self.model_config_path.read_text(encoding="utf-8"))
@@ -1041,6 +1085,12 @@ class ProcurementAgent:
         )
 
     def _restore_persisted_model_config(self) -> None:
+        if self._env_model_config_present():
+            # .env is the source of truth. A stale UI-saved file (for example a
+            # model/base_url the operator no longer uses) must not override it.
+            self._register_env_provider()
+            logger.info("采购模型配置来自环境变量(.env)，忽略本地持久化配置")
+            return
         payload = self._read_persisted_model_config()
         # Only settings explicitly saved by the model-config drawer may
         # override the process environment. Older files were also used for
@@ -1083,6 +1133,10 @@ class ProcurementAgent:
             return
 
     def _persist_model_config(self) -> None:
+        if self._env_model_config_present():
+            # Keep .env authoritative: don't leave a file behind that would
+            # diverge from it on a later startup.
+            return
         profile = self.run_profile
         adapter = self.harness.providers.get(PROCUREMENT_LIVE_PROVIDER)
         api_key = (
@@ -1497,17 +1551,21 @@ class ProcurementAgent:
         if not clean_model:
             raise ValueError("OpenAI 兼容 API 必须填写模型名称")
         current_adapter = self.harness.providers.get(PROCUREMENT_LIVE_PROVIDER)
-        configured_key = (api_key or "").strip() or str(
-            getattr(current_adapter, "api_key", "") or ""
-        ).strip() or None
+        configured_key = (api_key or "").strip() or None
         from agentharness.providers.openai_adapter import OpenAIResponsesAdapter
 
+        if configured_key is None and self._env_model_config_present():
+            # Leave the key empty and let the adapter read OPENAI_API_KEY from
+            # .env instead of pinning a stale in-memory key (use_env=False).
+            use_env = True
+        else:
+            use_env = False
         adapter = OpenAIResponsesAdapter(
             api_key=configured_key,
             base_url=clean_base_url,
             default_model=clean_model,
             api_mode=clean_mode,
-            use_env=False,
+            use_env=use_env,
         )
         self.harness.register_provider(PROCUREMENT_LIVE_PROVIDER, adapter)
         if current_adapter is not None and current_adapter is not adapter:

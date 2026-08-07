@@ -25,6 +25,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 前端小修：清理成功提示不再用红色错误样式、审批弹窗关闭重开重置、分析中按钮保持禁用直到 run 终态、`waiting_approval` 可停止、通用 API 网络错误中文提示、draft 报价面板显示“待 Agent 结构化需求”、RunReport 审批数 0 时显示 `N / —`、上传失败兜底请求不再产生 unhandled rejection、SSE 刷新定时器随任务切换重新武装。
 - 需求规格方向：系统提示词（`procurement-prompt-v2`）与 capture 工具 schema 显式锁定“规格按 宽×长×高 书写，第一个数字是宽度、第二个是长度”，修复真实模型把 `400x300x250mm` 捕获成宽 300 / 长 400、导致三家报价全部被“尺寸超差”误淘汰的问题；fake provider 提取方向加回归测试锁定。
 - 厚度公差上限从 100µm 放宽到 5000µm（`api/procurement.py` 与 `service._validated_requirement` 同步），瓦楞纸箱等厚材质的 500µm 公差不再被拒绝，capture schema 同步说明允许范围。
+- 模型配置一致性：检测到 .env 模型配置（`OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_MODEL` 或 `AGENTHARNESS_PROCUREMENT_MODEL` 等）时，启动以 .env 为准——忽略并停止写入本地 `procurement-model-config.json`；前端配置抽屉同步显示 .env 值并标注“以 .env 为准”；保存空白 API Key 时回退读取环境变量（不再用旧密钥屏蔽 env）。
 
 
 - Re-analysis after a quote correction is now deterministic: “开始比价” regenerates the comparison snapshot even when the resumed model refuses to repeat the analysis tool. The backend resumes with an explicit “snapshot invalidated, must re-run” instruction, exposes `requires_reanalysis` in the agent state, and falls back to the deterministic pipeline (with a UI-refresh run event) when the resumed run ends without a fresh snapshot.
