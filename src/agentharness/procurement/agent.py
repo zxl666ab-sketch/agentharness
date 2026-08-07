@@ -450,7 +450,11 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
                     },
                     "length_mm": {
                         "type": ["string", "number"],
-                        "description": "长度（mm）：规格中的第二个尺寸。例如 400x300x250mm 的长度是 300，不是 400。",
+                        "description": (
+                            "长度（mm）：规格中的第二个尺寸。例如 400x300x250mm 的长度是 300，不是 400。"
+                            "卷材（胶带、缠绕膜、气泡膜、珍珠棉等）长度按毫米填写：100m=100000、"
+                            "1000m=1000000。"
+                        ),
                     },
                     "thickness_um": {
                         "type": ["string", "number"],
@@ -492,6 +496,15 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
                         "exclusiveMinimum": 0,
                     },
                     "invoice_required": {"type": "boolean"},
+                    "required_delivery_date": {
+                        "type": "string",
+                        "format": "date",
+                        "description": (
+                            "可选；要求到货日期（YYYY-MM-DD）。用户给出类似 "
+                            "“8 月 15 日前必须到货”时填入对应日期；该约束与 "
+                            "max_lead_days 同时生效，晚于该日期到货的报价不合格。"
+                        ),
+                    },
                     "size_tolerance_mm": {
                         "type": ["string", "number"],
                         "default": str(DEFAULT_SIZE_TOLERANCE_MM),
@@ -1639,6 +1652,10 @@ class ProcurementAgent:
             "不要写反方向；"
             "规格按 宽×长×高（mm）书写：第一个数字是宽度、第二个是长度、第三个是高度，"
             "不要把宽度与长度写反（例如 400x300x250mm 表示宽 400mm、长 300mm、高 250mm）；"
+            "用户给出“X 月 X 日前必须到货”等日期要求时，必须结构化为 required_delivery_date "
+            "（YYYY-MM-DD），该约束与 max_lead_days 同时生效，不得丢弃；"
+            "未写年份的“X 月 X 日”一律按当前年份（2026 年）解释；若按当前年份计算该日期 "
+            "已经过去或明显不合理，则停下来提示采购员确认，不要擅自改用其他年份；"
             "必须忠实保留用户明确说出的颜色、印刷色数和开票要求。"
             "只有收到 [procurement_supplier_selection] JSON 后才能调用审批工具；审批成功后最终回复"
             "必须包含【采购决策已验证】。审批工具成功前严禁输出、引用、解释或复述该验证标记。"

@@ -128,7 +128,13 @@ def _validated_requirement(payload: dict[str, Any]) -> dict[str, Any]:
             raw_specs["width_mm"], "宽度", exclusive_minimum=Decimal("0"), maximum=Decimal("10000")
         ),
         "length_mm": _domain_decimal(
-            raw_specs["length_mm"], "长度", exclusive_minimum=Decimal("0"), maximum=Decimal("10000")
+            raw_specs["length_mm"],
+            "长度",
+            exclusive_minimum=Decimal("0"),
+            # 卷材（胶带/缠绕膜/气泡膜/珍珠棉等）按毫米填写长度时可达数十万甚至上百万
+            # 毫米（1 km = 1,000,000 mm）。上限 10,000,000 mm（10 km）覆盖常见卷材，
+            # 避免把合法卷材长度误当成超出限制而拒绝整单。
+            maximum=Decimal("10000000"),
         ),
         "thickness_um": _domain_decimal(
             raw_specs["thickness_um"],
