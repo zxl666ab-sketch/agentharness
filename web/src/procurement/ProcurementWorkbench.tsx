@@ -246,6 +246,14 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     }
   }
 
+  function knowledgeFeedback(chunkId: string, action: "viewed" | "adopted") {
+    // Lightweight feedback: never blocks the procurement flow.
+    if (!selectedId) return;
+    void procurementApi
+      .knowledgeFeedback(selectedId, chunkId, action)
+      .catch(() => undefined);
+  }
+
   async function analyze() {
     if (!selectedId) return;
     setBusy("analyze");
@@ -532,7 +540,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                       </section>
                     ) : null}
                     {activeTab === "compare" ? (
-                      <ComparisonView request={detail} busy={busy} error={actionError} onAnalyze={analyze} onApprove={approve} onNoAward={noAward} />
+                      <ComparisonView request={detail} busy={busy} error={actionError} onAnalyze={analyze} onApprove={approve} onNoAward={noAward} onKnowledgeFeedback={knowledgeFeedback} />
                     ) : null}
                     {activeTab === "report" ? (
                       <ReportView request={detail} report={reportQuery.data || null} loading={reportQuery.isPending} error={reportQuery.isError ? errorText(reportQuery.error) : null} />

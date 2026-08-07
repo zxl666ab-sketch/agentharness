@@ -173,6 +173,7 @@ export type ProcurementRequestSummary = {
   quote_count: number;
   unresolved_field_count: number;
   decision?: ProcurementDecision | null;
+  knowledge_references?: KnowledgeReference[];
   created_at: string;
   updated_at: string;
 };
@@ -189,6 +190,29 @@ export type ProcurementRequest = ProcurementRequestSummary & {
   comparison: ComparisonSnapshot | null;
   decision: ProcurementDecision | null;
 };
+
+export type KnowledgeReference = {
+  chunk_id: string;
+  chunk_sha256: string;
+  request_reference: string;
+  decision_at: string;
+  supplier_name: string;
+  item_name: string;
+  specification_summary: string;
+  unit_price: string;
+  currency: string;
+  landed_unit_cost: string;
+  lead_days: number | null;
+  moq: number | null;
+  decision: string;
+  source_sha256: string;
+  score: string;
+  quality_flags: string[];
+  note?: string | null;
+  text: string;
+};
+
+export type KnowledgeFeedbackAction = "viewed" | "adopted";
 
 export type ProcurementRunAccepted = {
   purchase_request_id: string;

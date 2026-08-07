@@ -676,3 +676,35 @@
 /* Read-only field value + edit affordance */
 .proc-readonly-value { flex: 1; min-width: 0; font-size: var(--text-xs); color: var(--text); word-break: break-all; }
 .proc-field-editor .proc-icon-button { flex: 0 0 auto; }
+
+/* ---- 历史成交参考（stage-6 RAG） ---- */
+.proc-knowledge-block { padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.proc-knowledge-block.empty { display: flex; align-items: center; gap: 10px; }
+.proc-knowledge-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; color: var(--text-secondary); }
+.proc-knowledge-head h3 { margin: 0; font-size: 13px; color: var(--text); }
+.proc-knowledge-note { margin-left: auto; color: var(--text-muted); font-size: 10px; }
+.proc-knowledge-empty { margin: 0; color: var(--text-muted); font-size: 12px; }
+.proc-knowledge-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+.proc-knowledge-table { width: 100%; min-width: 860px; border-collapse: collapse; }
+.proc-knowledge-table th { height: 32px; padding: 0 10px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--surface-subtle); color: var(--text-muted); font-size: 10px; text-align: left; white-space: nowrap; }
+.proc-knowledge-table th:last-child { border-right: 0; }
+.proc-knowledge-table td { padding: 9px 10px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); font-size: 11px; vertical-align: middle; white-space: nowrap; }
+.proc-knowledge-table td:last-child { border-right: 0; }
+.proc-knowledge-table tr:last-child td { border-bottom: 0; }
+.proc-knowledge-table td > strong { display: block; color: var(--text); }
+.proc-knowledge-table td > small { display: block; margin-top: 2px; color: var(--text-muted); font-size: 10px; }
+.proc-knowledge-status { display: inline-flex; align-items: center; gap: 4px; color: var(--text-muted); }
+.proc-knowledge-status.pass { color: var(--success); }
+.proc-knowledge-source { border: 0; background: transparent; padding: 0; color: var(--info); font-size: 11px; cursor: pointer; text-decoration: underline dotted; }
+.proc-knowledge-actions { display: inline-flex; gap: 6px; }
+.proc-knowledge-action { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--text-secondary); font-size: 10px; cursor: pointer; }
+.proc-knowledge-action:hover { border-color: var(--accent); color: var(--accent); }
+.proc-knowledge-more { display: inline-flex; align-items: center; gap: 5px; margin-top: 8px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-subtle); color: var(--text-secondary); font-size: 11px; cursor: pointer; }
+.proc-knowledge-chevron { transition: transform 0.15s ease; }
+.proc-knowledge-chevron.open { transform: rotate(180deg); }
+.proc-knowledge-dialog { width: min(520px, 92vw); }
+.proc-knowledge-detail { display: grid; gap: 8px; margin: 0; padding: 14px 18px 16px; }
+.proc-knowledge-detail div { display: grid; grid-template-columns: 88px 1fr; gap: 10px; align-items: baseline; }
+.proc-knowledge-detail dt { color: var(--text-muted); font-size: 11px; }
+.proc-knowledge-detail dd { margin: 0; color: var(--text); font-size: 12px; word-break: break-all; }
+.proc-knowledge-detail dd code { font-size: 10px; color: var(--text-secondary); }

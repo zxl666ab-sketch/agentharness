@@ -1,8 +1,11 @@
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 
 import { ComparisonView } from "./ComparisonView";
+import { KnowledgeReferences } from "./KnowledgeReferences";
 import { friendlyProcurementError } from "./api";
 import {
   NewProcurementConversation,
@@ -314,5 +317,116 @@ describe("procurement workflow views", () => {
     expect(markdown).toContain("选定供应商：Alpha Packaging");
     expect(markdown).toContain("供应商已人工批准");
     expect(markdown).toContain("分析运行 ID：run");
+  });
+});
+describe("历史成交参考（stage-6 RAG）", () => {
+  function reference(index: number) {
+    const id = `chunk-${index}`;
+    return {
+      chunk_id: id,
+      chunk_sha256: id.padEnd(64, "0"),
+      request_reference: `RFQ-2026060${index}-HISTORY`,
+      decision_at: `2026-06-0${index}T00:00:00+00:00`,
+      supplier_name: `供应商${index}`,
+      item_name: "快递袋",
+      specification_summary: "250×350mm / 60μm / PE / 白色 / 1色",
+      unit_price: "0.42",
+      currency: "CNY",
+      landed_unit_cost: "0.4521",
+      lead_days: 10,
+      moq: 5000,
+      decision: "approved",
+      source_sha256: "9".repeat(64),
+      score: "0.93",
+      quality_flags: [],
+      text: `RFQ-2026060${index}-HISTORY 供应商${index} 快递袋`,
+    };
+  }
+
+  function references(count: number) {
+    return Array.from({ length: count }, (_, index) => reference(index + 1));
+  }
+
+  it("shows top-3 by default with traceable source and expandable top-5", () => {
+    const withHistory = analyzed();
+    withHistory.knowledge_references = references(5);
+    const html = renderToString(
+      <ComparisonView
+        request={withHistory}
+        busy={null}
+        onAnalyze={async () => undefined}
+        onApprove={async () => undefined}
+        onNoAward={async () => undefined}
+        onKnowledgeFeedback={() => undefined}
+      />
+    );
+    expect(html).toContain("历史成交参考");
+    expect(html).toContain("供应商1");
+    expect(html).toContain("供应商2");
+    expect(html).toContain("供应商3");
+    expect(html).not.toContain("供应商4");
+    expect(html).toContain("展开全部 5 条");
+    expect(html).toContain("已成交");
+    expect(html).toContain("RFQ-20260601-HISTORY");
+    expect(html).toContain("查看详情");
+    expect(html).toContain("有帮助");
+  });
+
+  it("shows the empty state when there is no similar history", () => {
+    const noHistory = analyzed();
+    noHistory.knowledge_references = [];
+    const html = renderToString(
+      <ComparisonView
+        request={noHistory}
+        busy={null}
+        onAnalyze={async () => undefined}
+        onApprove={async () => undefined}
+        onNoAward={async () => undefined}
+      />
+    );
+    expect(html).toContain("暂无相似历史成交");
+  });
+
+  it("expands from top-3 to top-5 and records viewed/adopted feedback", async () => {
+    const calls: Array<[string, string]> = [];
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <KnowledgeReferences
+          references={references(5)}
+          onFeedback={(chunkId, action) => calls.push([chunkId, action])}
+        />
+      );
+    });
+    expect(container.querySelectorAll(".proc-knowledge-table tbody tr").length).toBe(3);
+    const more = container.querySelector("button.proc-knowledge-more") as HTMLButtonElement;
+    await act(async () => {
+      more.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(container.querySelectorAll(".proc-knowledge-table tbody tr").length).toBe(5);
+
+    const viewButton = container.querySelector(
+      'button[aria-label^="查看详情"]'
+    ) as HTMLButtonElement;
+    await act(async () => {
+      viewButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const adoptButton = container.querySelector(
+      'button[aria-label^="有帮助"]'
+    ) as HTMLButtonElement;
+    await act(async () => {
+      adoptButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(calls).toEqual([
+      ["chunk-1".padEnd(64, "0"), "viewed"],
+      ["chunk-1".padEnd(64, "0"), "adopted"],
+    ]);
+    expect(container.textContent).toContain("来源哈希");
+    await act(async () => {
+      root.unmount();
+    });
+    document.body.removeChild(container);
   });
 });
