@@ -27,6 +27,7 @@ from agentharness.procurement.parsing import (
     fields_requiring_review,
     parse_quote,
 )
+from agentharness.rag.chunking import build_chunk
 
 MAX_QUOTES_PER_REQUEST = 50
 DEFAULT_SIZE_TOLERANCE_MM = Decimal("2")
@@ -979,6 +980,20 @@ class ProcurementService:
             "actor": actor,
             "created_at": _utcnow(),
         }
+        approved_quote = next(
+            (item for item in quotes if item["id"] == quote_id),
+            None,
+        )
+        rag_chunks: list[dict[str, Any]] = []
+        if approved_quote is not None:
+            rag_chunks.append(
+                build_chunk(
+                    request=request,
+                    quote=approved_quote,
+                    decision=decision,
+                    snapshot_result=snapshot["result"],
+                )
+            )
         self.repo.commit_decision(
             decision,
             {
@@ -998,6 +1013,7 @@ class ProcurementService:
                 "note": decision["note"],
                 },
             },
+            rag_chunks=rag_chunks,
         )
         return self.get_request(request_id)
 
@@ -1259,6 +1275,10 @@ class ProcurementService:
                 invalidate_snapshot=True,
                 pending_quotes=[{**quote, "extracted": extracted}],
             )
+            self._sync_rag_chunk_for_quote(
+                request,
+                {**quote, "extracted": extracted},
+            )
         stored = self.repo.get_quote(quote_id)
         if stored is None:
             raise RuntimeError("报价修正后不可见")
@@ -1483,6 +1503,35 @@ class ProcurementService:
         if self.repo.get_decision(request_id) is not None:
             raise ProcurementError("已形成审批结论的采购需求不可再修改")
         return request
+
+    def _sync_rag_chunk_for_quote(
+        self,
+        request: dict[str, Any],
+        quote: dict[str, Any],
+    ) -> None:
+        """Keep approved knowledge chunks consistent with business facts.
+
+        Called on the same write transaction as a human field correction.
+        Existing chunks for the quote are removed first, then rebuilt only if
+        the request has an approved decision for exactly this quote.
+        """
+        quote_id = str(quote["id"])
+        self.storage.rag.delete_chunks_for_quote(quote_id)
+        decision = self.repo.get_decision(str(request["id"]))
+        if decision is None or str(decision.get("decision")) != "approved":
+            return
+        if str(decision.get("quote_id")) != quote_id:
+            return
+        snapshot = self.repo.get_snapshot(str(decision["snapshot_id"]))
+        if snapshot is None:
+            return
+        chunk = build_chunk(
+            request=request,
+            quote=quote,
+            decision=decision,
+            snapshot_result=snapshot["result"],
+        )
+        self.storage.rag.upsert_chunk(chunk)
 
     def _refresh_request_state(
         self,
