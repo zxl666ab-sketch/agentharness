@@ -70,8 +70,8 @@ _ALIASES = {
     "moq": ["moq", "起订量", "最小起订量", "minimumorder", "minimumorderquantity"],
     "lead_time_days": ["交期", "交货期", "生产周期", "交期天", "leaddays", "leadtime", "deliverydays"],
     "supports_invoice": ["可开票", "是否可开票", "发票", "增值税专票", "invoice", "supportsinvoice"],
-    "width_mm": ["宽", "宽度", "宽mm", "width", "widthmm"],
-    "length_mm": ["长", "长度", "高度", "长mm", "length", "height", "lengthmm"],
+    "width_mm": ["宽", "宽度", "宽mm", "宽度mm", "width", "widthmm"],
+    "length_mm": ["长", "长度", "高度", "长mm", "长度mm", "length", "height", "lengthmm"],
     "thickness_um": ["厚度", "厚度um", "厚度微米", "丝数", "thickness", "thicknessum", "micron"],
     "payment_terms": ["付款条件", "结算方式", "账期", "payment", "paymentterms"],
     "valid_until": ["有效期", "报价有效期", "validuntil", "expiry", "expiration"],
@@ -574,6 +574,17 @@ def _extract_specs(fields: dict[str, Any], document_kind: str) -> None:
 
 def _infer_common(fields: dict[str, Any], text: str, document_kind: str) -> None:
     def inferred(field: str, value: Any, confidence: float, excerpt: str) -> None:
+        current = fields.get(field)
+        if (
+            isinstance(current, dict)
+            and current.get("status") == "accepted"
+            and float(current.get("confidence", 0)) >= REVIEW_THRESHOLD
+        ):
+            # 显式标签已高置信度解析出该字段时，自由文本推断是冗余噪音；
+            # 不应再与显式值制造“跨来源冲突”把字段打成 needs_review。
+            # 典型反例：标签“是否可开票: 否”里的“可开”会被正向正则命中，
+            # 没有这个保护，所有中文“不可开票”报价都会被误判为待复核。
+            return
         _set_field(
             fields,
             field,

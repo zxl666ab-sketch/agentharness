@@ -1031,6 +1031,113 @@ def test_quote_parser_preserves_per_ten_thousand_price_basis() -> None:
     assert extracted["fields"]["price_basis"]["value"] == 10_000
 
 
+def test_quote_parser_recognizes_chinese_dimension_labels() -> None:
+    """Regression: 宽度（mm）/长度（mm） labels must map to width_mm/length_mm.
+
+    The Chinese labels normalize to 宽度mm/长度mm which were missing from the
+    alias table, so explicit dimension cells were silently ignored and the
+    parser fell back to description inference.
+    """
+    document = _xlsx_bytes(
+        [
+            ["供应商", "中文规格供应商"],
+            ["品名", "PE 白色快递袋 510x350mm 60um 单色印刷"],
+            ["材质", "PE"],
+            ["颜色", "白色"],
+            ["印刷色数", "1"],
+            ["币种", "CNY"],
+            ["单价", "500"],
+            ["计价数量", "1000"],
+            ["税率", "13%"],
+            ["是否含税", "是"],
+            ["是否包邮", "是"],
+            ["MOQ", "1000"],
+            ["交期", "7"],
+            ["是否可开票", "是"],
+            ["宽度（mm）", "510"],
+            ["长度（mm）", "350"],
+            ["厚度（微米）", "60"],
+        ]
+    )
+
+    extracted = parse_quote("chinese-dimension-labels.xlsx", document)
+    fields = extracted["fields"]
+
+    assert fields["width_mm"]["value"] == "510"
+    assert fields["width_mm"]["status"] == "accepted"
+    assert fields["length_mm"]["value"] == "350"
+    assert fields["length_mm"]["status"] == "accepted"
+    assert fields["thickness_um"]["value"] == "60"
+    assert fields["thickness_um"]["status"] == "accepted"
+    assert "width_mm" not in fields_requiring_review(extracted)
+    assert "length_mm" not in fields_requiring_review(extracted)
+
+
+def test_quote_parser_does_not_conflict_when_invoice_label_contains_positive_word() -> None:
+    """Regression: “是否可开票: 否” must stay accepted.
+
+    The label itself contains 可开, and the free-text inference regex matched
+    the label text, creating a false cross-source conflict that forced every
+    Chinese “cannot invoice” quote into human review.
+    """
+    document = _xlsx_bytes(
+        [
+            ["供应商", "不可开票供应商"],
+            ["品名", "PE 白色快递袋 250x350mm 60um 单色印刷"],
+            ["币种", "CNY"],
+            ["单价", "500"],
+            ["计价数量", "1000"],
+            ["税率", "13%"],
+            ["是否含税", "是"],
+            ["是否包邮", "是"],
+            ["MOQ", "1000"],
+            ["交期", "7"],
+            ["是否可开票", "否"],
+        ]
+    )
+
+    extracted = parse_quote("invoice-no-label.xlsx", document)
+    invoice = extracted["fields"]["supports_invoice"]
+
+    assert invoice["value"] is False
+    assert invoice["status"] == "accepted"
+    assert "conflicts" not in invoice
+    assert "supports_invoice" not in fields_requiring_review(extracted)
+
+
+def test_requirement_accepts_roll_goods_length_in_mm() -> None:
+    """Regression: roll goods (tape/film/foam) are quoted in mm with lengths
+    far above the old 10000 mm flat-sheet cap; they must not be rejected."""
+    from agentharness.procurement.service import _validated_requirement
+
+    payload = {
+        "title": "气泡膜卷材",
+        "item_name": "气泡膜",
+        "quantity": 1000,
+        "unit": "piece",
+        "specifications": {
+            "width_mm": "600",
+            "length_mm": "50000",
+            "thickness_um": "90",
+            "material": "PE",
+            "color": "透明",
+            "print_colors": 0,
+        },
+        "constraints": {
+            "base_currency": "CNY",
+            "fx_rates": {"CNY": "1"},
+            "max_lead_days": 14,
+            "invoice_required": True,
+        },
+    }
+    validated = _validated_requirement(payload)
+    assert validated["specifications"]["length_mm"] == "50000"
+
+    payload["specifications"]["length_mm"] = "1200000"
+    validated = _validated_requirement(payload)
+    assert validated["specifications"]["length_mm"] == "1200000"
+
+
 def test_material_identity_constraints_exclude_cheaper_wrong_product() -> None:
     request = {
         **load_frozen_truth()["request"],
