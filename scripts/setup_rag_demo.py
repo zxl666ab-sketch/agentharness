@@ -11,11 +11,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
+from typing import Any
 
 from agentharness.contracts import RunStatus
 from agentharness.harness import Harness
+from agentharness.procurement.agent import ProcurementAgent, _fake_run_profile
 from agentharness.procurement.evaluation import build_case_document, load_frozen_truth
 from agentharness.procurement.parsing import parse_quote
 from agentharness.procurement.service import ProcurementService
@@ -55,21 +58,37 @@ def _import_two(service: ProcurementService, request_id: str, truth: dict) -> No
         )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-dir", type=Path, default=Path("output/rag-ui-data"))
-    parser.add_argument("--force", action="store_true", help="overwrite existing data dir")
-    args = parser.parse_args()
-    if args.data_dir.exists() and not args.force:
-        print(f"数据目录已存在：{args.data_dir}（使用 --force 重建）")
-        return
-    if args.data_dir.exists():
+async def _analyze_matching_async(
+    service: ProcurementService,
+    request_id: str,
+) -> str:
+    """Run one real fake-provider agent analysis so the run ends resumable.
+
+    Ends at require_human (analysis completed, awaiting buyer selection) with a
+    persisted checkpoint — the same state a real analyzed request has, so the
+    UI approval resume path (提交供应商审批) works on the demo data.
+    """
+    agent = ProcurementAgent(service.harness, service, run_profile=_fake_run_profile())
+    try:
+        accepted = await agent.start_existing(request_id)
+        run_id = accepted["run_id"]
+        await asyncio.wait_for(agent._tasks[run_id], timeout=120)
+        return run_id
+    finally:
+        await agent.aclose()
+
+
+async def _build_demo_async(data_dir: Path, *, force: bool) -> dict[str, Any]:
+    """Create the RAG demo dataset in ``data_dir`` and return its key facts."""
+    if data_dir.exists() and not force:
+        raise FileExistsError(f"数据目录已存在：{data_dir}（使用 force=True 重建）")
+    if data_dir.exists():
         import shutil
 
-        shutil.rmtree(args.data_dir)
+        shutil.rmtree(data_dir)
 
     truth = load_frozen_truth()
-    harness = Harness(data_dir=args.data_dir)
+    harness = Harness(data_dir=data_dir)
     service = ProcurementService(harness)
     try:
         # Five historical approved requests -> five rag_chunks (expand top-5).
@@ -98,26 +117,59 @@ def main() -> None:
             harness.storage.update_run(run_id, finished=True)
             history_ids.append(str(history["id"]))
 
-        # Matching request -> history references shown.
+        # Matching request -> history references shown. Run through the real
+        # fake-provider agent so the run is require_human + checkpointed
+        # (resumable by the approval flow), not a fabricated completed run.
         matching = service.create_request(_request_body(truth))
         _import_two(service, str(matching["id"]), truth)
-        run_id = "rag-demo-match-run"
-        harness.storage.create_run(
-            run_id=run_id,
-            session_id=str(matching["session_id"]),
-            root_run_id=run_id,
-            status=RunStatus.completed,
-        )
-        result = service.execute_analysis_pipeline(str(matching["id"]), run_id=run_id)
-        harness.storage.update_run(run_id, finished=True)
-        assert result["knowledge_references"], "matching request should see history"
+        matching_run_id = await _analyze_matching_async(service, str(matching["id"]))
+        detail = service.get_request(str(matching["id"]))
+        assert detail["knowledge_references"], "matching request should see history"
 
-        print(f"数据目录：{args.data_dir}")
-        print(f"历史已成交请求数：{len(history_ids)}（供应商已应用中文演示名）")
-        print(f"匹配请求（应显示历史参考，可展开 top-5）：{matching['id']} ({matching['reference']})")
-        print(f"索引 chunk 数：{harness.storage.rag.count_chunks()}")
+        run = harness.get_run(matching_run_id)
+        assert run is not None and run["status"] == RunStatus.require_human.value, (
+            "matching run should be require_human (awaiting buyer selection)"
+        )
+        assert harness.storage.load_checkpoint(matching_run_id) is not None, (
+            "matching run should carry a resume checkpoint"
+        )
+
+        return {
+            "data_dir": str(data_dir),
+            "history_ids": history_ids,
+            "matching_id": str(matching["id"]),
+            "matching_reference": str(matching["reference"]),
+            "matching_run_id": matching_run_id,
+            "chunk_count": harness.storage.rag.count_chunks(),
+        }
     finally:
         harness.close()
+
+
+async def build_demo_async(data_dir: Path, *, force: bool = False) -> dict[str, Any]:
+    """Async entry used by tests that already run inside an event loop."""
+    return await _build_demo_async(data_dir, force=force)
+
+
+def build_demo(data_dir: Path, *, force: bool = False) -> dict[str, Any]:
+    """Create the RAG demo dataset in ``data_dir`` and return its key facts."""
+    return asyncio.run(_build_demo_async(data_dir, force=force))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data-dir", type=Path, default=Path("output/rag-ui-data"))
+    parser.add_argument("--force", action="store_true", help="overwrite existing data dir")
+    args = parser.parse_args()
+    if args.data_dir.exists() and not args.force:
+        print(f"数据目录已存在：{args.data_dir}（使用 --force 重建）")
+        return
+    result = build_demo(args.data_dir, force=True)
+    print(f"数据目录：{result['data_dir']}")
+    print(f"历史已成交请求数：{len(result['history_ids'])}（供应商已应用中文演示名）")
+    print(f"匹配请求（应显示历史参考，可展开 top-5）：{result['matching_id']} ({result['matching_reference']})")
+    print(f"匹配运行：{result['matching_run_id']}（status=require_human，带检查点，可审批恢复）")
+    print(f"索引 chunk 数：{result['chunk_count']}")
 
 
 if __name__ == "__main__":
