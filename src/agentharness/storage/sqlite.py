@@ -1,4 +1,4 @@
-"""SQLite WAL storage facade — delegates to per-domain repositories.
+﻿"""SQLite WAL storage facade — delegates to per-domain repositories.
 
 The connection, its writer lock and per-thread readers live in
 :class:`StorageCore`; each domain (runs, events, messages, checkpoints, tool
@@ -31,6 +31,7 @@ from agentharness.storage.events import EventRepo
 from agentharness.storage.leases import LeaseRepo
 from agentharness.storage.messages import MessageRepo
 from agentharness.storage.procurement import ProcurementRepo
+from agentharness.storage.rag import RagRepo
 from agentharness.storage.runs import RunRepo
 from agentharness.storage.sessions import SessionRepo
 from agentharness.storage.tool_invocations import ToolInvocationRepo
@@ -60,6 +61,7 @@ class Storage:
         self.runs = RunRepo(self._core, self.redactor, events=self.events)
         self.messages = MessageRepo(self._core, self.redactor)
         self.procurement = ProcurementRepo(self._core, self.redactor)
+        self.rag = RagRepo(self._core, self.redactor)
         self.checkpoints = CheckpointRepo(self._core, self.redactor)
         self.tool_invocations = ToolInvocationRepo(self._core, self.redactor)
         self.approvals = ApprovalRepo(self._core, self.redactor)
@@ -374,3 +376,4 @@ class Storage:
 
     def get_artifact_by_sha(self, sha: str) -> dict[str, Any] | None:
         return self.artifact_index.get_artifact_by_sha(sha)
+

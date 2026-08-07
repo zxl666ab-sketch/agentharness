@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -399,6 +399,58 @@ MIGRATIONS: dict[int, str] = {
     """,
     13: """
     ALTER TABLE tool_invocations ADD COLUMN reason TEXT;
+    """,
+    15: """
+    CREATE TABLE IF NOT EXISTS rag_chunks (
+        chunk_sha256 TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        quote_id TEXT,
+        artifact_id TEXT NOT NULL,
+        artifact_sha256 TEXT NOT NULL,
+        request_reference TEXT NOT NULL,
+        supplier_name TEXT NOT NULL,
+        item_name TEXT NOT NULL,
+        category TEXT NOT NULL,
+        specifications_json TEXT NOT NULL DEFAULT '{}',
+        unit_price TEXT,
+        currency TEXT,
+        landed_unit_cost TEXT,
+        lead_days INTEGER,
+        moq INTEGER,
+        decision TEXT NOT NULL,
+        decision_at TEXT NOT NULL,
+        content TEXT NOT NULL,
+        quality_flags_json TEXT NOT NULL DEFAULT '[]',
+        embedding BLOB,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_rag_chunks_supplier ON rag_chunks(supplier_name);
+    CREATE INDEX IF NOT EXISTS idx_rag_chunks_item ON rag_chunks(item_name);
+    CREATE INDEX IF NOT EXISTS idx_rag_chunks_category ON rag_chunks(category);
+    CREATE INDEX IF NOT EXISTS idx_rag_chunks_decision_at ON rag_chunks(decision_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_rag_chunks_quote ON rag_chunks(quote_id);
+    CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunks_fts USING fts5(
+        item_name,
+        supplier_name,
+        content,
+        content='rag_chunks',
+        content_rowid='rowid'
+    );
+    CREATE TRIGGER IF NOT EXISTS rag_chunks_ai AFTER INSERT ON rag_chunks BEGIN
+        INSERT INTO rag_chunks_fts(rowid, item_name, supplier_name, content)
+        VALUES (new.rowid, new.item_name, new.supplier_name, new.content);
+    END;
+    CREATE TRIGGER IF NOT EXISTS rag_chunks_ad AFTER DELETE ON rag_chunks BEGIN
+        INSERT INTO rag_chunks_fts(rag_chunks_fts, rowid, item_name, supplier_name, content)
+        VALUES ('delete', old.rowid, old.item_name, old.supplier_name, old.content);
+    END;
+    CREATE TRIGGER IF NOT EXISTS rag_chunks_au AFTER UPDATE ON rag_chunks BEGIN
+        INSERT INTO rag_chunks_fts(rag_chunks_fts, rowid, item_name, supplier_name, content)
+        VALUES ('delete', old.rowid, old.item_name, old.supplier_name, old.content);
+        INSERT INTO rag_chunks_fts(rowid, item_name, supplier_name, content)
+        VALUES (new.rowid, new.item_name, new.supplier_name, new.content);
+    END;
     """,
     14: """
     CREATE TABLE IF NOT EXISTS procurement_purchase_orders (
