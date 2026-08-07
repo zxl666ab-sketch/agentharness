@@ -1333,6 +1333,8 @@ class ProcurementAgent:
                 "②已结构化/已复核：procurement_execute_analysis（执行确定性比价并准备人工选择）；"
                 "③收到 [procurement_supplier_selection] JSON：procurement_approve_supplier（采购员已确认，完成审批）。"
                 "不要在前一步完成前调用后续工具，也不要在同一状态下重复调用同一工具。"
+                "所有面向采购员的回复必须使用纯中文文本，不使用 Markdown 符号（例如 **、-、`、#），"
+                "不使用表情符号；需要强调时用中文引号或“加粗”语义的普通文字表达。"
             ),
             provider=self.run_profile.provider,
             model=self.run_profile.model,
