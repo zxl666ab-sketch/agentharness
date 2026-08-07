@@ -241,6 +241,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
       await commit(await procurementApi.request(selectedId));
     } catch (error) {
       setActionError(errorText(error));
+      throw error;
     } finally {
       setBusy(null);
     }
@@ -464,7 +465,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                 >
                   <span className="proc-request-row"><code>{request.reference}</code><small>{requestDate(request.updated_at)}</small></span>
                   <strong>{request.title}</strong>
-                  <span className="proc-request-row"><small>{request.quote_count} 家报价 · {request.quantity.toLocaleString("zh-CN")} 个</small><i className={itemStatus.tone}>{itemStatus.label}</i></span>
+                  <span className="proc-request-row"><small>{request.quote_count} 家报价 · {request.status === "draft" ? "待识别" : `${request.quantity.toLocaleString("zh-CN")} 个`}</small><i className={itemStatus.tone}>{itemStatus.label}</i></span>
                 </button>
               );
             })}
@@ -492,10 +493,10 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                   {status ? <span className={`proc-status ${status.tone}`}><i />{status.label}</span> : null}
                 </div>
                 <div className="proc-request-facts">
-                  <span><small>物料</small><strong>{detail.item_name}</strong></span>
-                  <span><small>采购量</small><strong>{detail.quantity.toLocaleString("zh-CN")} 个</strong></span>
-                  <span><small>规格</small><strong>{String(detail.specifications.width_mm)} × {String(detail.specifications.length_mm)} mm · {String(detail.specifications.thickness_um)} µm</strong></span>
-                  <span><small>最长交期</small><strong>{String(detail.constraints.max_lead_days)} 天</strong></span>
+                  <span><small>物料</small><strong>{detail.status === "draft" ? "待识别" : detail.item_name}</strong></span>
+                  <span><small>采购量</small><strong>{detail.status === "draft" ? "待识别" : `${detail.quantity.toLocaleString("zh-CN")} 个`}</strong></span>
+                  <span><small>规格</small><strong>{detail.status === "draft" ? "待识别" : `${String(detail.specifications.width_mm)} × ${String(detail.specifications.length_mm)} mm · ${String(detail.specifications.thickness_um)} µm`}</strong></span>
+                  <span><small>最长交期</small><strong>{detail.status === "draft" ? "待识别" : `${String(detail.constraints.max_lead_days)} 天`}</strong></span>
                 </div>
                 <ol className="proc-progress" aria-label="采购进度">
                   {STEPS.map((step, index) => (

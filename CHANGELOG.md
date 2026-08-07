@@ -4,6 +4,20 @@ All notable changes are documented here. The project follows semantic versioning
 
 ## [Unreleased]
 
+### Fixed
+
+- Re-analysis after a quote correction is now deterministic: “开始比价” regenerates the comparison snapshot even when the resumed model refuses to repeat the analysis tool. The backend resumes with an explicit “snapshot invalidated, must re-run” instruction, exposes `requires_reanalysis` in the agent state, and falls back to the deterministic pipeline (with a UI-refresh run event) when the resumed run ends without a fresh snapshot.
+- Quote correction inline editors now collapse after a successful save instead of staying open on already-accepted fields.
+- Draft requests no longer render placeholder “1 个” / “undefined” facts; the header and sidebar show 待识别 while the agent is still reading.
+- Run reports label `require_human` conclusions as “待人工处理原因” instead of “失败原因”, and the frontend RunReport type now includes the `require_human` status the backend actually returns.
+- The “开始比价” button is disabled and labeled “已比价” once a valid comparison snapshot exists, so it no longer silently no-ops.
+
+### Changed
+
+- Correcting the shipping fee on a quote whose “是否含运费” is 是 now shows an inline hint explaining that the freight is already included and will not be added again.
+- The comparison table column “成本指数” is renamed “性价比指数” with a tooltip explaining the formula (higher is better).
+- The agent system prompt and capture-tool schema now pin the `fx_rates` direction (1 unit of the quoted currency → base-currency units), preventing real models from inverting e.g. USD/CNY=7.2 when the base currency is USD.
+
 ### Added
 
 - Procurement sourcing workbench for ecommerce packaging: structured requests, bounded XLSX/text-PDF quote imports, evidence-backed fields, confidence review and manual corrections.

@@ -127,6 +127,39 @@ def test_procurement_profile_defaults_to_openai_and_is_priced_and_budgeted(
     assert request.metadata["procurement_provider_mode"] == "live"
 
 
+def test_procurement_prompt_and_schema_pin_fx_rate_direction(data_dir: Path) -> None:
+    """fx_rates must define 1 unit of the quoted currency -> base-currency units,
+    so real models do not invert USD/CNY when the base currency is not CNY."""
+    harness = Harness(data_dir=data_dir)
+    try:
+        agent = ProcurementAgent(
+            harness,
+            ProcurementService(harness),
+            run_profile=_fake_run_profile(),
+        )
+        request = agent._run_request(
+            request_id="request-fx",
+            session_id="session-fx",
+            message="分析报价",
+            source="procurement_structured",
+        )
+        system = request.system or ""
+        assert "1 单位该币种可兑换的本位币数量" in system
+        assert "USD: 7.2" in system
+        assert "CNY: 0.138888" in system
+        assert "不要写反方向" in system
+        schema = next(
+            tool.spec.parameters
+            for tool in agent.harness.tools.values()
+            if tool.spec.name == "procurement_capture_requirement"
+        )
+        fx_description = schema["properties"]["constraints"]["properties"]["fx_rates"]["description"]
+        assert "Never invert the direction" in fx_description
+        assert "USD/CNY=7.2" in fx_description
+    finally:
+        harness.close()
+
+
 @pytest.mark.asyncio
 async def test_procurement_model_config_redacts_api_key_and_applies_to_runs(
     data_dir: Path,
@@ -3240,6 +3273,111 @@ async def test_procurement_quote_change_invalidates_stale_snapshot(
         assert stale_after_reanalysis.status_code == 409
         assert (await client.get(f"/api/runs/{run_id}/approvals")).json() == []
 
+    await app.state.procurement_agent.aclose()
+    await app.state.run_supervisor.aclose()
+    await harness.aclose()
+
+
+class _RefusingResumeProvider(ProcurementFakeProvider):
+    """Fake provider that refuses to repeat the analysis tool on resume,
+    mimicking real-model behavior observed after a correction invalidated
+    the comparison snapshot."""
+
+    async def stream(self, request: ModelRequest):
+        user_text = "".join(
+            message.content
+            for message in request.messages
+            if message.role == MessageRole.user
+        )
+        if (
+            sum(1 for m in request.messages if m.role == MessageRole.user) > 1
+            and "[procurement_supplier_selection]" not in user_text
+        ):
+            async for item in self._text(
+                "比价此前已执行完毕且复算通过，本轮不重复调用分析工具。"
+            ):
+                yield item
+            return
+        async for item in super().stream(request):
+            yield item
+
+
+@pytest.mark.asyncio
+async def test_reanalysis_after_correction_is_deterministic_when_model_refuses(
+    data_dir, workspace
+) -> None:
+    """开始比价 must regenerate the comparison even when the resumed model
+    refuses to repeat the analysis tool (real-model behavior observed after a
+    correction invalidated the snapshot)."""
+    truth = load_frozen_truth()
+    cases = [
+        next(item for item in truth["quotes"] if item["id"] == case_id)
+        for case_id in ("q-alpha", "q-beta")
+    ]
+    harness = Harness(
+        data_dir=data_dir,
+        providers={"procurement_fake": _RefusingResumeProvider()},
+    )
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        started = await client.post(
+            "/api/procurement/conversations",
+            json={
+                "message": (
+                    "采购10000个PE白色快递袋，规格250x350mm、厚60微米、单色印刷，"
+                    "15天内交付上海松江，必须开票；USD/CNY按7.2，尺寸公差2mm、"
+                    "厚度公差3微米。请比较附件报价并推荐供应商。"
+                ),
+                "attachments": [_upload(case) for case in cases],
+            },
+        )
+        assert started.status_code == 202
+        accepted = started.json()
+        request_id = accepted["purchase_request_id"]
+        run_id = accepted["run_id"]
+        await _wait_for_run_status(client, run_id, {"require_human"})
+        detail = (await client.get(f"/api/procurement/requests/{request_id}")).json()
+        old_snapshot = detail["comparison"]
+        alpha = next(
+            item
+            for item in detail["quotes"]
+            if item["source_filename"] == cases[0]["filename"]
+        )
+        service = app.state.procurement_service
+        assert service.agent_state(request_id)["requires_reanalysis"] is False
+
+        corrected = await client.post(
+            f"/api/procurement/requests/{request_id}/quotes/{alpha['id']}/corrections",
+            json={"field": "shipping_fee", "value": "25", "actor": "采购员王敏"},
+        )
+        assert corrected.status_code == 200
+        invalidated = (await client.get(f"/api/procurement/requests/{request_id}")).json()
+        assert invalidated["status"] == "ready"
+        assert invalidated["current_snapshot_id"] is None
+        assert service.agent_state(request_id)["requires_reanalysis"] is True
+
+        resumed = await client.post(f"/api/procurement/requests/{request_id}/analyze")
+        assert resumed.status_code == 202
+        assert resumed.json()["run_id"] == run_id
+
+        refreshed = await _wait_for_comparison(
+            client, request_id, run_id=run_id, timeout_s=10
+        )
+        await _wait_for_run_status(client, run_id, {"require_human"})
+        new_snapshot = refreshed["comparison"]
+        assert refreshed["status"] == "analyzed"
+        assert new_snapshot["version"] == old_snapshot["version"] + 1
+        assert new_snapshot["id"] != old_snapshot["id"]
+        assert new_snapshot["input_sha256"] != old_snapshot["input_sha256"]
+        # The deterministic fallback must publish a refresh event so the web UI
+        # notices the new snapshot without an extra model turn.
+        events = (await client.get(f"/api/runs/{run_id}/events?limit=2000")).json()["items"]
+        assert any(
+            event["type"] == "run_status"
+            and event["payload"].get("reason") == "比价快照已重新生成，等待人工选择供应商"
+            for event in events
+        )
     await app.state.procurement_agent.aclose()
     await app.state.run_supervisor.aclose()
     await harness.aclose()

@@ -732,3 +732,14 @@
 .proc-knowledge-detail dt { color: var(--text-muted); font-size: 11px; }
 .proc-knowledge-detail dd { margin: 0; color: var(--text); font-size: 12px; word-break: break-all; }
 .proc-knowledge-detail dd code { font-size: 10px; color: var(--text-secondary); }
+
+.proc-field-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--surface-warning, rgba(245, 158, 11, 0.12));
+  color: var(--text-warning, #b45309);
+  font-size: 12px;
+  line-height: 1.5;
+}

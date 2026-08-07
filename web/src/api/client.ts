@@ -139,7 +139,7 @@ export type RunReport = {
   evidence_sha256: string;
   run: RunRow;
   conclusion: {
-    status: "passed" | "failed" | "needs_review" | "pending" | "unverified" | "cancelled" | "interrupted" | "budget_stopped";
+    status: "passed" | "failed" | "needs_review" | "pending" | "require_human" | "unverified" | "cancelled" | "interrupted" | "budget_stopped";
     label: string;
     verified: boolean;
     reason: string;

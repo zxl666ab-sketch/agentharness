@@ -158,7 +158,7 @@ export function ComparisonView({
               <th>到货单价</th>
               <th>起订量（MOQ）</th>
               <th>交期</th>
-              <th>成本指数</th>
+              <th title="指数 = 最低到货成本 ÷ 当前到货成本 × 100，越高越优">性价比指数</th>
             </tr>
           </thead>
           <tbody>

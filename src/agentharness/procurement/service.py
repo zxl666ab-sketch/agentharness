@@ -1127,6 +1127,10 @@ class ProcurementService:
             "quote_count": detail["quote_count"],
             "unresolved_quote_count": len(unresolved_quotes),
             "quote_scope": "unresolved_only",
+            "requires_reanalysis": (
+                str(detail.get("status") or "") == "ready"
+                and detail.get("current_snapshot_id") is None
+            ),
             "quotes": [
                 {
                     "id": quote["id"],

@@ -158,7 +158,7 @@ export function RunReport({ report, loading = false, error = null }: Props) {
 
       {conclusion.status !== "passed" && verification.failure_reasons.length ? (
         <div className="report-failures" role="alert">
-          <strong><AlertTriangle size={14} />失败原因</strong>
+          <strong><AlertTriangle size={14} />{conclusion.status === "needs_review" ? "待人工处理原因" : "失败原因"}</strong>
           <ul>
             {verification.failure_reasons.map((reason) => <li key={reason}>{reason}</li>)}
           </ul>
