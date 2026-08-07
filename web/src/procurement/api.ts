@@ -171,6 +171,7 @@ export const procurementApi = {
       quote_id?: string;
       confirmed: boolean;
       note?: string;
+      review_ack?: boolean;
     }
   ) =>
     postJson<ProcurementRequest>(`/api/procurement/requests/${requestId}/decision`, {

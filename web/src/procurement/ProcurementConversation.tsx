@@ -261,7 +261,7 @@ export function ProcurementConversation({
   const status = runQuery.data?.status || "";
   const needsClarification = status === "require_human";
   const canRecover = status === "failed" || status === "cancelled" || status === "interrupted" || status === "budget_stopped";
-  const canStop = status === "pending" || status === "running";
+  const canStop = status === "pending" || status === "running" || status === "waiting_approval";
 
   async function submitReply(event: FormEvent) {
     event.preventDefault();

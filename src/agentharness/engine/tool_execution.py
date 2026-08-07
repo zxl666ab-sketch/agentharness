@@ -161,15 +161,26 @@ def current_stage_index(
     return min(current, len(stages) - 1)
 
 
+_STAGE_MARKER = re.compile(r'"stage"\s*:\s*"([^"]+)"')
+
+
 def _invocation_stage(invocation: ToolInvocationRecord) -> str:
-    """Best-effort stage label embedded in a succeeded tool result payload."""
+    """Best-effort stage label embedded in a succeeded tool result payload.
+
+    Large tool results are externalized to an artifact and the retained inline
+    content is truncated with a `\n...[artifact:...]` suffix, which makes the
+    content an invalid JSON document. The procurement tools keep the `stage`
+    marker near the front of the payload, so a bounded regex fallback keeps the
+    deterministic stage machine advancing even for truncated results.
+    """
     result = invocation.result
     if result is None or result.is_error:
         return ""
     try:
         payload = json.loads(result.content or "{}")
     except (TypeError, json.JSONDecodeError):
-        return ""
+        match = _STAGE_MARKER.search(result.content or "")
+        return match.group(1) if match else ""
     if not isinstance(payload, dict):
         return ""
     return str(payload.get("stage") or "")

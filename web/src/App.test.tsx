@@ -13,8 +13,11 @@ describe("采购工作台入口", () => {
       "events",
       "health",
       "messages",
+      "metricsSummary",
       "report",
       "run",
+      "runs",
+      "timeline",
       "toolInvocations",
     ]);
   });

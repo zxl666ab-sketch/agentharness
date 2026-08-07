@@ -486,6 +486,8 @@ class ProcurementService:
             summary=f"采购报价原件：{filename}",
         )
         with self.storage.transaction():
+            if self.repo.get_decision(request_id) is not None:
+                raise ProcurementError("已形成审批结论的采购需求不可再修改")
             artifact_id = self.storage.register_artifact(meta)
             attachment = {
                 "filename": filename,
@@ -522,6 +524,8 @@ class ProcurementService:
         run_id: str,
     ) -> dict[str, Any]:
         self._editable_request(request_id)
+        if self.repo.get_decision(request_id) is not None:
+            raise ProcurementError("已形成审批结论的采购需求不可再修改")
         validated = _validated_requirement(payload)
         self.repo.update_request(
             request_id,
@@ -560,7 +564,9 @@ class ProcurementService:
             data = self.storage.artifacts.get_bytes(str(attachment["sha256"]))
             if data is None:
                 raise ProcurementError(f"报价原件不可用：{attachment['filename']}")
-            extracted = parse_quote(str(attachment["filename"]), data)
+            extracted = parse_quote(
+                str(attachment["filename"]), data, time_budget_s=10.0
+            )
             quote = self.import_quote(
                 request_id,
                 filename=str(attachment["filename"]),
@@ -937,7 +943,10 @@ class ProcurementService:
         request = self.repo.get_request(request_id)
         if request is None:
             raise KeyError(request_id)
-        if request.get("approved_quote_id"):
+        if request.get("approved_quote_id") or str(request.get("status") or "") in {
+            "approved",
+            "no_award",
+        }:
             raise ProcurementError("该采购需求已经完成供应商审批")
         if request.get("current_snapshot_id") != snapshot_id:
             raise ProcurementError("比价快照已失效，请重新分析")
@@ -1204,6 +1213,8 @@ class ProcurementService:
             "processing_ms": extracted.get("processing_ms", 0),
         }
         with self.storage.transaction():
+            if self.repo.get_decision(request_id) is not None:
+                raise ProcurementError("已形成审批结论的采购需求不可再修改")
             artifact_id = self.storage.register_artifact(meta)
             quote["source_artifact_id"] = artifact_id
             self.repo.create_quote(quote)
@@ -1271,6 +1282,8 @@ class ProcurementService:
         review_fields = fields_requiring_review(extracted)
         supplier = str(fields.get("supplier_name", {}).get("value") or quote["supplier_name"])
         with self.storage.transaction():
+            if self.repo.get_decision(request_id) is not None:
+                raise ProcurementError("已形成审批结论的采购需求不可再修改")
             self.repo.update_quote(
                 quote_id,
                 extracted=extracted,
@@ -1294,10 +1307,6 @@ class ProcurementService:
                 request,
                 invalidate_snapshot=True,
                 pending_quotes=[{**quote, "extracted": extracted}],
-            )
-            self._sync_rag_chunk_for_quote(
-                request,
-                {**quote, "extracted": extracted},
             )
         stored = self.repo.get_quote(quote_id)
         if stored is None:
@@ -1507,10 +1516,20 @@ class ProcurementService:
         return len(self._staged_attachments(request_id))
 
     def _staged_attachments(self, request_id: str) -> list[dict[str, Any]]:
-        return [
+        staged = [
             dict(event["payload"])
             for event in self.repo.list_audit_events(request_id)
             if event["type"] == "attachment_staged"
+        ]
+        if not staged:
+            return []
+        imported_hashes = {
+            str(quote["source_sha256"]) for quote in self.repo.list_quotes(request_id)
+        }
+        return [
+            item
+            for item in staged
+            if str(item.get("sha256") or "") not in imported_hashes
         ]
 
     def _enrich_quote(self, quote: dict[str, Any]) -> dict[str, Any]:
@@ -1613,9 +1632,9 @@ class ProcurementService:
     ) -> None:
         """Keep approved knowledge chunks consistent with business facts.
 
-        Called on the same write transaction as a human field correction.
-        Existing chunks for the quote are removed first, then rebuilt only if
-        the request has an approved decision for exactly this quote.
+        Intentionally not wired into correct_field (post-approval edits are
+        rejected by the editable guard); kept as a tested utility for future
+        flows that may rebuild knowledge chunks after a business-fact change.
         """
         quote_id = str(quote["id"])
         self.storage.rag.delete_chunks_for_quote(quote_id)

@@ -1,10 +1,11 @@
-import { act } from "react";
+﻿import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 
 import { ComparisonView } from "./ComparisonView";
+import { DashboardView } from "./DashboardView";
 import { KnowledgeReferences } from "./KnowledgeReferences";
 import { friendlyProcurementError } from "./api";
 import {
@@ -463,3 +464,114 @@ describe("历史成交参考（stage-6 RAG）", () => {
     document.body.removeChild(container);
   });
 });
+
+  it("hides manual correction after approval and keeps cancel for review fields", () => {
+    const approvedRequest: ProcurementRequest = {
+      ...request,
+      status: "approved",
+      unresolved_field_count: 0,
+      quote_count: 2,
+      decision: {
+        id: "decision",
+        request_id: "request",
+        snapshot_id: "snapshot",
+        quote_id: "quote-alpha",
+        run_id: "run",
+        approval_id: "approval",
+        decision: "approved",
+        actor: "采购员",
+        created_at: "2026-07-27T00:00:03Z",
+      },
+    };
+    const html = renderToString(
+      <QuoteWorkspace
+        request={approvedRequest}
+        meta={meta}
+        busy={null}
+        onUpload={async () => undefined}
+        onCorrect={async () => undefined}
+        onAnalyze={async () => undefined}
+      />
+    );
+    // Accepted field: the pencil edit entry must disappear once approved.
+    expect(html).not.toContain('aria-label="修正报价"');
+    // needs_review field: the inline editor keeps a cancel affordance instead
+    // of trapping the buyer with no way out.
+    expect(html).toContain('aria-label="取消供应商修正"');
+  });
+
+  it("highlights the actually approved supplier after approval", () => {
+    const approvedRequest: ProcurementRequest = {
+      ...analyzed(),
+      status: "approved",
+      decision: {
+        id: "decision",
+        request_id: "request",
+        snapshot_id: "snapshot",
+        quote_id: "quote-delta",
+        run_id: "run",
+        approval_id: "approval",
+        decision: "approved",
+        actor: "采购员",
+        created_at: "2026-07-27T00:00:03Z",
+      },
+    };
+    const html = renderToString(
+      <ComparisonView
+        request={approvedRequest}
+        busy={null}
+        onAnalyze={async () => undefined}
+        onApprove={async () => undefined}
+        onNoAward={async () => undefined}
+      />
+    );
+    expect(html).toContain("供应商已人工批准：");
+    expect(html).toContain("Delta Factory");
+    expect(html).toContain('class="excluded selected"');
+    expect(html).not.toContain('class="eligible selected"');
+  });
+
+
+  it("renders the operations dashboard from cached metrics and runs", () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(["proc-runs"], {
+      items: [
+        {
+          id: "run-abc",
+          session_id: "s",
+          root_run_id: "run-abc",
+          status: "completed",
+          model: "procurement-fake-v1",
+          usage_json: JSON.stringify({ total_tokens: 1200, estimated_cost_usd: 0.5 }),
+          created_at: "2026-07-27T00:00:00Z",
+          updated_at: "2026-07-27T00:00:00Z",
+        },
+      ],
+      total: 1,
+      offset: 0,
+      has_more: false,
+    });
+    queryClient.setQueryData(["proc-metrics-summary"], {
+      runs: 1,
+      by_status: { completed: 1 },
+      by_model: { "procurement-fake-v1": 1 },
+      tokens: { input: 800, output: 400, cached_input: 0, total: 1200 },
+      model_turns: 2,
+      estimated_cost_usd: 0.5,
+      cost_unknown_runs: 0,
+      cache_hit_rate: 0.0,
+      avg_duration_ms: 1200,
+      duration_runs: 1,
+      budget_warnings: 0,
+    });
+
+    const html = renderToString(
+      <QueryClientProvider client={queryClient}>
+        <DashboardView />
+      </QueryClientProvider>
+    );
+    expect(html).toContain("运营仪表盘");
+    expect(html).toContain("run-abc");
+    expect(html).toContain("$0.5000");
+    expect(html).toContain("1,200");
+  });

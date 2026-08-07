@@ -24,6 +24,17 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
+def validate_bind(host: str, allow_remote_execution: bool) -> None:
+    """Refuse to serve read/write procurement data on a non-loopback bind
+    unless the operator explicitly opts in and accepts the auth-proxy duty."""
+    if not _is_loopback(host) and not allow_remote_execution:
+        raise SystemExit(
+            "拒绝启动：非回环绑定必须显式使用 --allow-remote-execution，"
+            "并在前面部署认证代理；否则所有接口（含报价原件与 SSE 事件）"
+            "都会在无认证下被网络访问。"
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentharness",
@@ -56,12 +67,8 @@ def main() -> None:
     for root in roots:
         if not root.is_dir():
             raise SystemExit(f"Workspace does not exist or is not a directory: {root}")
+    validate_bind(args.host, args.allow_remote_execution)
     execution_enabled = _is_loopback(args.host) or args.allow_remote_execution
-    if not execution_enabled:
-        print(
-            "Web execution disabled: non-loopback binds require "
-            "--allow-remote-execution and an authenticating proxy."
-        )
     url = f"http://{args.host}:{args.port}"
     print(f"采价台 Web: {url}")
     print("Workspaces: " + ", ".join(str(root) for root in roots))

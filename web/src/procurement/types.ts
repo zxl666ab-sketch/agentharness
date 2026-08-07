@@ -247,6 +247,7 @@ export type ProcurementModelConfig = {
   ai_review_enabled: boolean;
   review_provider: string | null;
   review_model: string | null;
+  review_policy: "off" | "evidence" | "warn" | "gate";
 };
 
 export type ProcurementModelConfigUpdate = {
@@ -263,6 +264,7 @@ export type ProcurementModelConfigUpdate = {
   ai_review_enabled?: boolean;
   review_provider?: string | null;
   review_model?: string | null;
+  review_policy?: "off" | "evidence" | "warn" | "gate";
 };
 
 export type CreateProcurementRequest = {
