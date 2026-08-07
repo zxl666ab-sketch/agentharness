@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+﻿import { useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Bot,
@@ -258,7 +258,7 @@ export function ProcurementConversation({
     [messagesQuery.data]
   );
   const tools = toolsQuery.data || [];
-  const status = runQuery.data?.status || (runId ? "pending" : "");
+  const status = runQuery.data?.status || "";
   const needsClarification = status === "require_human";
   const canRecover = status === "failed" || status === "cancelled" || status === "interrupted" || status === "budget_stopped";
   const canStop = status === "pending" || status === "running";
@@ -362,3 +362,4 @@ export function ProcurementConversation({
     </aside>
   );
 }
+
