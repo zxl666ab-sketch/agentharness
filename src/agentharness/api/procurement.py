@@ -119,6 +119,13 @@ class ConversationAttachment(ImportQuoteBody):
     pass
 
 
+class KnowledgeFeedbackBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chunk_id: str = Field(min_length=64, max_length=64, pattern="^[0-9a-f]{64}$")
+    action: Literal["viewed", "adopted"]
+
+
 class StartProcurementConversationBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -348,6 +355,23 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
         except ProcurementError as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    @router.post("/requests/{request_id}/knowledge/feedback")
+    async def knowledge_feedback(
+        request_id: str,
+        body: KnowledgeFeedbackBody,
+    ) -> dict[str, Any]:
+        try:
+            return service.record_knowledge_feedback(
+                request_id,
+                chunk_id=body.chunk_id,
+                action=body.action,
+                actor="采购员",
+            )
+        except KeyError:
+            raise HTTPException(404, "未找到采购需求") from None
+        except ProcurementError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @router.post("/requests/{request_id}/analyze", status_code=202)
     async def analyze(request_id: str) -> dict[str, str]:
         try:
@@ -430,6 +454,7 @@ __all__ = [
     "CorrectQuoteFieldBody",
     "ConversationAttachment",
     "ImportQuoteBody",
+    "KnowledgeFeedbackBody",
     "MAX_CONVERSATION_UPLOAD_BYTES",
     "ProcurementModelConfigBody",
     "ResumeProcurementConversationBody",

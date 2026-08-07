@@ -337,6 +337,7 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
             "eligible_quotes": visible,
             "eligible_quotes_truncated": len(eligible) > len(visible),
             "stages": result["stages"],
+            "knowledge_references": result.get("knowledge_references", []),
         }
 
     async def read_request(_ctx: ToolContext, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -647,9 +648,16 @@ class ProcurementFakeProvider:
             eligible_count = int(payload.get("eligible_count") or 0)
             if payload.get("eligible_quotes_truncated"):
                 eligible = f"{eligible} 等 {eligible_count} 家"
+            reference_count = len(payload.get("knowledge_references") or [])
+            reference_note = (
+                f"已为您检索到 {reference_count} 条相似历史成交参考（见比价页，"
+                "仅作参考，不影响本次确定性结论）。"
+                if reference_count
+                else "暂无相似历史成交参考。"
+            )
             async for item in self._text(
                 f"确定性比价与复算已完成。{explanation}。"
-                f"请从合格供应商（{eligible}）中人工确认最终供应商。"
+                f"请从合格供应商（{eligible}）中人工确认最终供应商。{reference_note}"
             ):
                 yield item
             return

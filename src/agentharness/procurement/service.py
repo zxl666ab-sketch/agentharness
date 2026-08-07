@@ -28,6 +28,14 @@ from agentharness.procurement.parsing import (
     parse_quote,
 )
 from agentharness.rag.chunking import build_chunk
+from agentharness.rag.reference import (
+    EXPANDED_TOP_K,
+    INJECTED_TOP_K,
+    KNOWLEDGE_INJECTION_MAX_CHARS,
+    injected_text,
+    sanitize_reference,
+)
+from agentharness.rag.retriever import Retriever
 
 MAX_QUOTES_PER_REQUEST = 50
 DEFAULT_SIZE_TOLERANCE_MM = Decimal("2")
@@ -440,6 +448,7 @@ class ProcurementService:
             "unresolved_field_count": sum(len(item["review_fields"]) for item in quotes),
             "comparison": snapshot,
             "decision": self.repo.get_decision(request_id),
+            "knowledge_references": self._latest_knowledge_references(request_id),
         }
 
     def validate_attachment_batch(
@@ -718,6 +727,7 @@ class ProcurementService:
         snapshot = self.compare_for_agent(request_id, run_id=run_id)
         verification = self.verify_agent_result(request_id, run_id=run_id)
         selection = self.request_supplier_selection(request_id, run_id=run_id)
+        knowledge_references = self._knowledge_references(request_id, run_id=run_id)
         stages = [
             {
                 "name": "parse_quotes",
@@ -750,6 +760,11 @@ class ProcurementService:
                 "status": "completed",
                 "eligible_count": len(selection["eligible_quotes"]),
             },
+            {
+                "name": "knowledge",
+                "status": "completed",
+                "references": len(knowledge_references),
+            },
         ]
         self._audit(
             request_id,
@@ -770,6 +785,7 @@ class ProcurementService:
             "verification": verification,
             "selection": selection,
             "stages": stages,
+            "knowledge_references": knowledge_references,
         }
 
     def compare_for_agent(self, request_id: str, *, run_id: str) -> dict[str, Any]:
@@ -1503,6 +1519,88 @@ class ProcurementService:
         if self.repo.get_decision(request_id) is not None:
             raise ProcurementError("已形成审批结论的采购需求不可再修改")
         return request
+
+    def _knowledge_references(
+        self,
+        request_id: str,
+        *,
+        run_id: str,
+    ) -> list[dict[str, Any]]:
+        """Retrieve + sanitize top-5 history, inject top-3, audit, assert budget."""
+        request = self.repo.get_request(request_id)
+        if request is None:
+            raise KeyError(request_id)
+        retriever = Retriever(self.storage)
+        chunks = retriever.retrieve(
+            request=request,
+            limit=EXPANDED_TOP_K,
+            adopted_counts=self._knowledge_adopted_counts(),
+        )
+        references = [
+            sanitize_reference(chunk, self.storage.redactor) for chunk in chunks
+        ]
+        injected = injected_text(references, top_k=INJECTED_TOP_K)
+        if len(injected) > KNOWLEDGE_INJECTION_MAX_CHARS:
+            raise RuntimeError("knowledge injection exceeds token budget")
+        self._audit(
+            request_id,
+            "knowledge_retrieved",
+            actor="system",
+            run_id=run_id,
+            payload={
+                "count": len(references),
+                "injected_count": min(INJECTED_TOP_K, len(references)),
+                "references": references,
+            },
+        )
+        return references
+
+    def _latest_knowledge_references(self, request_id: str) -> list[dict[str, Any]]:
+        for event in reversed(self.repo.list_audit_events(request_id)):
+            if event["type"] == "knowledge_retrieved":
+                payload = event.get("payload", {})
+                references = payload.get("references")
+                if isinstance(references, list):
+                    return references
+        return []
+
+    def _knowledge_adopted_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for event in self.repo.list_knowledge_feedback_events():
+            if event["type"] != "knowledge_reference_adopted":
+                continue
+            chunk_sha = str(event.get("payload", {}).get("chunk_id") or "")
+            chunk = self.storage.rag.get_chunk(chunk_sha) if chunk_sha else None
+            if chunk is None:
+                continue
+            supplier = str(chunk.get("supplier_name") or "")
+            counts[supplier] = counts.get(supplier, 0) + 1
+        return counts
+
+    def record_knowledge_feedback(
+        self,
+        request_id: str,
+        *,
+        chunk_id: str,
+        action: str,
+        actor: str = "采购员",
+    ) -> dict[str, Any]:
+        """Record viewed/adopted feedback (chunk_id + action only)."""
+        if self.repo.get_request(request_id) is None:
+            raise KeyError(request_id)
+        if action not in {"viewed", "adopted"}:
+            raise ProcurementError("反馈动作只支持 viewed 或 adopted")
+        if not chunk_id or len(chunk_id) != 64:
+            raise ProcurementError("历史成交参考 ID 无效")
+        if self.storage.rag.get_chunk(chunk_id) is None:
+            raise ProcurementError("历史成交参考不存在")
+        self._audit(
+            request_id,
+            f"knowledge_reference_{action}",
+            actor=actor,
+            payload={"chunk_id": chunk_id, "action": action},
+        )
+        return {"ok": True, "request_id": request_id, "chunk_id": chunk_id, "action": action}
 
     def _sync_rag_chunk_for_quote(
         self,
