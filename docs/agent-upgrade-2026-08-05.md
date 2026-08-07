@@ -60,7 +60,7 @@
 - 工作量：1–1.5 天
 - 验收：冻结场景库上 top-5 命中已知历史成交；相似规格能召回、不相似不召回；无历史时返回空且不报错；rerank 后 top-5 命中率不劣于粗排 top-20，top-1 命中率记录在案；单次检索耗时与上下文预算受控（有上限断言）。
 
-### 1.5 [x] 服务集成：流水线阶段 + 审计 + 确定性隔离【已完成 · 2026-08-07 / 7156c96 / EVIDENCE_COMMIT_PENDING / docs/evidence/stage-6-rag-service-2026-08-07.md】
+### 1.5 [x] 服务集成：流水线阶段 + 审计 + 确定性隔离【已完成 · 2026-08-07 / 7156c96 / 79c54d8 / docs/evidence/stage-6-rag-service-2026-08-07.md】
 - 目标/做法：`src/agentharness/procurement/service.py` 的 `execute_analysis_pipeline` 在 `supplier_history` 之后新增 `retrieve_knowledge` 阶段；`src/agentharness/procurement/agent.py` 的 `pipeline_payload` 带 `knowledge_references`（脱敏、截断）；审计事件 `knowledge_retrieved`（chunk_id、score、sha256、top-k 摘要）；**分级注入**：流水线自动注入 top-3 摘要（token 预算断言），前端可展开 top-5；记录 `knowledge_reference_viewed` / `knowledge_reference_adopted` 反馈事件（只记 chunk_id 与动作，不记敏感内容）；新增回归测试：**历史数据变化不影响 `analysis_input_sha256`**。
 - 加分点：与现有「阶段化 + 审计」完全同构，治理叙事不断层；确定性隔离有专门测试背书。
 - 工作量：1 天
@@ -103,6 +103,7 @@
 ## 3. 阶段完成门槛
 
 阶段内全部待办满足自身验收和每条硬门槛后，才可进入该阶段真实模型验证。阶段验证成功、或已按外部阻塞规则如实记录为 `blocked`/`failed` 后，才能进入下一阶段；外部阻塞不得被伪装成成功。
+
 
 
 
