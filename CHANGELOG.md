@@ -23,6 +23,8 @@ All notable changes are documented here. The project follows semantic versioning
 - 报价导入在审批后返回 409（与修正接口一致）；模型配置抽屉在加载完成前打开时同步真实配置、加载中禁用保存；审批后字段修正入口只读化并为待复核字段提供取消按钮；清理演示任务后失效详情缓存并重置选中项；比价页审批后高亮实际批准供应商并在页脚显示名称。
 - 采购审计报告接口统一走 public_redact；RAG LIKE 回退转义 `%`/`_`；`supports_invoice` 解析优先识别“可开/专票”正特征；移除 `correct_field` 中不可达的 RAG 同步调用（工具函数保留并继续有测试覆盖）。
 - 前端小修：清理成功提示不再用红色错误样式、审批弹窗关闭重开重置、分析中按钮保持禁用直到 run 终态、`waiting_approval` 可停止、通用 API 网络错误中文提示、draft 报价面板显示“待 Agent 结构化需求”、RunReport 审批数 0 时显示 `N / —`、上传失败兜底请求不再产生 unhandled rejection、SSE 刷新定时器随任务切换重新武装。
+- 需求规格方向：系统提示词（`procurement-prompt-v2`）与 capture 工具 schema 显式锁定“规格按 宽×长×高 书写，第一个数字是宽度、第二个是长度”，修复真实模型把 `400x300x250mm` 捕获成宽 300 / 长 400、导致三家报价全部被“尺寸超差”误淘汰的问题；fake provider 提取方向加回归测试锁定。
+- 厚度公差上限从 100µm 放宽到 5000µm（`api/procurement.py` 与 `service._validated_requirement` 同步），瓦楞纸箱等厚材质的 500µm 公差不再被拒绝，capture schema 同步说明允许范围。
 
 
 - Re-analysis after a quote correction is now deterministic: “开始比价” regenerates the comparison snapshot even when the resumed model refuses to repeat the analysis tool. The backend resumes with an explicit “snapshot invalidated, must re-run” instruction, exposes `requires_reanalysis` in the agent state, and falls back to the deterministic pipeline (with a UI-refresh run event) when the resumed run ends without a fresh snapshot.

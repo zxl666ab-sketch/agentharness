@@ -67,7 +67,7 @@ PROCUREMENT_TOOL_NAMES = (
 )
 # Version anchors for auditability: every run records which prompt, tool
 # schema, parser and rule set produced it, so prompt changes become traceable.
-PROCUREMENT_PROMPT_VERSION = "procurement-prompt-v1"
+PROCUREMENT_PROMPT_VERSION = "procurement-prompt-v2"
 PROCUREMENT_TOOL_SCHEMA_VERSION = "procurement-tools-v1"
 
 
@@ -444,9 +444,18 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
             "specifications": {
                 "type": "object",
                 "properties": {
-                    "width_mm": {"type": ["string", "number"]},
-                    "length_mm": {"type": ["string", "number"]},
-                    "thickness_um": {"type": ["string", "number"]},
+                    "width_mm": {
+                        "type": ["string", "number"],
+                        "description": "宽度（mm）：规格中的第一个尺寸。例如 400x300x250mm 的宽度是 400，不是 300。",
+                    },
+                    "length_mm": {
+                        "type": ["string", "number"],
+                        "description": "长度（mm）：规格中的第二个尺寸。例如 400x300x250mm 的长度是 300，不是 400。",
+                    },
+                    "thickness_um": {
+                        "type": ["string", "number"],
+                        "description": "厚度（µm）：薄材用微米；厚材质（如瓦楞纸箱 5mm）填写 5000。",
+                    },
                     "material": {"type": "string"},
                     "color": {"type": "string"},
                     "print_colors": {"type": "integer", "minimum": 0, "maximum": 12},
@@ -491,7 +500,7 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
                     "thickness_tolerance_um": {
                         "type": ["string", "number"],
                         "default": str(DEFAULT_THICKNESS_TOLERANCE_UM),
-                        "description": "可选；未说明时使用业务默认值 3 μm。",
+                        "description": "可选；未说明时使用业务默认值 3 μm，允许 0–5000 μm（厚材质如瓦楞纸箱可用较大公差）。",
                     },
                     "destination": {"type": "string", "maxLength": 300},
                 },
@@ -1570,6 +1579,8 @@ class ProcurementAgent:
             "fx_rates 的值表示 1 单位该币种可兑换的本位币数量，例如本位币 CNY、USD/CNY=7.2 时应写 "
             "fx_rates={CNY: 1, USD: 7.2}；本位币 USD 时则应写 fx_rates={USD: 1, CNY: 0.138888}，"
             "不要写反方向；"
+            "规格按 宽×长×高（mm）书写：第一个数字是宽度、第二个是长度、第三个是高度，"
+            "不要把宽度与长度写反（例如 400x300x250mm 表示宽 400mm、长 300mm、高 250mm）；"
             "必须忠实保留用户明确说出的颜色、印刷色数和开票要求。"
             "只有收到 [procurement_supplier_selection] JSON 后才能调用审批工具；审批成功后最终回复"
             "必须包含【采购决策已验证】。审批工具成功前严禁输出、引用、解释或复述该验证标记。"
