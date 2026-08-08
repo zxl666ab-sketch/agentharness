@@ -226,6 +226,10 @@ async def summarize_history(
                     break
     except TimeoutError as exc:
         raise CompactionError("summarizer timed out") from exc
+    except CompactionError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 任何 provider/协议/配置异常都应跳过压缩继续运行
+        raise CompactionError(f"summarizer failed: {exc}") from exc
     text = "".join(parts).strip()
     if not text:
         raise CompactionError("summarizer returned empty output")

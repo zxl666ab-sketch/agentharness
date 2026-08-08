@@ -9,6 +9,7 @@ export const AGENT_EVENT_TYPES = [
   "run_failed",
   "run_cancelled",
   "run_interrupted",
+  "run_budget_stopped",
   "text_delta",
   "tool_call_start",
   "tool_call_validated",

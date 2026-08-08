@@ -259,7 +259,9 @@ export function ProcurementConversation({
   );
   const tools = toolsQuery.data || [];
   const status = runQuery.data?.status || "";
-  const needsClarification = status === "require_human";
+  // require_human 在“等待采购员选供应商”阶段也会出现；只有还没有比价快照时
+  // 才展示“补充或修正采购规格”澄清框，避免与“查看比价并选择供应商”同时出现。
+  const needsClarification = status === "require_human" && !request.comparison;
   const canRecover = status === "failed" || status === "cancelled" || status === "interrupted" || status === "budget_stopped";
   const canStop = status === "pending" || status === "running" || status === "waiting_approval";
 

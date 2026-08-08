@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 QUALITY_LOW_CONFIDENCE = "low_confidence"
@@ -36,10 +37,18 @@ _COLOR_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def canonical_material(value: Any) -> str | None:
-    """Canonical material identity (PE/聚乙烯/polyethylene -> PE)."""
+    """Canonical material identity (PE/聚乙烯/polyethylene -> PE).
+
+    Uses the same word-boundary matching as ``procurement.costing`` so the RAG
+    structured-spec recall cannot disagree with the costing identity checks
+    (e.g. ``pet``/``PET膜`` must be PET, never a substring hit on ``pe``).
+    """
     text = str(value or "").strip().casefold()
     for canonical, aliases in _MATERIAL_ALIASES.items():
-        if any(alias in text for alias in aliases):
+        if any(
+            re.search(rf"(?<![a-z]){re.escape(alias)}(?![a-z])", text)
+            for alias in aliases
+        ):
             return canonical
     return None
 

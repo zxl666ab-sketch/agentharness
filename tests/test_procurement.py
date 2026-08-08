@@ -1253,12 +1253,144 @@ def test_supports_invoice_negative_special_invoice_phrases() -> None:
         "不能开具普票",
         "不支持开专票",
         "不支持开普票",
+        "不支持开具专票",
+        "不支持开具普票",
         "不提供专票",
         "不提供普票",
+        "不提供增值税专用发票",
+        "不提供增值税普通发票",
+        "不能开具增值税专用发票",
+        "不可开具增值税专用发票",
+        "无法开具增值税专用发票",
+        "不能开具增值税普通发票",
+        "不可开具增值税普通发票",
+        "无法开具增值税普通发票",
+        "不能开增值税专用发票",
+        "不开增值税专用发票",
+        "无法开增值税专用发票",
+        "不能开增值税普通发票",
+        "不开增值税普通发票",
+        "无法开增值税普通发票",
     ):
         assert coerce_field_value("supports_invoice", phrase) is False, phrase
     assert coerce_field_value("supports_invoice", "可开专票") is True
     assert coerce_field_value("supports_invoice", "可开普票") is True
+
+
+def test_quote_parser_thickness_si_converts_to_um() -> None:
+    """Regression: “5丝” must become 50 µm (1 丝 = 10 µm), not 5 µm.
+
+    The old regex stored the raw number for any unit token including 丝, which
+    silently mis-typed Chinese packaging quotes and could both wrongly exclude
+    eligible quotes and wrongly admit ineligible ones under the thickness
+    hard constraint.
+    """
+    document = _xlsx_bytes(
+        [
+            ["供应商", "丝单位供应商"],
+            ["品名", "PE 白色快递袋 250x350mm 5丝 单色印刷"],
+            ["币种", "CNY"],
+            ["单价", "500"],
+            ["计价数量", "1000"],
+            ["税率", "13%"],
+            ["是否含税", "是"],
+            ["是否包邮", "是"],
+            ["MOQ", "1000"],
+            ["交期", "7"],
+            ["是否可开票", "是"],
+            ["宽度（mm）", "250"],
+            ["长度（mm）", "350"],
+        ]
+    )
+
+    extracted = parse_quote("thickness-si.xlsx", document)
+    thickness = extracted["fields"]["thickness_um"]
+
+    assert thickness["value"] == "50"
+    assert thickness["status"] == "accepted"
+
+
+def test_quote_parser_cm_dimensions_convert_to_mm() -> None:
+    """Regression: “20*30cm” must become 200×300 mm, not 20×30 mm."""
+    document = _xlsx_bytes(
+        [
+            ["供应商", "厘米单位供应商"],
+            ["品名", "PE 白色快递袋 20*30cm 5丝 单色印刷"],
+            ["币种", "CNY"],
+            ["单价", "500"],
+            ["计价数量", "1000"],
+            ["税率", "13%"],
+            ["是否含税", "是"],
+            ["是否包邮", "是"],
+            ["MOQ", "1000"],
+            ["交期", "7"],
+            ["是否可开票", "是"],
+        ]
+    )
+
+    extracted = parse_quote("dimension-cm.xlsx", document)
+    assert extracted["fields"]["width_mm"]["value"] == "200"
+    assert extracted["fields"]["length_mm"]["value"] == "300"
+
+
+def test_quote_parser_three_column_table_header_is_detected() -> None:
+    """Regression: a 3-column header row must use the table branch.
+
+    The old >=4 header threshold treated 3-column tables as key-value rows,
+    writing the second header cell (e.g. 单价) as the supplier name with high
+    confidence and no review flag.
+    """
+    document = _xlsx_bytes(
+        [
+            ["供应商", "单价", "MOQ"],
+            ["甲包装", "500", "1000"],
+            ["品名", "PE 白色快递袋 250x350mm 60um 单色印刷", ""],
+            ["币种", "CNY", ""],
+            ["交期", "7", ""],
+        ]
+    )
+
+    extracted = parse_quote("three-column-table.xlsx", document)
+    fields = extracted["fields"]
+
+    assert fields["supplier_name"]["value"] == "甲包装"
+    assert fields["supplier_name"]["status"] == "accepted"
+    assert fields["unit_price"]["value"] == "500"
+    assert fields["moq"]["value"] == 1000
+
+
+def test_quote_parser_shipping_notax_does_not_trigger_freight_excluded() -> None:
+    """Regression: “报价含运费（运费不含税）” is a tax note, not “运费另计”.
+
+    The old negative regex matched 运费不含 inside 运费不含税 and inferred
+    shipping_included=False with a hardcoded excerpt, double-counting the
+    freight cost. It must stay shipping_included=True and the excerpt must be
+    the actual matched text.
+    """
+    document = _xlsx_bytes(
+        [
+            ["供应商", "含运费供应商"],
+            ["品名", "PE 白色快递袋 250x350mm 60um 单色印刷"],
+            ["币种", "CNY"],
+            ["单价", "500"],
+            ["计价数量", "1000"],
+            ["税率", "13%"],
+            ["是否含税", "否"],
+            ["MOQ", "1000"],
+            ["交期", "7"],
+            ["是否可开票", "是"],
+            ["备注", "报价含运费（运费不含税），运费500元"],
+        ]
+    )
+
+    extracted = parse_quote("shipping-notax.xlsx", document)
+    shipping = extracted["fields"]["shipping_included"]
+    excerpt = str(shipping.get("source", {}).get("excerpt") or "")
+
+    assert shipping["value"] is True
+    assert shipping["status"] == "accepted"
+    assert "运费另计" not in excerpt
+    assert "报价含运费" in excerpt
 
 
 def test_api_spec_accepts_roll_goods_length_mm() -> None:
@@ -2651,6 +2783,31 @@ def test_frozen_procurement_evaluation_covers_real_exceptions() -> None:
     ):
         assert public_summary["metrics"][metric] == result["metrics"][metric]
     assert public_summary["acceptance"] == result["acceptance"]
+
+
+def test_evaluation_acceptance_gates_false_positive_quotes() -> None:
+    """Regression: excluding eligible quotes must fail the acceptance gate.
+
+    The frozen acceptance used to only check missed constraints and wrongly
+    selected quotes; a rule regression that starts wrongly excluding eligible
+    quotes stayed green. false_positive_count must be gated too.
+    """
+    from agentharness.procurement.evaluation import evaluation_acceptance
+
+    metrics = {
+        "field_extraction": {"accuracy": 1.0},
+        "item_matching": {"accuracy": 1.0},
+        "cost_calculation": {"accuracy": 1.0},
+        "hard_constraint_miss": {"missed": 0, "false_positive_count": 1},
+        "incorrect_eligible_selection": {"count": 0},
+    }
+    acceptance = evaluation_acceptance(
+        case_count=31,
+        layout_count=6,
+        metrics=metrics,
+    )
+    assert acceptance["false_positive_quote_zero"] is False
+    assert not all(acceptance.values())
 
 
 def test_evaluation_verifier_accepts_current_frozen_contract(
@@ -4125,7 +4282,9 @@ async def test_approval_tolerates_model_invented_actor_and_note(
     """A live model may fill its own actor/note in the approve tool call while
     keeping the decision-critical fields (request/snapshot/input-hash/quote)
     identical to the buyer's selection. The human approval must still succeed
-    instead of failing with '采购审批参数与用户选择不一致'."""
+    instead of failing with '采购审批参数与用户选择不一致', AND the formal
+    decision record must keep the buyer's actor/note (model values must not
+    pollute the audit trail)."""
 
     class MeddlingProvider(ProcurementFakeProvider):
         async def _tool_call(self, name, arguments):
@@ -4193,6 +4352,7 @@ async def test_approval_tolerates_model_invented_actor_and_note(
                 "quote_id": snapshot["result"]["recommended_quote_id"],
                 "confirmed": True,
                 "actor": "测试采购员",
+                "note": "采购员真实备注：同意华东优包",
             },
         )
         assert approved.status_code == 200, approved.text
@@ -4201,7 +4361,11 @@ async def test_approval_tolerates_model_invented_actor_and_note(
         assert report["conclusion"]["status"] == "passed"
         assert report["approvals"][-1]["tool_name"] == "procurement_approve_supplier"
         final = await client.get(f"/api/procurement/requests/{request_id}")
-        assert final.json()["decision"]["decision"] == "approved"
+        decision = final.json()["decision"]
+        assert decision["decision"] == "approved"
+        # 审计权威值必须是采购员提交的 actor/note，而不是模型伪造的。
+        assert decision["actor"] == "测试采购员"
+        assert decision["note"] == "采购员真实备注：同意华东优包"
 
     await app.state.procurement_agent.aclose()
     await app.state.run_supervisor.aclose()

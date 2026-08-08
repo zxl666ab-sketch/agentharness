@@ -69,7 +69,8 @@
     "item_matching_at_least_90pct": true,
     "cost_calculation_100pct": true,
     "hard_constraint_miss_zero": true,
-    "invalid_quote_selected_zero": true
+    "invalid_quote_selected_zero": true,
+    "false_positive_quote_zero": true
   },
   "source": {
     "truth": "src/agentharness/procurement/eval_truth.json",

@@ -4,7 +4,33 @@ All notable changes are documented here. The project follows semantic versioning
 
 ## [Unreleased]
 
+### Fixed
+
+- 解析器发票能力：补齐“不能开具增值税专用发票/普通发票”等完整变体，不再被正向“可开/能开”子串误判为可开票；`_infer_common` 反向证据同步覆盖增值税变体。
+- 解析器单位换算：报价描述中的“N 丝”按 1 丝 = 10 µm 换算，“cm”尺寸按 ×10 换算为 mm，避免厚度/尺寸硬约束误判。
+- 解析器 XLSX 表头检测阈值从 4 降到 3：3-4 列报价表不再被当成键值行，供应商名不会被静默写成第二个表头（如“单价”）。
+- 运费推断：排除“运费不含税”（税口径）误触发“运费另计”；推断摘录改为命中原文片段而非硬编码文案。
+- 冻结评测验收新增 `false_positive_quote_zero`：误杀合格报价（`false_positive_count > 0`）也会使 CI/验收失败；同步更新 `docs/evidence/evaluation-summary.json`。
+- RAG 材质规范化改为与比价层一致的词边界匹配：`pet`/`PET膜` 不再被误判为 PE、`apple` 不再被误判为 PP。
+- RAG 知识注入落实“分级注入 top-3”：模型只收到 top-3 紧凑文本（`knowledge_injection`），top-5 参考保留给 UI/审计；注入预算断言针对实际模型载荷。
+- 审批审计：正式决策记录的 `actor`/`note` 以采购员提交值为准，模型在审批工具参数中伪造的 actor/note 不再污染审计。
+- 引擎压缩：`summarize_history` 任意异常统一包装为 `CompactionError`，压缩失败时跳过压缩继续运行，不再使整条 run failed。
+- `cancel-run` 对不存在的 request 返回 404；`start_conversation` 的 `RuntimeError/ValueError` 映射为 409 而非 500。
+- `/api/health` 走 `redact_public_obj`，不再泄露 data_dir 绝对路径。
+- SQLite 只读连接改用 `as_uri()` 构造，data_dir 含 `#`/`?` 时不再解析失败。
+- `.env` 非 UTF-8/损坏时 `load_project_env` 按缺失处理，不再启动崩溃。
+- `create_request`/`bind_run` 的建单+审计放入同一事务，避免审计缺失的请求行。
+- 运行报告证据改为分页读取全量事件，不再受 10,000 条前缀截断影响。
+- 前端：SSE 白名单补 `run_budget_stopped`；分析失败/取消/中断/预算停止后 busy 不再永久卡“分析中”；`require_human` 仅在无比价快照时显示规格澄清框；税率百分比显示消除浮点尾差；报价工作台上传增加前端扩展名/大小/数量校验；Dashboard CSV 导出增加公式注入防护；删除死代码 `TERMINAL_STATUSES`/`eventTone`；审计页运行报告错误走友好文案。
+- 真实模型脚本：`verify_live_stage_evidence.py` 的 CLI 预算真正进入 Run（且失败/未审批返回非零退出码）；`run_procurement_live_batch.py`/`run_rag_real_model.py` 在 live 模式强制要求单价与费用上限配置。
+- `evaluate_knowledge.py` 默认输出改为 `output/` 并加 `--force`，误跑不再覆写已跟踪证据；`pilot_rag_overhead.py` 删除数据目录需要 `--force`。
+- 压测场景生成锚定单一基准日期（`AS_OF`），预期结果不再随生成日期漂移；报价文件名 fallback 去掉“报价单/QUOTATION”后缀，演示输入与真值一致。
+- `uv.lock` 重新生成（补 cryptography/cffi/pycparser），CI/Docker/发布的 `--frozen` 恢复可用；README 健康度数字更新为 2026-08-08 复算（324 passed / 1 skipped、覆盖率 81.99%、Web 21 passed）。
+- 文档/工具小修：manual-test-kit 去除旧 HEAD 引用与本机绝对路径；`tests/live` 删除对不存在脚本的引用；`analyze_live_batch.py` 无参时取最新 `live-batch-*.json`；`.dockerignore` 排除 `.env`；pyproject 删除重复的 `project.optional-dependencies.dev`。
+
 ### Added
+
+
 
 - Run timeline endpoint `GET /api/runs/{id}/timeline` and a timeline panel in 运行审计：事件与工具调用合并排序，附每工具耗时/尝试次数/错误码，用于失败归因。
 - Usage & cost dashboard：`GET /api/runs`（列表，支持 session/status 过滤）与 `GET /api/metrics/summary`（Token/成本/耗时/缓存命中/预算告警聚合），前端新增“运营仪表盘”页与 CSV 导出。

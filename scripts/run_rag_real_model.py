@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import json
 import shutil
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,7 +27,7 @@ from typing import Any
 from agentharness.api.execution import PendingApprovalBroker
 from agentharness.config import load_project_env
 from agentharness.harness import Harness
-from agentharness.procurement.agent import ProcurementAgent
+from agentharness.procurement.agent import ProcurementAgent, procurement_run_profile_from_env
 from agentharness.procurement.evaluation import build_case_document, load_frozen_truth
 from agentharness.procurement.parsing import parse_quote
 from agentharness.procurement.service import ProcurementService
@@ -168,6 +169,19 @@ async def run(data_dir: Path) -> dict[str, Any]:
 
 def main() -> int:
     load_project_env()
+    profile = procurement_run_profile_from_env()
+    if (
+        profile.pricing.input_per_million_usd is None
+        or profile.pricing.output_per_million_usd is None
+        or profile.budget.max_cost_usd is None
+    ):
+        print(
+            "错误：真实模型 RAG 跑批必须配置输入/输出单价与费用上限 "
+            "（AGENTHARNESS_PROCUREMENT_INPUT/OUTPUT_PER_MILLION_USD、"
+            "AGENTHARNESS_PROCUREMENT_MAX_COST_USD）。",
+            file=sys.stderr,
+        )
+        return 2
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=Path("output/rag-live-data"))
     parser.add_argument("--force", action="store_true")

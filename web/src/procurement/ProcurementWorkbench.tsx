@@ -202,11 +202,18 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   useEffect(() => {
     if (!latestEvent || latestEvent.run_id !== currentRunId) return;
     const payload = latestEvent.payload as { status?: string } | undefined;
-    if (
+    const terminalEvent =
       latestEvent.type === "run_status" &&
       payload?.status &&
-      TERMINAL_RUN_STATUSES.includes(payload.status)
-    ) {
+      TERMINAL_RUN_STATUSES.includes(payload.status);
+    const terminalRunEvent = [
+      "run_completed",
+      "run_failed",
+      "run_cancelled",
+      "run_interrupted",
+      "run_budget_stopped",
+    ].includes(latestEvent.type);
+    if (terminalEvent || terminalRunEvent) {
       setBusy((current) => (current === "analyze" ? null : current));
     }
   }, [currentRunId, latestEvent]);

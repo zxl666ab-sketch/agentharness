@@ -93,5 +93,15 @@ def analyze(path: Path) -> int:
 
 
 if __name__ == "__main__":
-    path = Path(sys.argv[1] if len(sys.argv) > 1 else "output/procurement-evaluation/live-batch-latest.json")
+    if len(sys.argv) > 1:
+        path = Path(sys.argv[1])
+    else:
+        # run_procurement_live_batch.py 只写带时间戳的文件，从不写 latest；
+        # 无参时取最新的一个，避免必然的 FileNotFoundError。
+        candidates = sorted(
+            Path("output/procurement-evaluation").glob("live-batch-*.json")
+        )
+        if not candidates:
+            raise SystemExit("未找到 live-batch-*.json，请先运行 run_procurement_live_batch.py")
+        path = candidates[-1]
     raise SystemExit(analyze(path))

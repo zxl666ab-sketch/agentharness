@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,9 +19,13 @@ from typing import Any
 from agentharness.api.execution import PendingApprovalBroker
 from agentharness.api.reporting import build_run_report
 from agentharness.config import load_project_env
-from agentharness.contracts import EventType
+from agentharness.contracts import BudgetConfig, EventType
 from agentharness.harness import Harness
-from agentharness.procurement.agent import ProcurementAgent
+from agentharness.procurement.agent import (
+    ProcurementAgent,
+    ProcurementRunProfile,
+    procurement_run_profile_from_env,
+)
 from agentharness.procurement.evaluation import build_case_document, load_frozen_truth
 from agentharness.procurement.service import ProcurementService
 
@@ -34,7 +39,10 @@ def _write_json(path: Path, value: Any) -> None:
     )
 
 
-async def _run_stage_evidence(budget: dict[str, Any]) -> dict[str, Any]:
+async def _run_stage_evidence(
+    budget: dict[str, Any],
+    run_profile: ProcurementRunProfile,
+) -> dict[str, Any]:
     truth = load_frozen_truth()
     cases = truth["quotes"][:2]
     message = (
@@ -48,7 +56,7 @@ async def _run_stage_evidence(budget: dict[str, Any]) -> dict[str, Any]:
     broker = PendingApprovalBroker()
     harness.set_approval_callback(broker)
     service = ProcurementService(harness)
-    agent = ProcurementAgent(harness, service, approval_broker=broker)
+    agent = ProcurementAgent(harness, service, approval_broker=broker, run_profile=run_profile)
     agent.ai_review_enabled = True
     agent.review_provider = "openai"
     agent.review_model = None
@@ -130,13 +138,36 @@ async def _run_stage_evidence(budget: dict[str, Any]) -> dict[str, Any]:
 
 
 async def main(args: argparse.Namespace) -> int:
-    budget = {
-        "max_cost_usd": args.max_cost_usd,
-        "max_tokens": args.max_tokens,
-        "max_steps": args.max_steps,
-        "max_wall_time_s": args.max_wall_time_s,
-    }
-    result = await _run_stage_evidence(budget)
+    base = procurement_run_profile_from_env()
+    if (
+        base.pricing.input_per_million_usd is None
+        or base.pricing.output_per_million_usd is None
+        or base.budget.max_cost_usd is None
+    ):
+        print(
+            "错误：真实模型阶段证据必须配置输入/输出单价与费用上限 "
+            "（AGENTHARNESS_PROCUREMENT_INPUT/OUTPUT_PER_MILLION_USD、"
+            "AGENTHARNESS_PROCUREMENT_MAX_COST_USD）。",
+            file=sys.stderr,
+        )
+        return 2
+    # CLI 预算必须真正进入 Run 的 BudgetConfig，而不是只写进结果文件。
+    run_profile = ProcurementRunProfile(
+        provider=base.provider,
+        model=base.model,
+        pricing=base.pricing,
+        budget=BudgetConfig(
+            max_cost_usd=args.max_cost_usd,
+            max_tokens=args.max_tokens,
+            max_steps=args.max_steps,
+            max_wall_time_s=args.max_wall_time_s,
+        ),
+        reasoning_effort=base.reasoning_effort,
+        base_url=base.base_url,
+        api_mode=base.api_mode,
+        api_key=base.api_key,
+    )
+    result = await _run_stage_evidence({}, run_profile)
     payload = {
         "schema_version": 1,
         "generated_at": datetime.now(UTC).isoformat(),
@@ -154,6 +185,9 @@ async def main(args: argparse.Namespace) -> int:
     _write_json(path, payload)
     print(f"报告：{path}")
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    # 失败或未完成审批必须以非零退出，脚本调用方才能感知。
+    if result.get("error") or result.get("approval_status") != "approved":
+        return 1
     return 0
 
 

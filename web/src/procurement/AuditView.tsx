@@ -3,7 +3,7 @@ import { Activity, AlertTriangle, CheckCircle2, Clock3, Database, FlaskConical, 
 
 import { api } from "../api/client";
 import { RunReport } from "../components/RunReport";
-import { procurementApi } from "./api";
+import { friendlyProcurementError, procurementApi } from "./api";
 import type { ProcurementRequest } from "./types";
 
 type Props = { request: ProcurementRequest };
@@ -236,7 +236,7 @@ export function AuditView({ request }: Props) {
             <RunReport
               report={runReport.data || null}
               loading={runReport.isPending}
-              error={runReport.isError ? String(runReport.error) : null}
+              error={runReport.isError ? friendlyProcurementError(String(runReport.error)) : null}
             />
           </div>
           {checkpointQuery.data ? (

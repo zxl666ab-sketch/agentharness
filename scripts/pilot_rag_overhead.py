@@ -45,7 +45,9 @@ def _import_two(service: ProcurementService, request_id: str, truth: dict) -> No
         )
 
 
-def _run(data_dir: Path, *, with_history: bool) -> dict:
+def _run(data_dir: Path, *, with_history: bool, force: bool = False) -> dict:
+    if data_dir.exists() and not force:
+        raise SystemExit(f"数据目录已存在：{data_dir}（使用 --force 重建）")
     if data_dir.exists():
         shutil.rmtree(data_dir)
     truth = load_frozen_truth()
@@ -99,12 +101,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("output/rag-pilot"))
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--force", action="store_true", help="允许删除已存在的数据目录")
     args = parser.parse_args()
     baseline = []
     with_rag = []
     for _ in range(args.runs):
-        baseline.append(_run(args.root / "baseline", with_history=False))
-        with_rag.append(_run(args.root / "with-history", with_history=True))
+        baseline.append(_run(args.root / "baseline", with_history=False, force=args.force))
+        with_rag.append(_run(args.root / "with-history", with_history=True, force=args.force))
     baseline_avg = sum(item["pipeline_ms"] for item in baseline) / len(baseline)
     with_rag_avg = sum(item["pipeline_ms"] for item in with_rag) / len(with_rag)
     print(f"无历史（无 RAG）管线耗时均值：{baseline_avg:.2f} ms（{len(baseline)} 次）")

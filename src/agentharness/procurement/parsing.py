@@ -220,9 +220,25 @@ _INVOICE_NEGATIVE = (
     "不支持开票",
     "不支持开专票",
     "不支持开普票",
+    "不支持开具专票",
+    "不支持开具普票",
     "不提供发票",
     "不提供专票",
     "不提供普票",
+    "不提供增值税专用发票",
+    "不提供增值税普通发票",
+    "不能开具增值税专用发票",
+    "不可开具增值税专用发票",
+    "无法开具增值税专用发票",
+    "不能开具增值税普通发票",
+    "不可开具增值税普通发票",
+    "无法开具增值税普通发票",
+    "不能开增值税专用发票",
+    "不开增值税专用发票",
+    "无法开增值税专用发票",
+    "不能开增值税普通发票",
+    "不开增值税普通发票",
+    "无法开增值税普通发票",
     "noinvoice",
     "invoiceunavailable",
 )
@@ -492,13 +508,21 @@ def _extract_specs(fields: dict[str, Any], document_kind: str) -> None:
         return
     text = str(description["value"])
     size = re.search(
-        r"(\d+(?:\.\d+)?)\s*[xX×*]\s*(\d+(?:\.\d+)?)\s*(?:mm)?",
+        r"(\d+(?:\.\d+)?)\s*[xX×*]\s*(\d+(?:\.\d+)?)\s*(mm|cm)?",
         text,
+        re.I,
     )
-    thickness = re.search(r"(\d+(?:\.\d+)?)\s*(?:um|[μµ]m|微米|micron|丝)", text, re.I)
+    thickness = re.search(
+        r"(\d+(?:\.\d+)?)\s*(um|[μµ]m|微米|micron|丝)", text, re.I
+    )
     source = description.get("source", {})
     if size:
-        for field, value in zip(("width_mm", "length_mm"), size.groups(), strict=True):
+        # 单位换算：报价描述里常见的 cm 需转成 mm（1 cm = 10 mm），
+        # 避免把 20*30cm 当作 20×30mm 直接接受。
+        unit = (size.group(3) or "").lower()
+        scale = Decimal("10") if unit == "cm" else Decimal("1")
+        for field, raw in zip(("width_mm", "length_mm"), size.groups()[:2], strict=True):
+            value = str(Decimal(str(raw)) * scale)
             _set_field(
                 fields,
                 field,
@@ -513,12 +537,15 @@ def _extract_specs(fields: dict[str, Any], document_kind: str) -> None:
                 ),
             )
     if thickness:
+        # 中文包装报价常用“丝”：1 丝 = 10 µm，必须换算而不是按 µm 直接接受。
+        raw, unit = thickness.groups()
+        value = str(Decimal(str(raw)) * (Decimal("10") if unit == "丝" else Decimal("1")))
         _set_field(
             fields,
             "thickness_um",
             _entry(
                 "thickness_um",
-                thickness.group(1),
+                value,
                 0.84,
                 document_kind=document_kind,
                 locator=str(source.get("locator", "description")),
@@ -621,19 +648,29 @@ def _infer_common(fields: dict[str, Any], text: str, document_kind: str) -> None
             ),
         )
 
-    if re.search(
-        r"不包邮|运费(?:不含|未含|另计)|shipping\s+(?:is\s+)?(?:not\s+included|excluded)|freight\s+(?:is\s+)?(?:not\s+included|excluded)",
+    shipping_negative = re.search(
+        r"不包邮|运费(?:不含(?!税)|未含(?!税)|另计)|"
+        r"shipping\s+(?:is\s+)?(?:not\s+included|excluded)|"
+        r"freight\s+(?:is\s+)?(?:not\s+included|excluded)",
         text,
         re.I,
+    )
+    if shipping_negative:
+        # “运费不含税”是关于税的口径，不是“运费另计”，(?!税) 排除该误命中；
+        # 摘录使用原文命中的片段而不是硬编码文案，保证审计证据与原件一致。
+        inferred(
+            "shipping_included", False, 0.91, shipping_negative.group(0)
+        )
+    elif (
+        shipping_positive := re.search(
+            r"包邮|运费已含|报价含运费|价格含运费|已含运费|"
+            r"shipping\s+is\s+included|freight\s+is\s+included",
+            text,
+            re.I,
+        )
     ):
-        inferred("shipping_included", False, 0.91, "运费另计")
-    elif re.search(
-        r"包邮|运费已含|报价含运费|价格含运费|已含运费|shipping\s+is\s+included|freight\s+is\s+included",
-        text,
-        re.I,
-    ):
-        inferred("shipping_included", True, 0.91, "运费已包含")
-        inferred("shipping_fee", "0", 0.91, "运费已包含")
+        inferred("shipping_included", True, 0.91, shipping_positive.group(0))
+        inferred("shipping_fee", "0", 0.91, shipping_positive.group(0))
     if re.search(
         r"价格含税|报价含税|已含税|tax\s+is\s+included|vat\s+is\s+included",
         text,
@@ -651,6 +688,8 @@ def _infer_common(fields: dict[str, Any], text: str, document_kind: str) -> None
     if re.search(
         r"不可开票|不能开票|不开票|无法开票|不可开专票|不能开专票|不开专票|无法开专票|"
         r"不可开普票|不能开普票|不开普票|无法开普票|"
+        r"(?:不可|不能|无法|不开|不支持|不提供)(?:开具|开)?增值税(?:专用|普通)?发票|"
+        r"(?:不可|不能|无法|不开|不支持|不提供)(?:开具)?(?:专票|普票)|"
         r"不(?:提供|支持)(?:发票|专票|普票|开票)|"
         r"no[ \t]+invoice|invoice[ \t]*:?[ \t]*(?:no|unavailable)",
         text,
@@ -685,7 +724,11 @@ def _finalize(
     informational: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if "supplier_name" not in fields:
-        fallback = re.sub(r"[_-]+", " ", Path(filename).stem).strip()
+        stem = Path(filename).stem
+        # 演示/真实报价文件名常带“报价单/QUOTATION”等通用后缀；这些不是供应商名
+        # 的一部分，去掉后 fallback 才与真值一致（例如 星河包装报价单 -> 星河包装）。
+        stem = re.sub(r"(报价单|报价|QUOTATION|Quotation|quotation)$", "", stem)
+        fallback = re.sub(r"[_-]+", " ", stem).strip()
         fields["supplier_name"] = _entry(
             "supplier_name",
             fallback,
@@ -814,7 +857,7 @@ def _xlsx_quote(
                     for column, value in populated
                     if _key(value) in ALIASES
                 }
-                if len(header_map) >= 4:
+                if len(header_map) >= 3:
                     data_entry = next(
                         (
                             (candidate_index, candidate)

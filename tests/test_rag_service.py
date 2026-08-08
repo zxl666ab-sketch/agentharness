@@ -152,6 +152,10 @@ def test_tiered_injection_top3_budget_assertion(data_dir: Path) -> None:
         injected = injected_text(references, top_k=INJECTED_TOP_K)
         assert len(injected) <= KNOWLEDGE_INJECTION_MAX_CHARS
         assert injected != ""
+        # 模型注入必须是 top-3 紧凑文本，而不是把 top-5 全量参考发给模型。
+        assert result["knowledge_injection"] == injected
+        assert result["knowledge_injection"].startswith(references[0].get("text") or "")
+        assert (references[4].get("text") or "") not in result["knowledge_injection"]
     finally:
         harness.close()
 

@@ -340,15 +340,25 @@ def render_report(result: dict[str, Any], feedback: dict[str, Any] | None) -> st
     return "\n".join(lines)
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("docs/evidence/rag-retrieval-2026-08-07.md"),
+        default=Path("output/rag-retrieval.md"),
+        help="默认写入 output/（gitignore），避免误跑覆写仓库内已跟踪证据；"
+        "确需更新 docs/evidence/ 时用 --force。",
     )
     parser.add_argument("--data-dir", type=Path, default=None)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="允许覆写已存在的输出文件（如已跟踪的 docs/evidence 证据）。",
+    )
     args = parser.parse_args()
+    if args.output.exists() and not args.force:
+        print(f"输出已存在：{args.output}（使用 --force 覆写，或改 --output 指向 output/）")
+        return 1
     result = evaluate_frozen()
     feedback = feedback_stats(args.data_dir) if args.data_dir else None
     report = render_report(result, feedback)
@@ -356,6 +366,7 @@ def main() -> None:
     args.output.write_text(report, encoding="utf-8")
     print(json.dumps({"aggregates": result["aggregates"], "corpus": result["corpus_size"]}, ensure_ascii=False, indent=2))
     print(f"报告已写入：{args.output}")
+    return 0
 
 
 if __name__ == "__main__":

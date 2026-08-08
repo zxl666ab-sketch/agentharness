@@ -424,18 +424,19 @@ class ProcurementService:
             "session_id": session_id,
             "created_at": now,
         }
-        self.repo.create_request(request)
-        self._audit(
-            request_id,
-            "request_created",
-            actor=actor,
-            payload={
-                "reference": reference,
-                "quantity": request["quantity"],
-                "specifications": request["specifications"],
-                "constraints": request["constraints"],
-            },
-        )
+        with self.storage.transaction():
+            self.repo.create_request(request)
+            self._audit(
+                request_id,
+                "request_created",
+                actor=actor,
+                payload={
+                    "reference": reference,
+                    "quantity": request["quantity"],
+                    "specifications": request["specifications"],
+                    "constraints": request["constraints"],
+                },
+            )
         return self.get_request(request_id)
 
     def list_requests(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -529,14 +530,15 @@ class ProcurementService:
     def bind_run(self, request_id: str, *, run_id: str, actor: str = "agent") -> None:
         if self.repo.get_request(request_id) is None:
             raise KeyError(request_id)
-        self.repo.update_request(request_id, analysis_run_id=run_id)
-        self._audit(
-            request_id,
-            "agent_run_started",
-            actor=actor,
-            run_id=run_id,
-            payload={"run_id": run_id},
-        )
+        with self.storage.transaction():
+            self.repo.update_request(request_id, analysis_run_id=run_id)
+            self._audit(
+                request_id,
+                "agent_run_started",
+                actor=actor,
+                run_id=run_id,
+                payload={"run_id": run_id},
+            )
 
     def capture_requirement(
         self,
@@ -755,7 +757,7 @@ class ProcurementService:
         snapshot = self.compare_for_agent(request_id, run_id=run_id)
         verification = self.verify_agent_result(request_id, run_id=run_id)
         selection = self.request_supplier_selection(request_id, run_id=run_id)
-        knowledge_references = self._knowledge_references(request_id, run_id=run_id)
+        knowledge_references, knowledge_injection = self._knowledge_references(request_id, run_id=run_id)
         stages = [
             {
                 "name": "parse_quotes",
@@ -814,6 +816,7 @@ class ProcurementService:
             "selection": selection,
             "stages": stages,
             "knowledge_references": knowledge_references,
+            "knowledge_injection": knowledge_injection,
         }
 
     def compare_for_agent(self, request_id: str, *, run_id: str) -> dict[str, Any]:
@@ -1570,8 +1573,14 @@ class ProcurementService:
         request_id: str,
         *,
         run_id: str,
-    ) -> list[dict[str, Any]]:
-        """Retrieve + sanitize top-5 history, inject top-3, audit, assert budget."""
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Retrieve + sanitize top-5 history, build the top-3 model injection.
+
+        Returns ``(references, injected)``: ``references`` (top-5, sanitized)
+        goes to the UI and audit evidence; ``injected`` (top-3 compact text)
+        is the only knowledge text the Agent model receives, and is what the
+        token-budget assertion checks.
+        """
         request = self.repo.get_request(request_id)
         if request is None:
             raise KeyError(request_id)
@@ -1585,6 +1594,8 @@ class ProcurementService:
             sanitize_reference(chunk, self.storage.redactor) for chunk in chunks
         ]
         injected = injected_text(references, top_k=INJECTED_TOP_K)
+        # 断言针对真正发给模型的 top-3 文本（而不是被丢弃的中间值），
+        # 防止参考文本增长后悄悄超过注入预算。
         if len(injected) > KNOWLEDGE_INJECTION_MAX_CHARS:
             raise RuntimeError("knowledge injection exceeds token budget")
         self._audit(
@@ -1598,7 +1609,7 @@ class ProcurementService:
                 "references": references,
             },
         )
-        return references
+        return references, injected
 
     def _latest_knowledge_references(self, request_id: str) -> list[dict[str, Any]]:
         for event in reversed(self.repo.list_audit_events(request_id)):

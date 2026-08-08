@@ -14,3 +14,8 @@ web/dist
 .playwright-cli
 .playwright-mcp
 *.log
+
+# 本地密钥/环境文件绝不进入构建上下文
+.env
+.env.*
+!.env.example

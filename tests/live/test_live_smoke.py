@@ -2,8 +2,6 @@
 
 Run:
   LIVE_SMOKE=1 uv run pytest tests/live -v
-  # or
-  uv run python scripts/live_smoke.py
 """
 
 from __future__ import annotations

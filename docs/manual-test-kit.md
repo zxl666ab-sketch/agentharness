@@ -1,6 +1,6 @@
 # 手动自测清单（8741 单实例）
 
-> 测试地址：http://127.0.0.1:8741（当前最新构建，HEAD e0eff55）
+> 测试地址：http://127.0.0.1:8741（本地自托管单实例）
 > 建议：右上角「API / 模型配置」选 **procurement_fake**（离线、确定性、不花钱）；
 > 用 **openai** 则走真实模型（deepseek-v4-flash，按 token 计费），边界行为可能略有差异。
 > 全部断言都是「系统应该怎么做」，测的是系统拦截/兜底能力。
@@ -9,10 +9,10 @@
 
 | 文件 | 绝对路径 |
 |---|---|
-| 华东优包报价单.xlsx | `D:\个人通用agentharness\output\procurement-demo-v3\华东优包报价单.xlsx` |
-| 沪上包装报价单.pdf | `D:\个人通用agentharness\output\procurement-demo-v3\沪上包装报价单.pdf` |
-| 星河包装报价单.pdf | `D:\个人通用agentharness\output\procurement-demo-v3\星河包装报价单.pdf` |
-| 错误物料低价样本报价单.xlsx（对抗样本） | `D:\个人通用agentharness\output\procurement-demo-v3\错误物料低价样本报价单.xlsx` |
+| 华东优包报价单.xlsx | `output/procurement-demo-v3/华东优包报价单.xlsx` |
+| 沪上包装报价单.pdf | `output/procurement-demo-v3/沪上包装报价单.pdf` |
+| 星河包装报价单.pdf | `output/procurement-demo-v3/星河包装报价单.pdf` |
+| 错误物料低价样本报价单.xlsx（对抗样本） | `output/procurement-demo-v3/错误物料低价样本报价单.xlsx` |
 
 重新生成这些演示文件：
 

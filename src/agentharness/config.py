@@ -53,7 +53,8 @@ def load_project_env(start: Path | None = None) -> Path | None:
         return None
     try:
         values = parse_env_file(path.read_text(encoding="utf-8"))
-    except OSError:
+    except (OSError, UnicodeError):
+        # 非 UTF-8/损坏的 .env 不能导致启动崩溃；按缺失处理并跳过。
         return None
     for key, value in values.items():
         os.environ.setdefault(key, value)

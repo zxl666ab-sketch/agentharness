@@ -31,6 +31,10 @@ from agentharness.procurement.parsing import fields_requiring_review, parse_quot
 
 DEFAULT_OUTPUT = Path("output/procurement-scenarios/stress-batch-1")
 
+# 压测场景的单一基准日期：预期结果、created_at、有效期边界都锚定它，
+# 避免 8 月 8 日后重新生成时用 date.today() 使预期随日期漂移。
+AS_OF = date(2026, 8, 8)
+
 XLSX_LAYOUTS = ["xlsx_vertical", "xlsx_horizontal", "xlsx_sections"]
 PDF_LAYOUTS = ["pdf_vertical", "pdf_columns", "pdf_table"]
 
@@ -132,7 +136,7 @@ def _internal_request(sc: dict[str, Any]) -> dict[str, Any]:
         "unit": "piece",
         "specifications": deepcopy(sc["specs"]),
         "constraints": deepcopy(sc["constraints"]),
-        "created_at": "2026-08-08T00:00:00+00:00",
+        "created_at": f"{AS_OF.isoformat()}T00:00:00+00:00",
     }
 
 
@@ -165,7 +169,7 @@ def _expected_analysis(sc: dict[str, Any], cases: list[dict[str, Any]], files: l
             "exclusions": [],
             "note": "存在待复核字段，确定性比价被人工复核门禁拦截（这是预期行为，不是失败）。",
         }
-    result = compare_quotes(request, quotes, analysis_as_of=date.today())
+    result = compare_quotes(request, quotes, analysis_as_of=AS_OF)
     by_id = {quote["quote_id"]: quote for quote in result["quotes"]}
     recommended = None
     if result.get("recommended_quote_id"):

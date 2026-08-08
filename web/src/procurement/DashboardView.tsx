@@ -26,7 +26,12 @@ function downloadCsv(rows: Array<Record<string, string | number>>, filename: str
   const body = rows
     .map((row) =>
       Object.values(row)
-        .map((value) => `"${String(value).replaceAll('"', '""')}"`)
+        .map((value) => {
+          const text = String(value);
+          // CSV 公式注入防护：以 = + - @ 或制表符/回车开头的单元格加单引号前缀。
+          const guarded = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+          return `"${guarded.replaceAll('"', '""')}"`;
+        })
         .join(",")
     )
     .join("\n");

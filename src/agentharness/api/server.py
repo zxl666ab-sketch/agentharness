@@ -208,7 +208,7 @@ def create_app(
     @app.get("/api/health")
     async def health(response: Response) -> dict[str, Any]:
         response.headers["Cache-Control"] = "no-store"
-        return redactor.redact_obj(
+        return redactor.redact_public_obj(
             {
                 "service": "agentharness",
                 "status": "ok",

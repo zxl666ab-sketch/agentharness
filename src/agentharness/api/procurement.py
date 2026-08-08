@@ -150,6 +150,14 @@ class StartProcurementConversationBody(BaseModel):
         return cleaned
 
     def decoded_attachments(self) -> list[tuple[str, bytes]]:
+        # Wire-level precheck: base64 inflates by ~4/3, so reject an oversized
+        # payload before decoding any attachment (the sum check below is the
+        # exact decoded-size guard).
+        if (
+            sum(len(item.content_base64) for item in self.attachments)
+            > MAX_CONVERSATION_UPLOAD_BYTES * 4 // 3 + 4096
+        ):
+            raise ProcurementError("单次上传的报价文件总计不得超过 20 MB")
         decoded = [(item.filename, item.decode()) for item in self.attachments]
         if sum(len(data) for _filename, data in decoded) > MAX_CONVERSATION_UPLOAD_BYTES:
             raise ProcurementError("单次上传的报价文件总计不得超过 20 MB")
@@ -240,22 +248,29 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
                 attachments=body.decoded_attachments(),
                 actor=body.actor,
             )
-        except (ProcurementError, QuoteParseError) as exc:
+        except (ProcurementError, QuoteParseError, RuntimeError, ValueError) as exc:
             # Keep 400 for parse/validation failures but use 409 for the
             # post-approval edit guard so the frontend treats it like the
-            # correction endpoint (semantically a state conflict).
-            status_code = (
-                409
-                if isinstance(exc, ProcurementError)
-                and "已形成审批结论" in str(exc)
-                else 400
-            )
+            # correction endpoint (semantically a state conflict). Runtime/Value
+            # errors (e.g. run failed to launch) map to 409 like the other
+            # procurement actions instead of leaking a 500.
+            if isinstance(exc, QuoteParseError):
+                status_code = 400
+            elif isinstance(exc, ProcurementError) and "已形成审批结论" in str(exc):
+                status_code = 409
+            elif isinstance(exc, ProcurementError):
+                status_code = 400
+            else:
+                status_code = 409
             raise HTTPException(status_code, str(exc)) from exc
 
     @router.post("/requests/{request_id}/cancel-run", status_code=200)
     async def cancel_run(request_id: str) -> dict[str, Any]:
         """Let the buyer stop a stuck procurement Agent run (e.g. gateway retry loop)."""
-        request = service.get_request(request_id)
+        try:
+            request = service.get_request(request_id)
+        except KeyError:
+            raise HTTPException(404, "未找到采购需求") from None
         run_id = str(request.get("analysis_run_id") or "")
         if not run_id:
             raise HTTPException(409, "采购任务还没有关联的 Agent 运行")

@@ -2,6 +2,8 @@
 
 from datetime import date
 
+from agentharness.procurement.costing import _canonical_material as costing_material
+from agentharness.rag.chunking import canonical_material as rag_material
 from agentharness.rag.retriever import Retriever
 from agentharness.storage.sqlite import Storage
 
@@ -264,3 +266,21 @@ def test_retriever_missing_fields_are_penalized(data_dir) -> None:  # type: igno
         assert results[1]["chunk_sha256"] == "1" * 63 + "1"
     finally:
         storage.close()
+
+
+def test_rag_material_canonical_matches_costing_word_boundary() -> None:
+    """RAG canonical material must agree with costing identity checks.
+
+    The old substring matcher turned ``pet``/``PET膜`` into PE and ``apple``
+    into PP, so a PET history chunk could be injected as a “similar PE” ref.
+    """
+    cases = (
+        "PE", "聚乙烯", "polyethylene", "PE泡沫", "PE胶袋",
+        "PVC", "聚氯乙烯", "polyvinyl chloride",
+        "PP", "聚丙烯", "polypropylene",
+        "PET", "PET膜", "聚对苯二甲酸乙二醇酯",
+        "PLA", "聚乳酸",
+        "per", "pet", "apple", "pete", "未注明",
+    )
+    for value in cases:
+        assert rag_material(value) == costing_material(value), value

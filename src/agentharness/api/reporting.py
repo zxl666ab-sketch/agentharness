@@ -40,6 +40,26 @@ def _integer(value: Any, default: int = 0) -> int:
         return default
 
 
+def _iter_all_events(runtime: Any, run_id: str, page_size: int = 2_000) -> list[Any]:
+    """Page through the full persisted event log for a run.
+
+    The report claims to derive evidence from the complete log, so a hard
+    10_000-event prefix could silently change verification/evidence hashes on
+    long runs. Pagination keeps the claim true at any event count.
+    """
+    events: list[Any] = []
+    after = 0
+    while True:
+        page = runtime.get_events(run_id=run_id, after_global_seq=after, limit=page_size)
+        if not page:
+            break
+        events.extend(page)
+        after = int(page[-1].global_seq)
+        if len(page) < page_size:
+            break
+    return events
+
+
 def _verification_attempts(events: list[EventEnvelope]) -> list[dict[str, Any]]:
     attempts: list[dict[str, Any]] = []
     for event in events:
@@ -422,7 +442,7 @@ def build_run_report(runtime: Harness, run_id: str) -> dict[str, Any] | None:
     policy = metadata.get("_agentharness_verification_policy")
     if not isinstance(policy, dict):
         policy = None
-    all_events = runtime.get_events(run_id=run_id, limit=10_000)
+    all_events = _iter_all_events(runtime, run_id)
     attempts = _verification_attempts(all_events)
     configured = bool(policy) or bool(attempts)
     failures = _failure_reasons(attempts, run.get("error"))

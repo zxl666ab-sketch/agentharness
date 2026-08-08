@@ -53,7 +53,9 @@ class StorageCore:
         conn = getattr(self._read_local, "conn", None)
         if conn is None:
             conn = sqlite3.connect(
-                f"file:{self.db_path}?mode=ro",
+                # as_uri() percent-encodes '#'/'?' so data_dir names containing
+                # them no longer break the URI (previously treated as fragment).
+                self.db_path.as_uri() + "?mode=ro",
                 uri=True,
                 check_same_thread=False,
                 isolation_level=None,

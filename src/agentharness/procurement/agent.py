@@ -330,7 +330,10 @@ def _request_id_schema() -> dict[str, Any]:
     }
 
 
-def create_procurement_tools(service: ProcurementService) -> dict[str, _ProcurementTool]:
+def create_procurement_tools(
+    service: ProcurementService,
+    buyer_decision: dict[str, dict[str, str | None]] | None = None,
+) -> dict[str, _ProcurementTool]:
     def pipeline_payload(result: dict[str, Any]) -> dict[str, Any]:
         if result["status"] == "needs_review":
             return {
@@ -362,7 +365,8 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
             "eligible_quotes": visible,
             "eligible_quotes_truncated": len(eligible) > len(visible),
             "stages": result["stages"],
-            "knowledge_references": result.get("knowledge_references", []),
+            "knowledge_references_count": len(result.get("knowledge_references") or []),
+            "knowledge_injection": result.get("knowledge_injection") or "",
         }
 
     async def read_request(_ctx: ToolContext, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -440,6 +444,7 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
         )
         if approval is None:
             raise ProcurementError("没有找到已由采购员确认的 Harness Approval")
+        buyer = (buyer_decision or {}).get(ctx.run_id) or {}
         detail = service.approve_supplier_from_agent(
             str(arguments["request_id"]),
             snapshot_id=str(arguments["snapshot_id"]),
@@ -447,8 +452,10 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
             quote_id=str(arguments["quote_id"]),
             run_id=ctx.run_id,
             approval_id=str(approval["id"]),
-            note=arguments.get("note"),
-            actor=str(arguments["actor"]),
+            # 采购员提交的 actor/note 优先；仅在没有采购员值时（非 /decision
+            # 的调用方）回退模型参数，保证审计记录不被模型幻觉污染。
+            note=buyer.get("note") if buyer else arguments.get("note"),
+            actor=str(buyer.get("actor") or arguments["actor"]),
         )
         selected = next(
             quote for quote in detail["quotes"] if quote["id"] == arguments["quote_id"]
@@ -616,8 +623,9 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
         _ProcurementTool(
             name="procurement_capture_requirement",
             description=(
-                "结构化采购需求，并由后端一次执行报价解析、物料匹配、历史查询、"
-                "Decimal 比价、复算和人工选择准备。"
+                "仅结构化并校验采购需求（阶段 A），不执行比价；"
+                "完整确定性分析（报价解析、物料匹配、历史查询、Decimal 比价、"
+                "复算和人工选择准备）由 procurement_execute_analysis 完成。"
             ),
             parameters=capture_schema,
             effect=EffectKind.workspace_write,
@@ -744,7 +752,7 @@ class ProcurementFakeProvider:
             eligible_count = int(payload.get("eligible_count") or 0)
             if payload.get("eligible_quotes_truncated"):
                 eligible = f"{eligible} 等 {eligible_count} 家"
-            reference_count = len(payload.get("knowledge_references") or [])
+            reference_count = int(payload.get("knowledge_references_count") or 0)
             reference_note = (
                 f"已为您检索到 {reference_count} 条相似历史成交参考（见比价页，"
                 "仅作参考，不影响本次确定性结论）。"
@@ -946,6 +954,9 @@ class ProcurementAgent:
         # Independent review (phase 3): a second provider/model cross-checks the
         # recommendation against the deterministic comparison before approval.
         # It never blocks the approval; the verdict is recorded as evidence.
+        # 采购员在 /decision 提交的 actor/note 是审计记录的唯一权威来源；
+        # 模型在 approve 工具参数里填写的 actor/note 不再覆盖采购员值。
+        self._buyer_decision: dict[str, dict[str, str | None]] = {}
         self.ai_review_enabled = _env_flag(
             "AGENTHARNESS_PROCUREMENT_AI_REVIEW_ENABLED", default=False
         )
@@ -974,7 +985,7 @@ class ProcurementAgent:
             raise ValueError(
                 f"采购 Agent Provider 未注册：{self.run_profile.provider}"
             )
-        for tool in create_procurement_tools(service).values():
+        for tool in create_procurement_tools(service, buyer_decision=self._buyer_decision).values():
             if tool.spec.name not in harness.tools:
                 harness.register_tool(tool)
 
@@ -1895,6 +1906,12 @@ class ProcurementAgent:
             "actor": actor,
             "note": (note or "").strip() or None,
         }
+        # 审计权威值：即使真实模型在工具参数里自行填写 actor/note，正式决策
+        # 记录也必须使用采购员提交的值（未填写备注时保持为空，不采用模型备注）。
+        self._buyer_decision[run_id] = {
+            "actor": actor,
+            "note": (note or "").strip() or None,
+        }
         message = "[procurement_supplier_selection]\n" + json.dumps(
             selection,
             ensure_ascii=False,
@@ -1929,6 +1946,7 @@ class ProcurementAgent:
                 owned_tasks.append(correction_task)
                 self._track(run_id, correction_task)
                 result = await correction_task
+            self._buyer_decision.pop(run_id, None)
             detail = self.service.get_request(request_id)
             if result.status.value != "completed" and detail.get("decision") is None:
                 raise RuntimeError(result.error or "采购审批运行没有完成")

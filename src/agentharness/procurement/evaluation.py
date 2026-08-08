@@ -735,6 +735,9 @@ def evaluation_acceptance(
         "cost_calculation_100pct": metrics["cost_calculation"]["accuracy"] == 1,
         "hard_constraint_miss_zero": metrics["hard_constraint_miss"]["missed"] == 0,
         "invalid_quote_selected_zero": metrics["incorrect_eligible_selection"]["count"] == 0,
+        # 反向门槛：误杀合格报价（false_positive_count > 0）同样视为回归，
+        # 否则规则一旦开始错误淘汰合格报价，只要推荐仍合法且无漏检 CI 仍全绿。
+        "false_positive_quote_zero": metrics["hard_constraint_miss"]["false_positive_count"] == 0,
     }
 
 

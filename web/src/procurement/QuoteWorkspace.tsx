@@ -66,7 +66,10 @@ function sourceIcon(kind: string) {
 function displayValue(value: QuoteField["value"], meta: FieldMeta): string {
   if (value == null) return "";
   if (meta.kind === "boolean") return value ? "true" : "false";
-  if (meta.kind === "rate") return String(Number(value) * 100);
+  if (meta.kind === "rate") {
+    // 税率以小数存储（如 0.07），显示为百分比时避免浮点尾差（0.07*100=7.000000000000001）。
+    return String(Number((Number(value) * 100).toFixed(4)));
+  }
   return String(value);
 }
 
@@ -227,6 +230,7 @@ export function QuoteWorkspace({
   onAnalyze,
 }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(request.quotes[0]?.id || null);
+  const [localError, setLocalError] = useState<string | null>(null);
   const [onlyReview, setOnlyReview] = useState(false);
   useEffect(() => {
     if (!request.quotes.some((quote) => quote.id === selectedId)) {
@@ -281,11 +285,32 @@ export function QuoteWorkspace({
               onChange={(event) => {
                 const files = Array.from(event.target.files || []);
                 event.target.value = "";
+                const allowed = meta.allowed_extensions || [".xlsx", ".pdf"];
+                const invalid = files.find(
+                  (file) => !allowed.some((ext) => file.name.toLowerCase().endsWith(ext))
+                );
+                if (invalid) {
+                  setLocalError(`不支持的文件：${invalid.name}`);
+                  return;
+                }
+                const oversized = files.find((file) => file.size > meta.max_file_bytes);
+                if (oversized) {
+                  setLocalError(
+                    `${oversized.name} 超过单文件 ${Math.round(meta.max_file_bytes / 1024 / 1024)} MB 上限`
+                  );
+                  return;
+                }
+                if (request.quote_count + files.length > meta.max_quotes_per_request) {
+                  setLocalError(`每个采购任务最多上传 ${meta.max_quotes_per_request} 份报价`);
+                  return;
+                }
+                setLocalError(null);
                 if (files.length) void onUpload(files);
               }}
             />
           </label>
         </header>
+        {localError ? <p className="proc-conversation-error" role="alert">{localError}</p> : null}
 
         {request.quotes.length ? (
           <div className="proc-quote-items">

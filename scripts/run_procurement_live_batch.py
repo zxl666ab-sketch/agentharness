@@ -26,7 +26,7 @@ from agentharness.api.execution import PendingApprovalBroker
 from agentharness.config import load_project_env
 from agentharness.contracts import EventType
 from agentharness.harness import Harness
-from agentharness.procurement.agent import ProcurementAgent
+from agentharness.procurement.agent import ProcurementAgent, procurement_run_profile_from_env
 from agentharness.procurement.evaluation import build_case_document, load_frozen_truth
 from agentharness.procurement.service import ProcurementService
 
@@ -282,6 +282,20 @@ async def _main(args: argparse.Namespace) -> int:
         import os
 
         os.environ["AGENTHARNESS_PROCUREMENT_PROVIDER"] = "procurement_fake"
+    if not args.fake:
+        profile = procurement_run_profile_from_env()
+        if (
+            profile.pricing.input_per_million_usd is None
+            or profile.pricing.output_per_million_usd is None
+            or profile.budget.max_cost_usd is None
+        ):
+            print(
+                "错误：真实模型跑批必须配置输入/输出单价与费用上限 "
+                "（AGENTHARNESS_PROCUREMENT_INPUT/OUTPUT_PER_MILLION_USD、"
+                "AGENTHARNESS_PROCUREMENT_MAX_COST_USD），否则“受预算约束”不成立。",
+                file=sys.stderr,
+            )
+            return 2
     scenarios = _build_scenarios(args.scenarios_dir, args.limit)
     if not scenarios:
         print("错误：没有可用场景", file=sys.stderr)
