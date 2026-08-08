@@ -1031,6 +1031,45 @@ def test_quote_parser_preserves_per_ten_thousand_price_basis() -> None:
     assert extracted["fields"]["price_basis"]["value"] == 10_000
 
 
+def test_requirement_rejects_unknown_spec_and_constraint_fields() -> None:
+    """Strict validation: a mistyped or stale field must not be silently
+    ignored, otherwise the model/API could build a requirement with wrong
+    tolerances or limits without anyone noticing."""
+    from agentharness.procurement.service import _validated_requirement
+
+    payload = {
+        "title": "快递袋",
+        "item_name": "PE快递袋",
+        "quantity": 1000,
+        "unit": "piece",
+        "specifications": {
+            "width_mm": "250",
+            "length_mm": "350",
+            "thickness_um": "60",
+            "material": "PE",
+            "color": "白色",
+            "print_colors": 1,
+        },
+        "constraints": {
+            "base_currency": "CNY",
+            "fx_rates": {"CNY": "1"},
+            "max_lead_days": 15,
+            "invoice_required": True,
+        },
+    }
+    bad_specs = dict(payload)
+    bad_specs["specifications"] = dict(payload["specifications"])
+    bad_specs["specifications"]["width_cm"] = "25"
+    with pytest.raises(ProcurementError, match="不支持的字段"):
+        _validated_requirement(bad_specs)
+
+    bad_constraints = dict(payload)
+    bad_constraints["constraints"] = dict(payload["constraints"])
+    bad_constraints["constraints"]["budget"] = "0.5"
+    with pytest.raises(ProcurementError, match="不支持的字段"):
+        _validated_requirement(bad_constraints)
+
+
 def test_quote_parser_recognizes_chinese_dimension_labels() -> None:
     """Regression: 宽度（mm）/长度（mm） labels must map to width_mm/length_mm.
 
@@ -1103,6 +1142,34 @@ def test_quote_parser_does_not_conflict_when_invoice_label_contains_positive_wor
     assert invoice["status"] == "accepted"
     assert "conflicts" not in invoice
     assert "supports_invoice" not in fields_requiring_review(extracted)
+
+
+def test_quote_parser_still_flags_genuine_prose_invoice_contradiction() -> None:
+    """The lookbehind fix must not hide real contradictions: an explicit
+    “是否可开票: 是” plus prose “本公司不可开票” is a genuine cross-source
+    conflict and must go to human review."""
+    document = _xlsx_bytes(
+        [
+            ["供应商", "矛盾发票供应商"],
+            ["品名", "PE 白色快递袋 250x350mm 60um 单色印刷"],
+            ["币种", "CNY"],
+            ["单价", "500"],
+            ["计价数量", "1000"],
+            ["税率", "13%"],
+            ["是否含税", "是"],
+            ["是否包邮", "是"],
+            ["MOQ", "1000"],
+            ["交期", "7"],
+            ["是否可开票", "是"],
+            ["备注", "本公司不可开票"],
+        ]
+    )
+
+    extracted = parse_quote("invoice-contradiction.xlsx", document)
+    invoice = extracted["fields"]["supports_invoice"]
+
+    assert invoice["status"] == "needs_review"
+    assert "supports_invoice" in fields_requiring_review(extracted)
 
 
 def test_requirement_accepts_roll_goods_length_in_mm() -> None:

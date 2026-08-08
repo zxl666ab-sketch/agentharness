@@ -10,6 +10,7 @@ import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -587,13 +588,23 @@ def create_procurement_tools(service: ProcurementService) -> dict[str, _Procurem
     }
     spec_props = set(capture_schema["properties"]["specifications"]["properties"])
     constraint_props = set(capture_schema["properties"]["constraints"]["properties"])
-    missing_specs = REQUIRED_SPEC_FIELDS - spec_props
-    missing_constraints = SUPPORTED_CONSTRAINT_FIELDS - constraint_props
-    if missing_specs or missing_constraints:
-        raise RuntimeError(
-            "采购工具 schema 与领域字段不一致（领域新增了字段但没有同步工具 schema）："
-            + ", ".join(sorted(missing_specs | missing_constraints))
-        )
+    missing = sorted(
+        (REQUIRED_SPEC_FIELDS - spec_props)
+        | (SUPPORTED_CONSTRAINT_FIELDS - constraint_props)
+    )
+    extra = sorted(
+        (spec_props - REQUIRED_SPEC_FIELDS)
+        | (constraint_props - SUPPORTED_CONSTRAINT_FIELDS)
+    )
+    if missing or extra:
+        parts = []
+        if missing:
+            parts.append("缺少 " + ", ".join(missing))
+        if extra:
+            parts.append("多余 " + ", ".join(extra))
+        # 双向校验：领域新增字段没同步工具 schema（缺少），或工具 schema
+        # 新增了领域不认识的字段（多余），都会在构建时立刻报错，杜绝静默漂移。
+        raise RuntimeError("采购工具 schema 与领域字段不一致：" + "；".join(parts))
     tools = [
         _ProcurementTool(
             name="procurement_read_request",
@@ -1675,6 +1686,7 @@ class ProcurementAgent:
         message: str,
         source: str,
     ) -> RunRequest:
+        current_year = datetime.now(UTC).year
         required_analysis_tools = (
             ["procurement_capture_requirement", "procurement_execute_analysis"]
             if source == "procurement_conversation"
@@ -1702,7 +1714,7 @@ class ProcurementAgent:
             "不要把宽度与长度写反（例如 400x300x250mm 表示宽 400mm、长 300mm、高 250mm）；"
             "用户给出“X 月 X 日前必须到货”等日期要求时，必须结构化为 required_delivery_date "
             "（YYYY-MM-DD），该约束与 max_lead_days 同时生效，不得丢弃；"
-            "未写年份的“X 月 X 日”一律按当前年份（2026 年）解释；若按当前年份计算该日期 "
+            f"未写年份的“X 月 X 日”一律按当前年份（{current_year} 年）解释；若按当前年份计算该日期 "
             "已经过去或明显不合理，则停下来提示采购员确认，不要擅自改用其他年份；"
             "必须忠实保留用户明确说出的颜色、印刷色数和开票要求。"
             "只有收到 [procurement_supplier_selection] JSON 后才能调用审批工具；审批成功后最终回复"

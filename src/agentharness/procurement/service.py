@@ -134,6 +134,9 @@ def _validated_requirement(payload: dict[str, Any]) -> dict[str, Any]:
     missing_specs = sorted(required_specs - raw_specs.keys())
     if missing_specs:
         raise ProcurementError("采购规格缺少字段：" + ", ".join(missing_specs))
+    unknown_specs = sorted(set(raw_specs) - REQUIRED_SPEC_FIELDS)
+    if unknown_specs:
+        raise ProcurementError("采购规格包含不支持的字段：" + ", ".join(unknown_specs))
     material = str(raw_specs["material"]).strip()
     color = str(raw_specs["color"]).strip()
     if not material or len(material) > 100 or not color or len(color) > 100:
@@ -171,6 +174,9 @@ def _validated_requirement(payload: dict[str, Any]) -> dict[str, Any]:
     missing_constraints = sorted(required_constraints - raw_constraints.keys())
     if missing_constraints:
         raise ProcurementError("采购约束缺少字段：" + ", ".join(missing_constraints))
+    unknown_constraints = sorted(set(raw_constraints) - SUPPORTED_CONSTRAINT_FIELDS)
+    if unknown_constraints:
+        raise ProcurementError("采购约束包含不支持的字段：" + ", ".join(unknown_constraints))
     base_currency = str(raw_constraints["base_currency"]).strip().upper()
     if re.fullmatch(r"[A-Z]{3}", base_currency) is None:
         raise ProcurementError("本位币必须是 3 位字母代码")

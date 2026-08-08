@@ -574,17 +574,6 @@ def _extract_specs(fields: dict[str, Any], document_kind: str) -> None:
 
 def _infer_common(fields: dict[str, Any], text: str, document_kind: str) -> None:
     def inferred(field: str, value: Any, confidence: float, excerpt: str) -> None:
-        current = fields.get(field)
-        if (
-            isinstance(current, dict)
-            and current.get("status") == "accepted"
-            and float(current.get("confidence", 0)) >= REVIEW_THRESHOLD
-        ):
-            # 显式标签已高置信度解析出该字段时，自由文本推断是冗余噪音；
-            # 不应再与显式值制造“跨来源冲突”把字段打成 needs_review。
-            # 典型反例：标签“是否可开票: 否”里的“可开”会被正向正则命中，
-            # 没有这个保护，所有中文“不可开票”报价都会被误判为待复核。
-            return
         _set_field(
             fields,
             field,
@@ -626,7 +615,13 @@ def _infer_common(fields: dict[str, Any], text: str, document_kind: str) -> None
         re.I,
     ):
         inferred("supports_invoice", False, 0.91, "不可开票")
-    elif re.search(r"可开|专票|invoice\s*:?\s*(yes|available)", text, re.I):
+    elif re.search(
+        r"(?<!是否)可开|专票|invoice\s*:?\s*(yes|available)",
+        text,
+        re.I,
+    ):
+        # 负向后行断言排除标签自身的“是否可开票”，避免把标签文本当成正向证据，
+        # 同时保留报价正文中真实的“可开票”矛盾检测（例如显式“否”+正文“可开票”）。
         inferred("supports_invoice", True, 0.88, "可开票")
     if "currency" not in fields:
         currency = _currency(text)

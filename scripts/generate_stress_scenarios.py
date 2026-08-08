@@ -224,10 +224,7 @@ def generate(target: Path, definitions: list[dict[str, Any]], start: int) -> int
         expected = _expected_analysis(sc, cases, files)
         quote_entries = []
         for case, (filename, data) in zip(cases, files, strict=True):
-            exclusions = (expected.get("exclusions") or {}).get(
-                f"{sc['slug']}-{case['id'].rsplit('-', 1)[-1]}", []
-            )
-            # map quote id: _expected_analysis uses sequential ids sc-slug-N
+            # _expected_analysis 使用顺序 id：{slug}-q1/q2/q3
             seq = case["id"].rsplit("-", 1)[-1]
             exclusions = (expected.get("exclusions") or {}).get(f"{sc['slug']}-{seq}", [])
             quote_entries.append(
