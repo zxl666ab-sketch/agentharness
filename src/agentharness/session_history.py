@@ -15,10 +15,17 @@ def collapse_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip())
 
 
+_SESSION_TITLE_MAX_CHARS = 120
+
+
 def session_title_from_message(content: str) -> str:
-    """Return the full first user message with whitespace collapsed."""
+    """Return the first user message with whitespace collapsed, capped at 120 chars."""
     title = collapse_whitespace(content)
-    return title or "session"
+    if not title:
+        return "session"
+    if len(title) <= _SESSION_TITLE_MAX_CHARS:
+        return title
+    return title[: _SESSION_TITLE_MAX_CHARS - 3].rstrip() + "..."
 
 
 def is_top_level_run(run: dict[str, Any]) -> bool:

@@ -8,7 +8,7 @@ import io
 import json
 import re
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -324,6 +324,32 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _po_total_amount(unit_price_base: Any, quantity: Any) -> str:
+    """PO 总额必须等于 单价 × 数量（2 位小数，ROUND_HALF_UP）。
+
+    ``landed_unit_base`` 保留 4 位小数而 ``landed_total_base`` 只保留 2 位，
+    直接沿用会导致 CSV 内 单价 × 数量 ≠ 总额，因此订单金额以单价重算。
+    """
+    unit = Decimal(str(unit_price_base))
+    qty = Decimal(str(quantity))
+    total = (unit * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return format(total, "f")
+
+
+def _csv_safe(value: Any) -> Any:
+    """Neutralize CSV formula injection on untrusted string fields.
+
+    以 = + - @（含前导空白）或 \t/\r/\n 开头的字符串加单引号前缀；数字等
+    其它值原样保留。
+    """
+    if not isinstance(value, str):
+        return value
+    # 含前导空白（\s 含 \t/\r/\n）的危险开头都要中和。
+    if re.match(r"^[\s]*[=+\-@]", value) or re.match(r"^[\s]*[\t\r\n]", value):
+        return "'" + value
+    return value
+
+
 class ProcurementService:
     def __init__(self, harness: Harness) -> None:
         self.harness = harness
@@ -503,14 +529,15 @@ class ProcurementService:
         if any(item["sha256"] == source_sha for item in staged):
             raise ProcurementError("同一报价文件已上传")
         content_type = str(validated["content_type"])
-        meta = self.storage.artifacts.put(
-            data,
-            content_type=content_type,
-            summary=f"采购报价原件：{filename}",
-        )
         with self.storage.transaction():
             if self.repo.get_decision(request_id) is not None:
                 raise ProcurementError("已形成审批结论的采购需求不可再修改")
+            # 决策检查通过后才写磁盘，避免被拒导入/暂存留下未注册的孤儿 artifact。
+            meta = self.storage.artifacts.put(
+                data,
+                content_type=content_type,
+                summary=f"采购报价原件：{filename}",
+            )
             artifact_id = self.storage.register_artifact(meta)
             attachment = {
                 "filename": filename,
@@ -531,6 +558,17 @@ class ProcurementService:
         if self.repo.get_request(request_id) is None:
             raise KeyError(request_id)
         with self.storage.transaction():
+            current = self.repo.get_request(request_id)
+            existing_run_id = str((current or {}).get("analysis_run_id") or "")
+            if existing_run_id and existing_run_id != run_id:
+                existing_run = self.harness.get_run(existing_run_id)
+                active = (
+                    existing_run is not None
+                    and str(existing_run.get("status") or "")
+                    in {"pending", "running", "waiting_approval"}
+                )
+                if active:
+                    raise RuntimeError("采购任务已有正在运行的分析任务，请勿重复启动")
             self.repo.update_request(request_id, analysis_run_id=run_id)
             self._audit(
                 request_id,
@@ -855,6 +893,18 @@ class ProcurementService:
             summary=f"{request['reference']} 确定性比价快照",
         )
         with self.storage.transaction():
+            # 并发修正/导入竞态防护：事务内重新读取需求与报价并复算输入哈希，
+            # 与事务前读到的版本不一致则整体失败（fail-closed），绝不把陈腐
+            # 快照标记为 current。
+            current_request = self.repo.get_request(request_id)
+            current_quotes = self.repo.list_quotes(request_id)
+            current_hash = analysis_input_sha256(
+                current_request or request,
+                current_quotes,
+                analysis_as_of=analysis_as_of,
+            )
+            if current_hash != input_hash:
+                raise ProcurementError("报价或采购需求已变化，请重新分析")
             artifact_id = self.storage.register_artifact(artifact)
             snapshot = self.repo.create_snapshot(
                 {
@@ -1096,7 +1146,7 @@ class ProcurementService:
         )
         if snapshot["input_sha256"] != input_sha256 or current_hash != input_sha256:
             raise ProcurementError("报价或采购需求已变化，比价快照失效")
-        current = compare_quotes(request, quotes, analysis_as_of=analysis_as_of)
+        current = compare_quotes(request, quotes, analysis_as_of=_today())
         if int(snapshot["result"].get("eligible_count") or 0) != 0:
             raise ProcurementError("仍有满足全部硬性条件的报价，不能提交无合格报价结论")
         if int(current.get("eligible_count") or 0) != 0:
@@ -1212,11 +1262,6 @@ class ProcurementService:
             if Path(filename).suffix.lower() == ".xlsx"
             else "application/pdf"
         )
-        meta = self.storage.artifacts.put(
-            data,
-            content_type=content_type,
-            summary=f"采购报价原件：{filename}",
-        )
         review_fields = fields_requiring_review(extracted)
         supplier = str(
             extracted.get("fields", {}).get("supplier_name", {}).get("value")
@@ -1240,6 +1285,12 @@ class ProcurementService:
         with self.storage.transaction():
             if self.repo.get_decision(request_id) is not None:
                 raise ProcurementError("已形成审批结论的采购需求不可再修改")
+            # 决策检查通过后才写磁盘，避免被拒导入留下未注册的孤儿 artifact。
+            meta = self.storage.artifacts.put(
+                data,
+                content_type=content_type,
+                summary=f"采购报价原件：{filename}",
+            )
             artifact_id = self.storage.register_artifact(meta)
             quote["source_artifact_id"] = artifact_id
             self.repo.create_quote(quote)
@@ -1281,7 +1332,10 @@ class ProcurementService:
             raise KeyError(quote_id)
         if field not in FIELD_META:
             raise ProcurementError("不支持的报价字段")
-        coerced = coerce_field_value(field, value)
+        try:
+            coerced = coerce_field_value(field, value)
+        except ValueError as exc:
+            raise ProcurementError(str(exc)) from exc
         if coerced is None and FIELD_META[field]["required"]:
             raise ProcurementError(f"{FIELD_META[field]['label']} 不能为空")
         extracted = dict(quote["extracted"])
@@ -1381,15 +1435,18 @@ class ProcurementService:
             if not any(event["type"] == "demo_request" for event in events):
                 continue
             run_id = str(summary.get("analysis_run_id") or "")
-            if run_id:
-                run = self.harness.get_run(run_id)
-                if run is not None and str(run.get("status") or "") in {
-                    "pending",
-                    "running",
-                    "waiting_approval",
-                }:
-                    skipped += 1
-                    continue
+            run = self.harness.get_run(run_id) if run_id else None
+            if run is None:
+                # 保守处理：run 尚未可见/不存在时不删除，避免误删刚启动的 demo。
+                skipped += 1
+                continue
+            if str(run.get("status") or "") in {
+                "pending",
+                "running",
+                "waiting_approval",
+            }:
+                skipped += 1
+                continue
             self.repo.delete_request_tree(request_id)
             removed += 1
         return {"removed": removed, "skipped": skipped}
@@ -1433,7 +1490,10 @@ class ProcurementService:
             "quote_id": quote.get("quote_id"),
             "currency": result.get("base_currency") or comparison.get("base_currency"),
             "unit_price_base": cost.get("landed_unit_base"),
-            "total_amount_base": cost.get("landed_total_base"),
+            "total_amount_base": _po_total_amount(
+                cost.get("landed_unit_base"),
+                request.get("quantity"),
+            ),
             "snapshot_id": comparison.get("id"),
             "snapshot_version": comparison.get("version"),
             "input_sha256": comparison.get("input_sha256"),
@@ -1468,22 +1528,26 @@ class ProcurementService:
             "供应商", "单价（本位币）", "总金额（本位币）", "币种",
             "快照ID", "快照版本", "审批ID", "创建时间", "证据SHA-256",
         ])
+        total_amount_base = _po_total_amount(
+            order.get("unit_price_base"),
+            order.get("quantity"),
+        )
         writer.writerow([
-            order["po_number"],
-            order.get("reference") or "",
-            order.get("title") or "",
-            order.get("item_name") or "",
+            _csv_safe(order["po_number"]),
+            _csv_safe(order.get("reference") or ""),
+            _csv_safe(order.get("title") or ""),
+            _csv_safe(order.get("item_name") or ""),
             order.get("quantity") if order.get("quantity") is not None else "",
-            order.get("unit") or "",
-            order.get("supplier_name") or "",
+            _csv_safe(order.get("unit") or ""),
+            _csv_safe(order.get("supplier_name") or ""),
             order.get("unit_price_base") if order.get("unit_price_base") is not None else "",
-            order.get("total_amount_base") if order.get("total_amount_base") is not None else "",
-            order.get("currency") or "",
-            order.get("snapshot_id") or "",
+            total_amount_base,
+            _csv_safe(order.get("currency") or ""),
+            _csv_safe(order.get("snapshot_id") or ""),
             order.get("snapshot_version") if order.get("snapshot_version") is not None else "",
-            order.get("approval_id") or "",
-            order.get("created_at") or "",
-            order.get("evidence_sha256") or "",
+            _csv_safe(order.get("approval_id") or ""),
+            _csv_safe(order.get("created_at") or ""),
+            _csv_safe(order.get("evidence_sha256") or ""),
         ])
         filename = f'{order["po_number"]}.csv'
         return filename, "\ufeff" + buffer.getvalue()

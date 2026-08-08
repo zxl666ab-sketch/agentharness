@@ -6,6 +6,12 @@ All notable changes are documented here. The project follows semantic versioning
 
 ### Fixed
 
+- 对抗式审查修复（多子代理并行审查）：
+  - 引擎：压缩仅标记摘要器真正完整看到的消息，不再丢失未覆盖内容；`resume()` 异常终态化避免卡死 running；`interrupt()` 对终态 run 无效；AI 验证器 usage 入账并给流加超时；工具重试 max_attempts 跨 resume 为硬上限；委托深度/并发执行预算；上下文外部化失败不再静默丢消息；会话标题截断；关闭时等待活跃 run 与分析线程；cancel/interrupt 失效未决审批。
+  - 采购：未识别物料/材质/颜色改为 fail-closed（不再静默放行）；运费“到付/自付/另算”与包邮共现强制人工复核；PO CSV 与仪表盘 CSV 公式注入防护；并发修正/比价竞态 fail-closed；并发 /analyze 单飞；PDF 页数/提取字数上限；人工修正值长度上限；no_award 改用当日复算；导入失败不留孤儿 artifact；PO 单价×数量=总额；demo 清理不删 run 不可见请求；采购 GET 统一脱敏；币种代码校验 [A-Z]{3}。
+  - RAG/存储：粗排改为结构化分数+小关键字加成，完美规格匹配不再被挤出 top-k；事件迭代/时间线改为分页与 tail 语义；空关键字不再匹配全表；artifact sha 路径遍历防护；并发注册返回实际 id；审批重存不抹除审计字段；删除请求树加事务；颜色词边界匹配；chunk 整数字段安全转换；工具调用冲突刷新身份字段；FTS 错误仅对语法类降级；参考 chunk_id 统一为 64 位 sha256；事务嵌套保护。
+  - API/安全/前端：脱敏键名改为包含判定且 token 仅尾部匹配，覆盖 openai_api_key/github_token/aws_secret_access_key；sk-proj- 等密钥格式脱敏；`serve()` 非回环绑定默认拒绝；/api/runs 分页 total/has_more 修正；events offset 上限；关闭时 config POST 也受 execution_enabled 门禁；SSE 空闲超时与 after 范围校验；请求体上限 413；前端非法币种不再整页崩溃；SSE 从 max_global_seq 订阅避免全量回放；活跃 run 低频轮询保底；事件类型与后端同步；文件去重改用 name+size+lastModified；健康检查失败可重试；审批后编辑器只读；Docker 时区/健康检查。
+  - 测试：添加 50+ 条回归测试；RAG 冻结检索指标复算（MRR 0.9464→0.9643）；fake provider PE 词边界修正（CJK 邻接时不再误拉“未说明”）。
 - 解析器发票能力：补齐“不能开具增值税专用发票/普通发票”等完整变体，不再被正向“可开/能开”子串误判为可开票；`_infer_common` 反向证据同步覆盖增值税变体。
 - 解析器单位换算：报价描述中的“N 丝”按 1 丝 = 10 µm 换算，“cm”尺寸按 ×10 换算为 mm，避免厚度/尺寸硬约束误判。
 - 解析器 XLSX 表头检测阈值从 4 降到 3：3-4 列报价表不再被当成键值行，供应商名不会被静默写成第二个表头（如“单价”）。

@@ -38,7 +38,7 @@ def sanitize_reference(
     """Project a chunk into the public evidence shape (redacted + truncated)."""
     safe = (redactor or default_redactor).redact_public_obj(
         {
-            "chunk_id": str(chunk["chunk_sha256"])[:16],
+            "chunk_id": str(chunk["chunk_sha256"]),
             "chunk_sha256": str(chunk["chunk_sha256"]),
             "request_reference": truncate(chunk.get("request_reference"), MAX_REQUEST_REFERENCE),
             "decision_at": str(chunk.get("decision_at") or ""),

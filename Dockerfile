@@ -13,8 +13,11 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends fonts-wqy-microhei \
+    && apt-get install -y --no-install-recommends fonts-wqy-microhei tzdata \
     && rm -rf /var/lib/apt/lists/*
+
+# Asia/Shanghai 时区（配合 tzdata 生效），保持 root 运行以兼容挂载卷权限。
+ENV TZ=Asia/Shanghai
 
 RUN uv sync --frozen --no-dev --no-editable \
     && mkdir -p /data /workspace

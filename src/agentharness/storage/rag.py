@@ -31,9 +31,27 @@ def _decode_row(row: Any, *json_columns: str) -> dict[str, Any] | None:
     return result
 
 
+_FTS_FALLBACK_MARKERS = (
+    "fts5:",
+    "no such module: fts5",
+    "no such table: rag_chunks_fts",
+    "syntax error",
+    "malformed match",
+    "unterminated string",
+)
+
+
 def _fts_terms(query: str) -> list[str]:
     """Split a free-text query into FTS5-safe prefix terms (CJK-aware)."""
     return [term for term in query.replace("，", " ").replace(",", " ").split() if term]
+
+
+def _should_fallback_to_like(exc: sqlite3.OperationalError) -> bool:
+    """Only FTS availability/syntax errors degrade to LIKE; real database
+    errors (locked, disk I/O, …) must keep propagating instead of silently
+    returning a wrong (or empty) result."""
+    message = str(exc)
+    return any(marker in message for marker in _FTS_FALLBACK_MARKERS)
 
 
 class RagRepo:
@@ -171,33 +189,39 @@ class RagRepo:
         be tokenized (for example a single CJK phrase without exact token).
         """
         terms = _fts_terms(query)
-        if terms:
-            match = " AND ".join(f'"{term}"*' for term in terms)
-            try:
-                rows = self._reader().execute(
-                    """SELECT c.* FROM rag_chunks_fts AS f
-                       JOIN rag_chunks AS c ON c.rowid = f.rowid
-                       WHERE rag_chunks_fts MATCH ?
-                       ORDER BY bm25(rag_chunks_fts) ASC, c.decision_at DESC
-                       LIMIT ?""",
-                    (match, limit),
-                ).fetchall()
-                decoded = [
-                    item
-                    for row in rows
-                    if (
-                        item := _decode_row(
-                            row, "specifications_json", "quality_flags_json"
-                        )
+        if not terms:
+            # Empty/whitespace-only query must never match the whole table via
+            # the LIKE fallback (LIKE '%%' matches every row).
+            return []
+        match = " AND ".join(f'"{term}"*' for term in terms)
+        try:
+            rows = self._reader().execute(
+                """SELECT c.* FROM rag_chunks_fts AS f
+                   JOIN rag_chunks AS c ON c.rowid = f.rowid
+                   WHERE rag_chunks_fts MATCH ?
+                   ORDER BY bm25(rag_chunks_fts) ASC, c.decision_at DESC
+                   LIMIT ?""",
+                (match, limit),
+            ).fetchall()
+            decoded = [
+                item
+                for row in rows
+                if (
+                    item := _decode_row(
+                        row, "specifications_json", "quality_flags_json"
                     )
-                    is not None
-                ]
-                if decoded:
-                    return decoded
-            except sqlite3.OperationalError:
-                # FTS5 may be unavailable on unusual builds or reject the query
-                # syntax; LIKE fallback below. Real database errors still raise.
-                pass
+                )
+                is not None
+            ]
+            if decoded:
+                return decoded
+        except sqlite3.OperationalError as exc:
+            if not _should_fallback_to_like(exc):
+                # e.g. "database is locked" / "disk I/O error": re-raise instead
+                # of silently returning LIKE results.
+                raise
+            # FTS5 may be unavailable on unusual builds or reject the query
+            # syntax; LIKE fallback below.
         return self._like_search(query, limit=limit)
 
     def _like_search(self, query: str, *, limit: int) -> list[dict[str, Any]]:

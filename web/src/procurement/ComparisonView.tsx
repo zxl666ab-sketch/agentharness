@@ -34,12 +34,18 @@ type Props = {
 };
 
 function money(value: string, currency: string) {
-  return new Intl.NumberFormat("zh-CN", {
-    style: "currency",
-    currency,
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 4,
-  }).format(Number(value));
+  try {
+    return new Intl.NumberFormat("zh-CN", {
+      style: "currency",
+      currency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 4,
+    }).format(Number(value));
+  } catch {
+    // An invalid currency code throws RangeError and would crash the whole
+    // comparison view; fall back to a plain label instead.
+    return `${value} ${currency}`;
+  }
 }
 
 function businessText(value: string) {

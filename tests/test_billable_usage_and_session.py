@@ -19,12 +19,13 @@ from agentharness.contracts import (
 )
 from agentharness.engine.context import billable_turn_usage, estimate_tokens
 from agentharness.harness import Harness
+from agentharness.session_history import session_title_from_message
 
 
 def test_billable_turn_usage_deflates_gateway_prompt_tokens() -> None:
     provider = Usage(input_tokens=304_466, output_tokens=7_027, total_tokens=311_493)
     local = 1_890
-    text = "????? B ???? UP ??? 12.9 ????"
+    text = "\u91c7\u8d2d B \u4ef7\u683c UP \u63d0\u5347 12.9 \u5143"
     billable = billable_turn_usage(
         provider_usage=provider,
         local_input_estimate=local,
@@ -147,3 +148,17 @@ async def test_session_prefix_ambiguous_when_short_and_long_share_prefix(
             harness.resolve_session_id(short_id)
     finally:
         harness.close()
+
+
+
+def test_session_title_is_truncated_to_120_chars() -> None:
+    """P3 regression: long first messages must not create unbounded titles."""
+    long_text = "\u91c7\u8d2d10000\u4e2aPE\u5feb\u9012\u888b " * 20 + " \u7ed3\u675f"
+    title = session_title_from_message(long_text)
+    assert len(title) <= 120
+    assert title.endswith("...")
+    assert title.startswith("\u91c7\u8d2d10000\u4e2aPE\u5feb\u9012\u888b")
+
+    short = session_title_from_message("  \u91c7\u8d2d  10000 \u4e2a \u888b  ")
+    assert short == "\u91c7\u8d2d 10000 \u4e2a \u888b"
+    assert session_title_from_message("   ") == "session"

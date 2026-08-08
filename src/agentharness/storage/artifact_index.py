@@ -38,7 +38,13 @@ class ArtifactIndexRepo:
                     safe.get("created_at", _utcnow()),
                 ),
             )
-        return str(safe["id"])
+            # Under concurrent registration the INSERT OR IGNORE may lose the
+            # race and the row for our freshly generated uuid may never exist;
+            # always return the id actually stored for this sha256.
+            row = self._conn.execute(
+                "SELECT id FROM artifacts WHERE sha256 = ?", (safe["sha256"],)
+            ).fetchone()
+        return str(row[0]) if row else str(safe["id"])
 
     def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
         with self._lock:

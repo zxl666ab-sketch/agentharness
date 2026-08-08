@@ -255,35 +255,50 @@ class ProcurementRepo:
         safe_event = self.redactor.redact_obj(audit_event)
         safe_chunks = self.redactor.redact_obj(rag_chunks or [])
         with self._lock:
+            if self._conn.in_transaction:
+                self._commit_decision_unlocked(
+                    safe_decision, safe_event, safe_chunks
+                )
+                return
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                self._insert_decision(safe_decision)
-                decision_type = str(safe_decision["decision"])
-                status = "approved" if decision_type == "approved" else "no_award"
-                cursor = self._conn.execute(
-                    """UPDATE procurement_requests
-                       SET status = ?, approved_quote_id = ?, updated_at = ?
-                       WHERE id = ? AND status NOT IN ('approved', 'no_award')""",
-                    (
-                        status,
-                        safe_decision.get("quote_id"),
-                        _utcnow(),
-                        safe_decision["request_id"],
-                    ),
+                self._commit_decision_unlocked(
+                    safe_decision, safe_event, safe_chunks
                 )
-                if cursor.rowcount != 1:
-                    raise ValueError("采购任务不存在或已经完成审批")
-                self._insert_audit_event(safe_event)
-                if safe_chunks:
-                    # Same transaction: a failed approval must not leave
-                    # knowledge chunks behind (atomic index + business facts).
-                    rag = RagRepo(self._core, self.redactor)
-                    for chunk in safe_chunks:
-                        rag.upsert_chunk(chunk)
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
+
+    def _commit_decision_unlocked(
+        self,
+        safe_decision: dict[str, Any],
+        safe_event: dict[str, Any],
+        safe_chunks: list[dict[str, Any]],
+    ) -> None:
+        self._insert_decision(safe_decision)
+        decision_type = str(safe_decision["decision"])
+        status = "approved" if decision_type == "approved" else "no_award"
+        cursor = self._conn.execute(
+            """UPDATE procurement_requests
+               SET status = ?, approved_quote_id = ?, updated_at = ?
+               WHERE id = ? AND status NOT IN ('approved', 'no_award')""",
+            (
+                status,
+                safe_decision.get("quote_id"),
+                _utcnow(),
+                safe_decision["request_id"],
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("采购任务不存在或已经完成审批")
+        self._insert_audit_event(safe_event)
+        if safe_chunks:
+            # Same transaction: a failed approval must not leave
+            # knowledge chunks behind (atomic index + business facts).
+            rag = RagRepo(self._core, self.redactor)
+            for chunk in safe_chunks:
+                rag.upsert_chunk(chunk)
 
     def _insert_decision(self, safe: dict[str, Any]) -> None:
         self._conn.execute(
@@ -378,21 +393,40 @@ class ProcurementRepo:
         )
 
     def delete_request_tree(self, request_id: str) -> None:
+        """Delete every row owned by a request in one transaction.
+
+        The six deletes must be atomic: a mid-way failure must not leave a
+        half-deleted tree (e.g. quotes gone but the request still present).
+        When the caller already owns a transaction, join it instead of
+        committing/rolling back the caller's unit of work.
+        """
         with self._lock:
-            for table in (
-                "procurement_purchase_orders",
-                "procurement_decisions",
-                "procurement_comparison_snapshots",
-                "procurement_audit_events",
-                "procurement_quotes",
-            ):
-                self._conn.execute(
-                    f"DELETE FROM {table} WHERE request_id = ?", (request_id,)
-                )
-            RagRepo(self._core, self.redactor).delete_chunks_for_request(request_id)
+            if self._conn.in_transaction:
+                self._delete_request_tree_unlocked(request_id)
+                return
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._delete_request_tree_unlocked(request_id)
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def _delete_request_tree_unlocked(self, request_id: str) -> None:
+        for table in (
+            "procurement_purchase_orders",
+            "procurement_decisions",
+            "procurement_comparison_snapshots",
+            "procurement_audit_events",
+            "procurement_quotes",
+        ):
             self._conn.execute(
-                "DELETE FROM procurement_requests WHERE id = ?", (request_id,)
+                f"DELETE FROM {table} WHERE request_id = ?", (request_id,)
             )
+        RagRepo(self._core, self.redactor).delete_chunks_for_request(request_id)
+        self._conn.execute(
+            "DELETE FROM procurement_requests WHERE id = ?", (request_id,)
+        )
 
     def save_purchase_order(self, order: dict[str, Any]) -> None:
         safe = self.redactor.redact_obj(order)

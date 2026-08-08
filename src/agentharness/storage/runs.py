@@ -221,6 +221,30 @@ class RunRepo:
             self._decorate_run_observability(row)
         return result
 
+    def count_runs(
+        self,
+        session_id: str | None = None,
+        status: str | None = None,
+    ) -> int:
+        """Total run rows matching the same filters as :meth:`list_runs`.
+
+        Used by the API pagination contract (``total`` / ``has_more``) so a
+        page can report the true dataset size without loading every row.
+        """
+        where: list[str] = []
+        values: list[Any] = []
+        if session_id:
+            where.append("r.session_id = ?")
+            values.append(session_id)
+        if status:
+            where.append("r.status = ?")
+            values.append(status)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        row = self._reader().execute(
+            "SELECT COUNT(*) FROM runs AS r" + clause, (*values,)
+        ).fetchone()
+        return int(row[0]) if row else 0
+
     def list_runs_for_metrics(self, limit: int = 10_000) -> list[dict[str, Any]]:
         """Flat run rows for aggregation without per-row observability queries."""
         rows = self._reader().execute(

@@ -114,7 +114,16 @@ export function NewProcurementConversation({
     }
     const next = [...files];
     for (const file of incoming) {
-      if (!next.some((item) => item.name === file.name && item.size === file.size)) next.push(file);
+      // Same name+size can still be distinct files (different mtime/content);
+      // only drop true duplicates that match on lastModified as well.
+      if (!next.some(
+        (item) =>
+          item.name === file.name &&
+          item.size === file.size &&
+          item.lastModified === file.lastModified
+      )) {
+        next.push(file);
+      }
     }
     if (next.length > maxQuotes) {
       setLocalError(`每个采购任务最多上传 ${maxQuotes} 份报价`);
@@ -164,7 +173,7 @@ export function NewProcurementConversation({
         {files.length ? (
           <ul className="proc-compose-files">
             {files.map((file, index) => (
-              <li key={`${file.name}-${file.size}`}>
+              <li key={`${file.name}-${file.size}-${file.lastModified}`}>
                 <span>{fileIcon(file.name)}</span>
                 <span><strong>{file.name}</strong><small>{formatBytes(file.size)}</small></span>
                 <button
@@ -234,20 +243,21 @@ export function ProcurementConversation({
     queryKey: ["procurement-run", runId],
     queryFn: () => api.run(runId!),
     enabled: !!runId,
-    refetchInterval: (query) => !streamLive && working(query.state.data?.status) ? 750 : false,
+    refetchInterval: (query) =>
+      working(query.state.data?.status) ? (streamLive ? 5000 : 750) : false,
   });
   const active = working(runQuery.data?.status);
   const messagesQuery = useQuery({
     queryKey: ["procurement-messages", runId],
     queryFn: () => api.messages(runId!),
     enabled: !!runId,
-    refetchInterval: !streamLive && active ? 750 : false,
+    refetchInterval: active ? (streamLive ? 5000 : 750) : false,
   });
   const toolsQuery = useQuery({
     queryKey: ["procurement-tools", runId],
     queryFn: () => api.toolInvocations(runId!),
     enabled: !!runId,
-    refetchInterval: !streamLive && active ? 750 : false,
+    refetchInterval: active ? (streamLive ? 5000 : 750) : false,
   });
   const messages = useMemo(
     () => (messagesQuery.data || []).filter((item) =>
@@ -274,6 +284,8 @@ export function ProcurementConversation({
       await onResume(value);
       setReply("");
       await Promise.all([runQuery.refetch(), messagesQuery.refetch(), toolsQuery.refetch()]);
+    } catch {
+      // The parent workbench surfaces the error; keep the composer open.
     } finally {
       setSending(false);
     }

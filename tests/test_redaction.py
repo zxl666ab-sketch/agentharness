@@ -107,3 +107,39 @@ def test_persisted_approval_scope_is_redacted(data_dir: Path) -> None:
         storage.close()
 
 # Redaction coverage ends at the procurement approval boundary.
+
+
+def test_compound_sensitive_key_names_are_redacted():
+    """Normalized containment matching must catch compound key names."""
+    redactor = Redactor()
+    redacted = redactor.redact_obj(
+        {
+            "openai_api_key": "sk-openai-secret-1234",
+            "github_token": "ghp_github_secret_1234",
+            "aws_secret_access_key": "AKIAIOSFODNN7EXAMPLE",
+            "x-api-key": "custom-x-api-key-value-123",
+            "keywords": "plain search keyword - keep me",
+            "max_tokens": 1234,
+        }
+    )
+    assert redacted["openai_api_key"] == "[REDACTED]"
+    assert redacted["github_token"] == "[REDACTED]"
+    assert redacted["aws_secret_access_key"] == "[REDACTED]"
+    assert redacted["x-api-key"] == "[REDACTED]"
+    assert redacted["keywords"] == "plain search keyword - keep me"
+    assert redacted["max_tokens"] == 1234
+
+
+def test_sk_prefixed_keys_with_vendor_prefixes_are_redacted():
+    redactor = Redactor()
+    proj = "sk-proj-abcdefghijklmnopqrstuvwxyz123456"
+    ant = "sk-ant-abcdefghijklmnopqrstuvwxyz123456"
+    out = redactor.redact_text(proj)
+    assert proj not in out
+    assert "[REDACTED_API_KEY]" in out
+    out = redactor.redact_text(ant)
+    assert ant not in out
+    assert "[REDACTED_API_KEY]" in out
+    out = redactor.redact_text(f"Bearer {proj}")
+    assert proj not in out
+    assert "[REDACTED_API_KEY]" in out

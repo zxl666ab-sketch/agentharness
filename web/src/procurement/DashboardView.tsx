@@ -29,21 +29,26 @@ function formatTokens(value: number) {
   return value.toLocaleString("zh-CN");
 }
 
-function downloadCsv(rows: Array<Record<string, string | number | boolean | null>>, filename: string) {
+export function buildCsv(rows: Array<Record<string, string | number | boolean | null>>) {
   const header = Object.keys(rows[0] || {}).join(",");
-  const body = rows
-    .map((row) =>
+  return [
+    header,
+    ...rows.map((row) =>
       Object.values(row)
         .map((value) => {
           const text = String(value);
-          // CSV 公式注入防护：以 = + - @ 或制表符/回车开头的单元格加单引号前缀。
-          const guarded = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+          // CSV formula-injection guard: skip leading whitespace (space, tab,
+          // newline, CR) and still prefix cells starting with = + - @.
+          const guarded = /^\s*[=+\-@]/.test(text) ? `'${text}` : text;
           return `"${guarded.replaceAll('"', '""')}"`;
         })
         .join(",")
-    )
-    .join("\n");
-  const blob = new Blob([`${header}\n${body}`], { type: "text/csv;charset=utf-8" });
+    ),
+  ].join("\n");
+}
+
+function downloadCsv(rows: Array<Record<string, string | number | boolean | null>>, filename: string) {
+  const blob = new Blob([buildCsv(rows)], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;

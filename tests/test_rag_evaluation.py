@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from scripts.evaluate_knowledge import build_frozen_corpus, evaluate_frozen, render_report
 
@@ -28,16 +28,21 @@ def test_evaluate_frozen_is_reproducible() -> None:
 
 def test_frozen_rag_aggregates_are_locked() -> None:
     """Lock the published frozen RAG metrics so retriever weight changes or
-    canonicalization drift fail CI instead of silently going stale in README."""
+    canonicalization drift fail CI instead of silently going stale in README.
+
+    Values were refreshed together with the coarse-ranking fix: keyword hits no
+    longer tie with (and crowd out) higher structured-spec scores, which
+    improved recall@3/recall@5 and MRR on the frozen corpus.
+    """
     aggregates = evaluate_frozen()["aggregates"]
     assert aggregates == {
         "recall@1": 0.0714,
         "precision@1": 0.9286,
-        "recall@3": 0.1429,
-        "precision@3": 0.9048,
-        "recall@5": 0.2143,
-        "precision@5": 0.9,
-        "mrr": 0.9464,
+        "recall@3": 0.1786,
+        "precision@3": 0.9167,
+        "recall@5": 0.25,
+        "precision@5": 0.9071,
+        "mrr": 0.9643,
         "top1_hit_rate": 0.9286,
     }
 

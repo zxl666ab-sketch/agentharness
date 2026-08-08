@@ -24,6 +24,7 @@ MAX_XLSX_ROWS = 500
 MAX_XLSX_COLUMNS = 40
 MAX_PDF_PAGES = 20
 MAX_EXTRACTED_CHARS = 200_000
+MAX_TEXT_VALUE_LENGTH = 2000
 REVIEW_THRESHOLD = 0.80
 
 
@@ -170,10 +171,26 @@ def _boolean(value: Any) -> bool | None:
     if isinstance(value, (int, float)) and value in {0, 1}:
         return bool(value)
     text = _key(value)
+    # 运费措辞歧义：同时出现“包邮”与“到付/自付/另算/自理”等负向标记时
+    # （如“江浙沪包邮，新疆西藏运费到付”）不能直接判为含运费，必须人工复核。
+    # 先剔除负向短语，避免“不包邮”中的“包邮”被误当成正向标记。
+    remaining = text
+    for token in _SHIPPING_NEGATIVE_TOKENS:
+        remaining = remaining.replace(token, "")
+    if any(token in text for token in _SHIPPING_NEGATIVE_TOKENS) and any(
+        token in remaining for token in _SHIPPING_POSITIVE_TOKENS
+    ):
+        return None
     if any(
         token in text
         for token in (
             "不包邮",
+            "到付",
+            "自付",
+            "另算",
+            "自理",
+            "不含运费",
+            "运费另计",
             "不可开票",
             "不能开票",
             "不开票",
@@ -196,6 +213,31 @@ def _boolean(value: Any) -> bool | None:
     if any(token in text for token in ("含税", "包邮", "included")):
         return True
     return None
+
+
+_SHIPPING_POSITIVE_TOKENS = (
+    "包邮",
+    "运费已含",
+    "含运费",
+    "运费包含",
+    "shippingincluded",
+    "freightincluded",
+)
+_SHIPPING_NEGATIVE_TOKENS = (
+    "不包邮",
+    "到付",
+    "自付",
+    "另算",
+    "自理",
+    "不含运费",
+    "运费另计",
+    "运费不含",
+    "运费未含",
+    "shippingnotincluded",
+    "freightnotincluded",
+    "shippingexcluded",
+    "freightexcluded",
+)
 
 
 _INVOICE_NEGATIVE = (
@@ -371,6 +413,10 @@ def coerce_field_value(field: str, value: Any) -> Any:
     if kind == "date":
         return _date(value)
     text = str(value or "").strip()
+    if len(text) > MAX_TEXT_VALUE_LENGTH:
+        raise ValueError(
+            f"{FIELD_META[field]['label']} 长度不能超过 {MAX_TEXT_VALUE_LENGTH} 个字符"
+        )
     return text or None
 
 
@@ -384,7 +430,12 @@ def _entry(
     excerpt: str,
     method: str,
 ) -> dict[str, Any]:
-    coerced = coerce_field_value(field, value)
+    try:
+        coerced = coerce_field_value(field, value)
+    except ValueError:
+        # 超长文本等不可入库的值按无法复核处理（needs_review），避免解析
+        # 阶段把 ValueError 泄漏成 500。
+        coerced = None
     bounded_confidence = round(max(0.0, min(1.0, confidence)), 2)
     return {
         "value": coerced,
@@ -649,26 +700,33 @@ def _infer_common(fields: dict[str, Any], text: str, document_kind: str) -> None
         )
 
     shipping_negative = re.search(
-        r"不包邮|运费(?:不含(?!税)|未含(?!税)|另计)|"
+        r"不包邮|(?:运费)?(?:不含(?!税)|未含(?!税)|另计|另算|到付|自付|自理)|不含运费|"
         r"shipping\s+(?:is\s+)?(?:not\s+included|excluded)|"
         r"freight\s+(?:is\s+)?(?:not\s+included|excluded)",
         text,
         re.I,
     )
-    if shipping_negative:
+    shipping_positive = re.search(
+        r"(?<!不)包邮|运费已含|报价含运费|价格含运费|已含运费|"
+        r"shipping\s+is\s+included|freight\s+is\s+included",
+        text,
+        re.I,
+    )
+    if shipping_negative and shipping_positive:
+        # 同时出现“包邮”与“到付/自付/另算/自理”等负向标记（如
+        # “江浙沪包邮，新疆西藏运费到付”）：语义冲突，不能静默判为含运费
+        # 并置运费为 0，必须人工复核。
+        excerpt = (
+            f"{shipping_positive.group(0)}；{shipping_negative.group(0)}"
+        )
+        inferred("shipping_included", None, 0.3, excerpt)
+    elif shipping_negative:
         # “运费不含税”是关于税的口径，不是“运费另计”，(?!税) 排除该误命中；
         # 摘录使用原文命中的片段而不是硬编码文案，保证审计证据与原件一致。
         inferred(
             "shipping_included", False, 0.91, shipping_negative.group(0)
         )
-    elif (
-        shipping_positive := re.search(
-            r"包邮|运费已含|报价含运费|价格含运费|已含运费|"
-            r"shipping\s+is\s+included|freight\s+is\s+included",
-            text,
-            re.I,
-        )
-    ):
+    elif shipping_positive:
         inferred("shipping_included", True, 0.91, shipping_positive.group(0))
         inferred("shipping_fee", "0", 0.91, shipping_positive.group(0))
     if re.search(

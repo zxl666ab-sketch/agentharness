@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -11,9 +12,27 @@ from uuid import uuid4
 
 from agentharness.security.redaction import Redactor, default_redactor
 
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
 
 def _utcnow() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _sha_path(root: Path, sha256: str) -> Path:
+    """Resolve the on-disk path for a sha256 and verify it stays under root.
+
+    Rejects non-64-hex identifiers (e.g. ``../../secret``) before any path
+    arithmetic and double-checks containment after resolution, so a crafted
+    identifier can never read or write outside the artifact store.
+    """
+    if not _SHA256_RE.fullmatch(str(sha256)):
+        raise ValueError(f"invalid sha256: {sha256!r}")
+    resolved_root = root.resolve()
+    candidate = (root / sha256[:2] / sha256).resolve()
+    if not candidate.is_relative_to(resolved_root):
+        raise ValueError(f"artifact path escapes store root: {sha256!r}")
+    return candidate
 
 
 def _is_text_content_type(content_type: str) -> bool:
@@ -74,9 +93,8 @@ class ArtifactStore:
 
         sha = hashlib.sha256(data).hexdigest()
         # shard by first 2 hex chars
-        shard = self.root / sha[:2]
-        shard.mkdir(parents=True, exist_ok=True)
-        path = shard / sha
+        path = _sha_path(self.root, sha)
+        path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
             path.write_bytes(data)
 
@@ -109,7 +127,7 @@ class ArtifactStore:
         )
 
     def get_bytes(self, sha256: str) -> bytes | None:
-        path = self.root / sha256[:2] / sha256
+        path = _sha_path(self.root, sha256)
         if path.exists():
             return path.read_bytes()
         return None

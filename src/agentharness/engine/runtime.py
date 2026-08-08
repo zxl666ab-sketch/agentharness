@@ -46,7 +46,7 @@ from agentharness.contracts import (
 from agentharness.engine.compaction import (
     CompactionError,
     plan_compaction,
-    render_transcript,
+    render_transcript_with_coverage,
     summarize_history,
 )
 from agentharness.engine.context import (
@@ -218,6 +218,9 @@ class RunEngine:
         )
         self._active_run_ids: set[str] = set()
         self.active_run_id: str | None = None
+        # Outer tasks currently running run()/resume() for each run id; used by
+        # Harness.aclose to wait for cleanup to finish before closing storage.
+        self._run_tasks: dict[str, asyncio.Task[Any]] = {}
 
     def _ctx(self, run_id: str) -> RunContext:
         """Return (creating if needed) the RunContext for a run."""
@@ -294,8 +297,69 @@ class RunEngine:
             if run_id in ctx.child_runs:
                 ctx.child_runs = [child for child in ctx.child_runs if child != run_id]
 
+    def _expire_pending_approvals(self, run_id: str) -> int:
+        """Expire unresolved approvals for a run that is being cancelled/interrupted.
+
+        Prefers the cross-worker ``expire_pending_for_run`` storage method and
+        falls back to the existing ``expire_pending_approvals`` when it is not
+        present yet.
+        """
+        expire = getattr(self.storage, "expire_pending_for_run", None)
+        if callable(expire):
+            return int(expire(run_id))
+        expire = getattr(self.storage, "expire_pending_approvals", None)
+        if callable(expire):
+            return int(expire(run_id))
+        return 0
+
+    def _delegate_limit_error(self, request: RunRequest) -> str | None:
+        """Return a clear error when a delegate violates depth/concurrency caps."""
+        if not request.parent_run_id:
+            return None
+        parent = self.storage.get_run(request.parent_run_id)
+        if parent is None:
+            return None
+        budget = request.budget or BudgetConfig()
+        parent_depth = int(parent.get("delegate_depth") or 0)
+        depth = max(int(request.delegate_depth or 0), parent_depth + 1)
+        if depth > budget.max_delegate_depth:
+            return (
+                f"delegate depth {depth} exceeds max_delegate_depth "
+                f"({budget.max_delegate_depth})"
+            )
+        child_count = int(parent.get("child_count") or 0)
+        if child_count >= budget.max_concurrent_children:
+            return (
+                f"parent run already has {child_count} children; "
+                f"max_concurrent_children is {budget.max_concurrent_children}"
+            )
+        return None
+
     def get_cancel_event(self, run_id: str) -> asyncio.Event:
         return self._ctx(run_id).cancel_event
+
+    async def wait_for_active_runs(self, *, timeout_s: float = 30.0) -> None:
+        """Wait until every active run task has finished (incl. storage cleanup).
+
+        Used by Harness.aclose so run teardown never writes to a closed database.
+        Tasks that refuse to stop after ``timeout_s`` are cancelled as a last
+        resort; run()/resume() finalize as interrupted on CancelledError.
+        """
+        tasks = [
+            task
+            for task in self._run_tasks.values()
+            if not task.done() and task is not asyncio.current_task()
+        ]
+        if not tasks:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True), timeout=timeout_s
+            )
+        except TimeoutError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _kill_descendants(self, run_id: str) -> None:
         """Propagate cancellation to the procurement run and its children."""
@@ -356,6 +420,7 @@ class RunEngine:
                 RunStatus.waiting_approval.value,
                 RunStatus.pending.value,
             ):
+                self._expire_pending_approvals(run_id)
                 self.events.emit_and_update(
                     run_id,
                     status=RunStatus.cancelled,
@@ -370,11 +435,28 @@ class RunEngine:
                 )
 
     async def interrupt(self, run_id: str, reason: str = "interrupted") -> None:
-        """Ctrl+C / CancelledError: kill trees, preserve resume state, finish as interrupted."""
+        """Ctrl+C / CancelledError: kill trees, preserve resume state, finish as interrupted.
+
+        Terminal runs are left untouched: a completed/failed run must never be
+        flipped back into interrupted (which would let resume overwrite its
+        final output). Pending approvals are expired so a later resume cannot
+        resolve a stale approval for a cancelled/interrupted run.
+        """
+        run = self.storage.get_run(run_id)
+        if not run:
+            raise KeyError(f"run not found: {run_id}")
+        if RunStatus(run["status"]) in (
+            RunStatus.completed,
+            RunStatus.failed,
+            RunStatus.interrupted,
+            RunStatus.cancelled,
+        ):
+            return
         self._ctx(run_id).stop_mode = "interrupt"
         self.storage.request_stop(run_id, "interrupt")
         await self._kill_descendants(run_id)
         self.lifecycle.preserve_checkpoint(run_id, status=RunStatus.interrupted)
+        self._expire_pending_approvals(run_id)
         if run_id not in self._active_run_ids:
             self.lifecycle.mark_interrupted(run_id, reason)
 
@@ -438,8 +520,20 @@ class RunEngine:
     async def run(self, request: RunRequest, *, run_id: str | None = None) -> RunResult:
         from agentharness.session_history import session_title_from_message
 
+        run_id = run_id or new_id()
         parent_run_id = request.parent_run_id
         is_top_level = parent_run_id is None
+        if parent_run_id:
+            limit_error = self._delegate_limit_error(request)
+            if limit_error is not None:
+                return RunResult(
+                    run_id=run_id,
+                    session_id=request.session_id or "",
+                    status=RunStatus.failed,
+                    error=limit_error,
+                    parent_run_id=parent_run_id,
+                    root_run_id=request.root_run_id or run_id,
+                )
 
         # Existing session keeps its id; new id only when caller omitted session_id.
         existing_session = bool(
@@ -464,7 +558,6 @@ class RunEngine:
                             title=session_title_from_message(request.message),
                         )
 
-        run_id = run_id or new_id()
         if self.storage.get_run(run_id) is not None:
             raise ValueError(f"run id already exists: {run_id}")
         root_run_id = request.root_run_id or run_id
@@ -531,10 +624,12 @@ class RunEngine:
         ctx.completed_tool_ids = set()
         ctx.pending_tool_calls = []
         self._activate_run(run_id)
+        self._run_tasks[run_id] = asyncio.current_task()
         try:
             self._start_run_lease(run_id)
         except Exception:
             self._deactivate_run(run_id)
+            self._run_tasks.pop(run_id, None)
             await self._cleanup_run_state(run_id)
             raise
 
@@ -642,6 +737,7 @@ class RunEngine:
                     )
             self._deactivate_run(run_id)
             await self._cleanup_run_state(run_id)
+            self._run_tasks.pop(run_id, None)
 
     async def _resume_work(
         self,
@@ -777,10 +873,12 @@ class RunEngine:
         ]
 
         self._activate_run(run_id)
+        self._run_tasks[run_id] = asyncio.current_task()
         try:
             self._start_run_lease(run_id)
         except Exception:
             self._deactivate_run(run_id)
+            self._run_tasks.pop(run_id, None)
             await self._cleanup_run_state(run_id)
             raise
         resume_ctx = self._ctx(run_id)
@@ -833,12 +931,23 @@ class RunEngine:
             await self.interrupt(run_id, "cancelled")
             self.lifecycle.mark_interrupted(run_id, "cancelled")
             raise
+        except Exception as exc:  # noqa: BLE001 - mirror run(): never leave a run stuck in running
+            self.lifecycle.mark_failed(run_id, str(exc))
+            return RunResult(
+                run_id=run_id,
+                session_id=run["session_id"],
+                status=RunStatus.failed,
+                error=str(exc),
+                parent_run_id=run.get("parent_run_id"),
+                root_run_id=run.get("root_run_id"),
+            )
         finally:
             stop_watcher.cancel()
             with suppress(asyncio.CancelledError):
                 await stop_watcher
             self._deactivate_run(run_id)
             await self._cleanup_run_state(run_id)
+            self._run_tasks.pop(run_id, None)
 
     def resolve_indeterminate_tool(
         self,
@@ -2098,7 +2207,7 @@ class RunEngine:
         goal = str(
             request.metadata.get("_agentharness_original_goal") or request.message
         )
-        transcript = render_transcript(
+        transcript, fully_covered_ids = render_transcript_with_coverage(
             plan.cover_messages, prior_summary=prior_summary, goal=goal
         )
 
@@ -2120,6 +2229,22 @@ class RunEngine:
                     )
                 ],
             )
+
+        if not fully_covered_ids:
+            # Nothing entered the summarizer verbatim (per-message truncation or
+            # the 60k head/tail policy). Marking messages summarized here would
+            # permanently drop content the summarizer never saw, so skip and let
+            # the planner's hard budget (or ContextBudgetError) handle it.
+            emit_compaction(
+                {
+                    "status": "skipped",
+                    "reason": (
+                        "no message was fully covered by the transcript; "
+                        "refusing to mark truncated content as summarized"
+                    ),
+                }
+            )
+            return
 
         # The summarization call itself must fit inside the run token budget.
         projected = estimate_tokens(transcript) + 2048
@@ -2157,7 +2282,7 @@ class RunEngine:
         ctx.context_state = self.context_planner.apply_compaction(
             state,
             summary_text=summary,
-            covered_ids=plan.cover_ids,
+            covered_ids=fully_covered_ids,
             artifact_id=artifact_id,
         )
         emit_compaction(

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import type { EventRow } from "./api/client";
 
+// Keep in sync with the backend EventType enum (src/agentharness/contracts.py).
 export const AGENT_EVENT_TYPES = [
   "run_started",
   "run_status",
@@ -9,7 +10,13 @@ export const AGENT_EVENT_TYPES = [
   "run_failed",
   "run_cancelled",
   "run_interrupted",
-  "run_budget_stopped",
+  "model_turn_start",
+  "model_turn_end",
+  "context_manifest",
+  "context_compacted",
+  "verification_started",
+  "verification_result",
+  "verification_feedback",
   "text_delta",
   "tool_call_start",
   "tool_call_validated",
@@ -19,16 +26,23 @@ export const AGENT_EVENT_TYPES = [
   "tool_execution_cancelled",
   "tool_execution_indeterminate",
   "tool_recovery_resolved",
+  "tool_stage_denied",
+  "tool_call_duplicate",
+  "human_action_injected",
   "tool_call_end",
   "tool_result",
   "approval_requested",
   "approval_resolved",
-  "verification_started",
-  "verification_result",
-  "verification_feedback",
-  "context_compacted",
-  "provider_retry",
+  "checkpoint",
+  "span_start",
+  "span_end",
+  "child_run_started",
+  "child_run_ended",
   "budget_warning",
+  "provider_retry",
+  "run_budget_stopped",
+  "redaction",
+  "heartbeat",
   "error",
 ];
 
@@ -61,6 +75,10 @@ export function useAgentStream(enabled: boolean, after: number) {
     for (const type of AGENT_EVENT_TYPES) {
       source.addEventListener(type, receive as EventListener);
     }
+    // Fallback: never silently drop an event type the backend adds before this
+    // list is updated. global_seq dedup keeps it safe alongside the typed
+    // listeners.
+    source.onmessage = receive;
 
     return () => {
       source.close();

@@ -208,3 +208,97 @@ def test_purchase_order_csv_starts_with_real_utf8_bom(data_dir, monkeypatch) -> 
         assert content[1:].lstrip().startswith("采购订单号")
     finally:
         harness.close()
+
+def test_purchase_order_csv_neutralizes_formula_injection(data_dir, monkeypatch) -> None:
+    """P1: untrusted string fields starting with = + - @ or tab/newline must be
+    prefixed with a single quote in the CSV export; other values stay intact."""
+    import csv
+    import io
+
+    from agentharness.harness import Harness
+    from agentharness.procurement.service import ProcurementService
+
+    harness = Harness(data_dir=data_dir)
+    try:
+        service = ProcurementService(harness)
+        order = {
+            "po_number": "PO-RFQ-20260808-ABC123",
+            "reference": "RFQ-20260808-ABC123",
+            "title": "+SUM(A1:A2)",
+            "item_name": "=HYPERLINK(\"http://evil\",\"点我\")",
+            "quantity": 10000,
+            "unit": "piece",
+            "supplier_name": "=HYPERLINK(\"http://evil\",\"x\")",
+            "unit_price_base": "0.3100",
+            "total_amount_base": "3100.00",
+            "currency": "@cmd",
+            "snapshot_id": "-1+1",
+            "snapshot_version": 1,
+            "approval_id": "\tSELECT 1",
+            "created_at": "2026-08-06T00:00:00+00:00",
+            "evidence_sha256": "e" * 64,
+        }
+        monkeypatch.setattr(service, "purchase_order", lambda request_id: order)
+        _filename, content = service.purchase_order_csv("request-1")
+        rows = list(csv.reader(io.StringIO(content.lstrip("\ufeff"))))
+        header, data = rows[0], rows[1]
+        assert header[0] == "采购订单号"
+        values = dict(zip(header, data, strict=True))
+        assert values["标题"] == "'+SUM(A1:A2)"
+        assert values["物料"] == "'=HYPERLINK(\"http://evil\",\"点我\")"
+        assert values["供应商"] == "'=HYPERLINK(\"http://evil\",\"x\")"
+        assert values["币种"] == "'@cmd"
+        assert values["快照ID"] == "'-1+1"
+        assert values["审批ID"] == "'\tSELECT 1"
+        # 正常字段不被加前缀
+        assert values["采购订单号"] == "PO-RFQ-20260808-ABC123"
+        assert values["数量"] == "10000"
+        assert values["单价（本位币）"] == "0.3100"
+        assert values["总金额（本位币）"] == "3100.00"
+    finally:
+        harness.close()
+
+
+def test_purchase_order_total_recomputed_from_unit_times_quantity(data_dir, monkeypatch) -> None:
+    """P3: PO total must equal unit_price_base * quantity rounded to 2 decimals,
+    even when the persisted order carries a different total."""
+    import csv
+    import io
+
+    from agentharness.harness import Harness
+    from agentharness.procurement.service import ProcurementService, _po_total_amount
+
+    assert _po_total_amount("0.3100", 10000) == "3100.00"
+    assert _po_total_amount("0.1255", 3) == "0.38"
+    assert _po_total_amount("0.1234", 3) == "0.37"
+
+    harness = Harness(data_dir=data_dir)
+    try:
+        service = ProcurementService(harness)
+        order = {
+            "po_number": "PO-RFQ-20260808-DEF456",
+            "reference": "RFQ-20260808-DEF456",
+            "title": "测试订单",
+            "item_name": "快递袋",
+            "quantity": 3,
+            "unit": "piece",
+            "supplier_name": "测试供应商",
+            "unit_price_base": "0.1255",
+            "total_amount_base": "0.37",  # 旧值（单价×数量=0.3765 → 应为 0.38）
+            "currency": "CNY",
+            "snapshot_id": "s" * 32,
+            "snapshot_version": 1,
+            "approval_id": "a" * 32,
+            "created_at": "2026-08-06T00:00:00+00:00",
+            "evidence_sha256": "e" * 64,
+        }
+        monkeypatch.setattr(service, "purchase_order", lambda request_id: order)
+        _filename, content = service.purchase_order_csv("request-1")
+        rows = list(csv.reader(io.StringIO(content.lstrip("\ufeff"))))
+        header, data = rows[0], rows[1]
+        values = dict(zip(header, data, strict=True))
+        assert values["总金额（本位币）"] == "0.38"  # ROUND_HALF_UP(0.1255 * 3 = 0.3765)
+        assert values["单价（本位币）"] == "0.1255"
+        assert values["数量"] == "3"
+    finally:
+        harness.close()

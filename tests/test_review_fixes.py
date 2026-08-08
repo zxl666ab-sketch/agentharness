@@ -437,3 +437,273 @@ def test_parse_quote_respects_time_budget() -> None:
         parse_quote(case["filename"], data, time_budget_s=0.0)
     parsed = parse_quote(case["filename"], data)
     assert parsed["fields"]["unit_price"]["value"] == case["fields"]["unit_price"]
+
+
+
+# ---------------------------------------------------------------- adversarial-review fixes (2026-08-08)
+def _ready_quote_extracted(supplier: str) -> dict:
+    values = {
+        "supplier_name": supplier,
+        "item_description": "PE 白色快递袋 250x350mm 60um 单色印刷",
+        "material": "PE",
+        "color": "白色",
+        "print_colors": 1,
+        "currency": "CNY",
+        "unit_price": "0.5",
+        "price_basis": 1,
+        "tax_rate": "0.13",
+        "tax_included": False,
+        "shipping_fee": "0",
+        "shipping_included": True,
+        "moq": 1000,
+        "lead_time_days": 10,
+        "supports_invoice": True,
+        "width_mm": "250",
+        "length_mm": "350",
+        "thickness_um": "60",
+        "payment_terms": "Net 30",
+        "valid_until": "2026-12-31",
+    }
+    fields = {
+        name: {
+            "value": value,
+            "confidence": 1.0,
+            "status": "accepted",
+            "source": {
+                "document_kind": "xlsx",
+                "locator": "test",
+                "excerpt": "",
+                "method": "test",
+            },
+        }
+        for name, value in values.items()
+    }
+    return {
+        "schema_version": 1,
+        "parser_version": "test",
+        "document_kind": "xlsx",
+        "fields": fields,
+        "processing_ms": 0,
+    }
+
+
+def _requirement_body() -> dict:
+    return {
+        "title": "华东仓快递袋询价",
+        "category": "ecommerce_packaging",
+        "item_name": "快递袋",
+        "quantity": 10000,
+        "unit": "piece",
+        "specifications": {
+            "width_mm": "250",
+            "length_mm": "350",
+            "thickness_um": "60",
+            "material": "PE",
+            "color": "白色",
+            "print_colors": 1,
+        },
+        "constraints": {
+            "base_currency": "CNY",
+            "fx_rates": {"CNY": "1", "USD": "7.2"},
+            "max_lead_days": 15,
+            "invoice_required": True,
+        },
+    }
+
+
+def test_compare_for_agent_fails_closed_on_concurrent_correction(
+    data_dir, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """P2: correct_field interleaving with compare_for_agent must never leave a
+    stale snapshot marked current with a mismatched input hash (fail-closed)."""
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    try:
+        request = service.create_request(_requirement_body())
+        request_id = str(request["id"])
+        first = service.import_quote(
+            request_id,
+            filename="供应商甲报价.xlsx",
+            data=b"quote-a",
+            extracted=_ready_quote_extracted("供应商甲"),
+        )
+        service.import_quote(
+            request_id,
+            filename="供应商乙报价.xlsx",
+            data=b"quote-b",
+            extracted=_ready_quote_extracted("供应商乙"),
+        )
+
+        import agentharness.procurement.service as service_module
+
+        real_sha = service_module.analysis_input_sha256
+        calls = {"count": 0}
+        quote_id = str(first["id"])
+
+        def interleaved(req, quotes, *, analysis_as_of):  # type: ignore[no-untyped-def]
+            if calls["count"] == 0:
+                calls["count"] += 1
+                # 模拟比价预读之后、事务写入之前发生了人工修正。
+                service.correct_field(
+                    request_id,
+                    quote_id,
+                    field="shipping_fee",
+                    value="1",
+                    actor="采购员",
+                )
+            return real_sha(req, quotes, analysis_as_of=analysis_as_of)
+
+        monkeypatch.setattr(service_module, "analysis_input_sha256", interleaved)
+        with pytest.raises(ProcurementError, match="已变化"):
+            service.compare_for_agent(request_id, run_id="run-race")
+
+        state = service.get_request(request_id)
+        assert state.get("current_snapshot_id") is None
+        assert state["quotes"][0]["extracted"]["fields"]["shipping_fee"]["value"] == "1"
+    finally:
+        harness.close()
+
+
+def test_import_and_stage_after_approval_leave_no_orphan_artifact(
+    data_dir, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """P3: when an import/stage is rejected by the in-transaction decision check,
+    no unregistered artifact file may be left on disk."""
+    from agentharness.contracts import new_id
+
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    try:
+        request = service.create_request(_requirement_body())
+        request_id = str(request["id"])
+        # 构造真实的审批链（run -> artifact -> snapshot -> decision），满足外键约束。
+        run_id = new_id()
+        harness.storage.runs.create_run(
+            run_id=run_id,
+            session_id=str(request["session_id"]),
+            root_run_id=run_id,
+        )
+        meta = harness.storage.artifacts.put(
+            b'{"ok":true}',
+            content_type="application/json",
+            summary="比价快照",
+        )
+        artifact_id = harness.storage.register_artifact(meta)
+        snapshot_id = new_id()
+        service.repo.create_snapshot(
+            {
+                "id": snapshot_id,
+                "request_id": request_id,
+                "run_id": run_id,
+                "input_sha256": "0" * 64,
+                "result": {"eligible_count": 0, "quotes": []},
+                "artifact_id": artifact_id,
+            }
+        )
+        service.repo.commit_decision(
+            {
+                "id": new_id(),
+                "request_id": request_id,
+                "snapshot_id": snapshot_id,
+                "quote_id": None,
+                "run_id": run_id,
+                "approval_id": None,
+                "decision": "approved",
+                "note": "已审批",
+                "actor": "采购员",
+                "created_at": "2026-08-08T00:00:00+00:00",
+            },
+            {
+                "id": new_id(),
+                "request_id": request_id,
+                "quote_id": None,
+                "run_id": run_id,
+                "type": "supplier_approved",
+                "actor": "采购员",
+                "payload": {"decision_id": "d"},
+            },
+        )
+        # 绕过前置检查，验证事务内决策检查本身不会留下孤儿 artifact。
+        service._editable_request = lambda rid: service.repo.get_request(rid)  # type: ignore[method-assign]
+
+        def artifact_files():
+            root = harness.storage.artifacts.root
+            return [
+                p
+                for p in root.rglob("*")
+                if p.is_file()
+            ]
+
+        before = artifact_files()
+        with pytest.raises(ProcurementError, match="已形成审批结论"):
+            service.import_quote(
+                request_id,
+                filename="新供应商报价.xlsx",
+                data=b"quote-new",
+                extracted=_ready_quote_extracted("新供应商"),
+            )
+        with pytest.raises(ProcurementError, match="已形成审批结论"):
+            service.stage_attachment(
+                request_id,
+                filename="暂存报价.xlsx",
+                data=b"quote-staged",
+            )
+        after = artifact_files()
+        assert after == before
+    finally:
+        harness.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_start_existing_creates_single_run(data_dir) -> None:  # type: ignore[no-untyped-def]
+    """P2: two concurrent /analyze calls for the same request must create only
+    one run; the loser reuses the winner's run id."""
+    import asyncio
+
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    agent = ProcurementAgent(harness, service, run_profile=_fake_run_profile())
+    created_runs: set[str] = set()
+
+    async def fake_run(run_request, *, run_id=None):  # type: ignore[no-untyped-def]
+        created_runs.add(run_id)
+        # bind_run 的 analysis_run_id 有指向 runs 表的外键，真实写入 run 行。
+        harness.storage.runs.create_run(
+            run_id=run_id,
+            session_id=str(run_request.session_id),
+            root_run_id=run_id,
+        )
+        return None
+
+    async def noop_visible(run_id, task):  # type: ignore[no-untyped-def]
+        # 让事件循环先执行被调度的 harness.run 任务，模拟真实 _wait_until_visible 的让出。
+        await asyncio.sleep(0)
+        return None
+
+    def fake_get_run(run_id):  # type: ignore[no-untyped-def]
+        if run_id in created_runs:
+            return {"id": run_id, "status": "running"}
+        return None
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(agent.harness, "run", fake_run)
+    monkeypatch.setattr(agent, "_wait_until_visible", noop_visible)
+    monkeypatch.setattr(agent.harness, "get_run", fake_get_run)
+    try:
+        request = service.create_demo_request()
+        request_id = str(request["id"])
+        results = await asyncio.gather(
+            agent.start_existing(request_id),
+            agent.start_existing(request_id),
+        )
+        assert len(created_runs) == 1
+        run_ids = {result["run_id"] for result in results}
+        assert len(run_ids) == 1
+        assert run_ids <= created_runs
+        assert all(result["status"] == "accepted" for result in results)
+        bound = service.get_request(request_id)["analysis_run_id"]
+        assert bound in created_runs
+    finally:
+        monkeypatch.undo()
+        await agent.aclose()
+        await harness.aclose()

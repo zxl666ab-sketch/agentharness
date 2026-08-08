@@ -430,19 +430,28 @@ class ContextPlanner:
         compacted = len(included) != len(groups)
 
         # Oldest complete groups are externalized first. The newest user goal and
-        # everything after it remain structurally intact.
+        # everything after it remain structurally intact. A group is only dropped
+        # from the context when its original messages were actually persisted as
+        # an artifact; a failed externalization keeps the group live so the final
+        # budget check raises ContextBudgetError instead of silently losing data.
         for group in included:
             if total <= budget:
                 break
             if int(group["end"]) >= last_user:
                 continue
+            artifact_id = self._externalize_messages(group["messages"])
+            if not artifact_id:
+                raise ContextBudgetError(
+                    "essential context cannot fit and older messages could not be "
+                    "externalized; refusing to drop them silently"
+                )
             total -= int(group["tokens"])
             group["included"] = False
             item: ContextManifestItem = group["item"]
             item.included = False
             item.reason = "excluded by priority: older conversation history"
-            item.compression = "externalized" if self.artifacts is not None else "excluded"
-            item.artifact_id = self._externalize_messages(group["messages"])
+            item.compression = "externalized"
+            item.artifact_id = artifact_id
             compacted = True
 
         final_groups = [group for group in included if group.get("included", True)]

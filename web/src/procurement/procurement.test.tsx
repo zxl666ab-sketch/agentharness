@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 
 import { ComparisonView } from "./ComparisonView";
-import { DashboardView } from "./DashboardView";
+import { buildCsv, DashboardView } from "./DashboardView";
 import { KnowledgeReferences } from "./KnowledgeReferences";
 import { friendlyProcurementError } from "./api";
 import {
@@ -495,6 +495,9 @@ describe("历史成交参考（stage-6 RAG）", () => {
     );
     // Accepted field: the pencil edit entry must disappear once approved.
     expect(html).not.toContain('aria-label="修正报价"');
+    // A review field editor still renders (cancel affordance stays), but the
+    // save action must be disabled once the request is approved.
+    expect(html).toMatch(/aria-label="保存供应商修正"[^>]*disabled/);
     // needs_review field: the inline editor keeps a cancel affordance instead
     // of trapping the buyer with no way out.
     expect(html).toContain('aria-label="取消供应商修正"');
@@ -574,4 +577,73 @@ describe("历史成交参考（stage-6 RAG）", () => {
     expect(html).toContain("run-abc");
     expect(html).toContain("$0.5000");
     expect(html).toContain("1,200");
+  });
+
+  it("renders comparison with an invalid currency code without crashing", () => {
+    const bad = analyzed();
+    const quote = bad.comparison!.result.quotes[0];
+    quote.cost = { ...quote.cost, quote_currency: "123" };
+    const html = renderToString(
+      <ComparisonView
+        request={bad}
+        busy={null}
+        onAnalyze={async () => undefined}
+        onApprove={async () => undefined}
+        onNoAward={async () => undefined}
+      />
+    );
+    // money() falls back to "<value> <currency>" instead of throwing RangeError.
+    expect(html).toContain("598.23 123");
+  });
+
+  it("keeps two files with the same name and size but different lastModified", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <NewProcurementConversation
+          busy={false}
+          maxFileBytes={meta.max_file_bytes}
+          maxTotalBytes={meta.max_conversation_upload_bytes}
+          maxQuotes={meta.max_quotes_per_request}
+          onStart={async () => undefined}
+        />
+      );
+    });
+    const input = container.querySelector(
+      '[data-testid="conversation-upload"]'
+    ) as HTMLInputElement;
+    const fileA = new File(["aaaa"], "quote.xlsx", {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      lastModified: 1000,
+    });
+    const fileB = new File(["aaaa"], "quote.xlsx", {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      lastModified: 2000,
+    });
+    expect(fileA.lastModified).toBe(1000);
+    expect(fileB.lastModified).toBe(2000);
+    Object.defineProperty(input, "files", {
+      value: [fileA, fileB] as unknown as FileList,
+      configurable: true,
+    });
+    await act(async () => {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(container.querySelectorAll(".proc-compose-files li").length).toBe(2);
+    await act(async () => {
+      root.unmount();
+    });
+    document.body.removeChild(container);
+  });
+
+  it("guards CSV cells against formula injection through leading whitespace", () => {
+    const csv = buildCsv([
+      { a: "  =1+1", b: "normal", c: "\t=SUM(A1)", d: "\n=cmd()" },
+    ]);
+    expect(csv).toContain('"\'  =1+1"');
+    expect(csv).toContain('"normal"');
+    expect(csv).toContain('"\'\t=SUM(A1)"');
+    expect(csv).toContain('"\'\n=cmd()"');
   });

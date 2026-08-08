@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import functools
 import hashlib
 import json
 import logging
@@ -333,6 +335,8 @@ def _request_id_schema() -> dict[str, Any]:
 def create_procurement_tools(
     service: ProcurementService,
     buyer_decision: dict[str, dict[str, str | None]] | None = None,
+    *,
+    analysis_executor: concurrent.futures.Executor | None = None,
 ) -> dict[str, _ProcurementTool]:
     def pipeline_payload(result: dict[str, Any]) -> dict[str, Any]:
         if result["status"] == "needs_review":
@@ -417,11 +421,21 @@ def create_procurement_tools(
     ) -> dict[str, Any]:
         # 阶段 B：完整确定性分析（报价解析→匹配→历史→Decimal 比价→复算→选择准备）。
         try:
-            result = await asyncio.to_thread(
-                service.execute_analysis_pipeline,
-                str(arguments["request_id"]),
-                run_id=ctx.run_id,
-            )
+            if analysis_executor is not None:
+                result = await asyncio.get_running_loop().run_in_executor(
+                    analysis_executor,
+                    functools.partial(
+                        service.execute_analysis_pipeline,
+                        str(arguments["request_id"]),
+                        run_id=ctx.run_id,
+                    ),
+                )
+            else:
+                result = await asyncio.to_thread(
+                    service.execute_analysis_pipeline,
+                    str(arguments["request_id"]),
+                    run_id=ctx.run_id,
+                )
         except ProcurementError as exc:
             # 后端拒绝：属于报价/数据问题，须由采购员通过复核接口修正，模型不得代写。
             raise ProcurementError(
@@ -873,7 +887,7 @@ class ProcurementFakeProvider:
                 "width_mm": width,
                 "length_mm": length,
                 "thickness_um": thickness,
-                "material": "PE" if re.search(r"\bPE\b", text, re.IGNORECASE) else "未说明",
+                "material": "PE" if re.search(r"(?<![A-Za-z0-9])PE(?![A-Za-z0-9])", text, re.IGNORECASE) else "未说明",
                 "color": "白色" if "白色" in text else "未说明",
                 "print_colors": 1 if "单色" in text else 0,
             },
@@ -977,6 +991,16 @@ class ProcurementAgent:
         if self.review_policy not in {"off", "evidence", "warn", "gate"}:
             self.review_policy = "evidence"
         self._tasks: dict[str, asyncio.Task[Any]] = {}
+        # 每个需求一个启动锁：并发 start_existing 必须单飞，避免创建两个 run。
+        self._start_locks: dict[str, asyncio.Lock] = {}
+        # Deterministic analysis runs on a dedicated executor so that aclose()
+        # can shutdown(wait=True) before storage closes; asyncio.to_thread()
+        # cannot be waited on after the awaiting task is cancelled.
+        self._analysis_executor: concurrent.futures.ThreadPoolExecutor | None = (
+            concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="procurement-analysis"
+            )
+        )
         if run_profile is None:
             self._restore_persisted_model_config()
         if PROCUREMENT_PROVIDER not in harness.providers:
@@ -985,7 +1009,11 @@ class ProcurementAgent:
             raise ValueError(
                 f"采购 Agent Provider 未注册：{self.run_profile.provider}"
             )
-        for tool in create_procurement_tools(service, buyer_decision=self._buyer_decision).values():
+        for tool in create_procurement_tools(
+            service,
+            buyer_decision=self._buyer_decision,
+            analysis_executor=self._analysis_executor,
+        ).values():
             if tool.spec.name not in harness.tools:
                 harness.register_tool(tool)
 
@@ -1264,11 +1292,38 @@ class ProcurementAgent:
         )
 
     async def start_existing(self, request_id: str) -> dict[str, str]:
+        """Analyze a request created through the structured compatibility API.
+
+        Single-flight: concurrent calls for the same request are serialized by
+        a per-request asyncio lock and the second caller re-reads the request,
+        so it reuses the already-bound run instead of launching a duplicate.
+        """
+        async with self._start_lock(request_id):
+            return await self._start_existing_locked(request_id)
+
+    def _start_lock(self, request_id: str) -> asyncio.Lock:
+        lock = self._start_locks.get(request_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._start_locks[request_id] = lock
+        return lock
+
+    async def _start_existing_locked(self, request_id: str) -> dict[str, str]:
         """Analyze a request created through the structured compatibility API."""
 
         request = self.service.get_request(request_id)
         if request.get("decision") is not None:
             raise ProcurementError("该采购需求已经形成审批结论")
+        # 单飞二次检查：锁内重读后，若已有运行中的 run（或已有比价快照），
+        # 直接复用，避免 conversation 重启动分支再次创建 run。
+        existing_run_id = str(request.get("analysis_run_id") or "")
+        existing_run = self.harness.get_run(existing_run_id) if existing_run_id else None
+        if existing_run is not None and (
+            request.get("comparison") is not None
+            or str(existing_run.get("status") or "")
+            in {"pending", "running", "waiting_approval"}
+        ):
+            return self._accepted(request, existing_run_id)
         if request["quote_count"] < 2:
             if self.service.staged_attachment_count(request_id) < 2:
                 raise ProcurementError("至少上传 2 家供应商报价后才能比价")
@@ -2137,6 +2192,12 @@ class ProcurementAgent:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        # Wait for any in-flight deterministic analysis thread before the
+        # storage is closed by the caller, to avoid writes on a closed DB.
+        executor = self._analysis_executor
+        self._analysis_executor = None
+        if executor is not None:
+            executor.shutdown(wait=True)
 
 
 __all__ = [

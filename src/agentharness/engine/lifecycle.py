@@ -246,6 +246,8 @@ class RunLifecycle:
                 ],
             )
             self.storage.clear_stop_request(run_id)
+            if status in (RunStatus.cancelled, RunStatus.interrupted):
+                self._expire_pending_approvals(run_id)
         return RunResult(
             run_id=run_id,
             session_id=session_id,
@@ -259,9 +261,31 @@ class RunLifecycle:
             finished_at=datetime.now(UTC),
         )
 
+    _TERMINAL = frozenset(
+        {
+            RunStatus.completed,
+            RunStatus.failed,
+            RunStatus.interrupted,
+            RunStatus.cancelled,
+        }
+    )
+
+    def _expire_pending_approvals(self, run_id: str) -> int:
+        expire = getattr(self.storage, "expire_pending_for_run", None)
+        if callable(expire):
+            return int(expire(run_id))
+        expire = getattr(self.storage, "expire_pending_approvals", None)
+        if callable(expire):
+            return int(expire(run_id))
+        return 0
+
     def mark_interrupted(self, run_id: str, reason: str) -> None:
         run = self.storage.get_run(run_id)
         if not run:
+            return
+        if RunStatus(run["status"]) in self._TERMINAL:
+            # A terminal run must never be flipped back into interrupted; that
+            # would let a later resume overwrite its final output.
             return
         self.events.emit_and_update(
             run_id,

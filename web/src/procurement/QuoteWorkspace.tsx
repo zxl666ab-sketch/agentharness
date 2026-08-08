@@ -113,6 +113,11 @@ function FieldEditor({
   useEffect(() => {
     if (!needsReview) setEditing(false);
   }, [needsReview]);
+  useEffect(() => {
+    // Closing an already-open inline editor as soon as the field becomes
+    // read-only (e.g. after approval) prevents a stale save.
+    if (readOnly) setEditing(false);
+  }, [readOnly]);
   const changed = value !== rendered;
   const hasValue = meta.kind === "boolean" || value.trim().length > 0;
   const canConfirmCurrentValue = needsReview && hasValue;
@@ -163,7 +168,7 @@ function FieldEditor({
               className="proc-icon-button compact"
               title={canConfirmCurrentValue && !changed ? "确认当前值并完成复核" : "保存人工修正"}
               aria-label={`保存${meta.label}修正`}
-              disabled={!canSave}
+              disabled={!canSave || readOnly}
               onClick={() => void handleSave(correctionValue(value, meta))}
             >
               {saving ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}

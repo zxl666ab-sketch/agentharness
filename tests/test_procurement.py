@@ -165,7 +165,7 @@ async def test_procurement_model_config_redacts_api_key_and_applies_to_runs(
     data_dir: Path,
 ) -> None:
     harness = Harness(data_dir=data_dir)
-    app = create_app(harness=harness, execution_enabled=False)
+    app = create_app(harness=harness, execution_enabled=True)
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
@@ -220,7 +220,7 @@ async def test_procurement_model_config_persists_and_restores_on_restart(
     data_dir: Path,
 ) -> None:
     harness = Harness(data_dir=data_dir)
-    app = create_app(harness=harness, execution_enabled=False)
+    app = create_app(harness=harness, execution_enabled=True)
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
@@ -250,7 +250,7 @@ async def test_procurement_model_config_persists_and_restores_on_restart(
     assert json.loads(persisted_path.read_text(encoding="utf-8"))["model"] == "persisted-model"
 
     restored = Harness(data_dir=data_dir)
-    restored_app = create_app(harness=restored, execution_enabled=False)
+    restored_app = create_app(harness=restored, execution_enabled=True)
     try:
         async with AsyncClient(
             transport=ASGITransport(app=restored_app), base_url="http://test"
@@ -4371,3 +4371,428 @@ async def test_approval_tolerates_model_invented_actor_and_note(
     await app.state.run_supervisor.aclose()
     await harness.aclose()
 
+
+# ---------------------------------------------------------------- adversarial-review fixes (2026-08-08)
+def test_unrecognized_required_material_color_are_fail_closed() -> None:
+    """P1: requirement material/color outside the canonical enums (HDPE / 米白)
+    must not be silently skipped; both PE and PP quotes must be ineligible with
+    a spec_material/spec_color exclusion (never eligible=True with no exclusion).
+    (需求值如 HDPE / 牛皮色 不在可识别枚举内；注意“米白”会被现有别名识别为白色，
+    因此这里用真正无法识别的“牛皮色”。)"""
+    truth = load_frozen_truth()
+    request = json.loads(json.dumps(truth["request"]))
+    request["id"] = "hdpe-request"
+    request["specifications"]["material"] = "HDPE"
+    request["specifications"]["color"] = "牛皮色"
+
+    def quote(quote_id: str, supplier: str, description: str, material: str, color: str) -> dict:
+        values = {
+            "supplier_name": supplier,
+            "item_description": description,
+            "material": material,
+            "color": color,
+            "print_colors": 1,
+            "currency": "CNY",
+            "unit_price": "500",
+            "price_basis": 1000,
+            "tax_rate": "0.13",
+            "tax_included": True,
+            "shipping_fee": "0",
+            "shipping_included": True,
+            "moq": 1000,
+            "lead_time_days": 7,
+            "supports_invoice": True,
+            "width_mm": "250",
+            "length_mm": "350",
+            "thickness_um": "60",
+            "valid_until": "2026-12-31",
+        }
+        return {
+            "id": quote_id,
+            "supplier_name": supplier,
+            "source_sha256": quote_id * 8,
+            "extracted": {
+                "fields": {name: {"value": value} for name, value in values.items()}
+            },
+        }
+
+    result = compare_quotes(
+        request,
+        [
+            quote("pe-q1", "PE厂", "PE 白色快递袋 250x350mm 60um 单色印刷", "PE", "白色"),
+            quote("pp-q1", "PP厂", "PP 白色快递袋 250x350mm 60um 单色印刷", "PP", "白色"),
+        ],
+        analysis_as_of="2026-07-27",
+    )
+    assert result["recommended_quote_id"] is None
+    for item in result["quotes"]:
+        assert item["eligible"] is False
+        assert item["match"]["passed"] is False
+        codes = {reason["code"] for reason in item["exclusion_reasons"]}
+        assert "spec_material" in codes
+        assert "spec_color" in codes
+
+
+def test_unidentifiable_item_name_is_fail_closed() -> None:
+    """P1: an item name outside the canonical identity groups must not silently
+    skip the item-identity hard constraint."""
+    truth = load_frozen_truth()
+    request = json.loads(json.dumps(truth["request"]))
+    request["id"] = "bubble-request"
+    request["item_name"] = "气泡膜"
+    request["specifications"]["material"] = "PE"
+
+    def quote(quote_id: str, supplier: str, description: str) -> dict:
+        values = {
+            "supplier_name": supplier,
+            "item_description": description,
+            "material": "PE",
+            "color": "透明",
+            "print_colors": 0,
+            "currency": "CNY",
+            "unit_price": "500",
+            "price_basis": 1000,
+            "tax_rate": "0.13",
+            "tax_included": True,
+            "shipping_fee": "0",
+            "shipping_included": True,
+            "moq": 1000,
+            "lead_time_days": 7,
+            "supports_invoice": True,
+            "width_mm": "600",
+            "length_mm": "50000",
+            "thickness_um": "90",
+            "valid_until": "2026-12-31",
+        }
+        return {
+            "id": quote_id,
+            "supplier_name": supplier,
+            "source_sha256": quote_id * 8,
+            "extracted": {
+                "fields": {name: {"value": value} for name, value in values.items()}
+            },
+        }
+
+    result = compare_quotes(
+        request,
+        [
+            quote("bq1", "气泡膜厂甲", "PE 气泡膜 600mm 50m 90um"),
+            quote("bq2", "气泡膜厂乙", "PE 气泡膜 600mm 50m 90um"),
+        ],
+        analysis_as_of="2026-07-27",
+    )
+    for item in result["quotes"]:
+        assert item["eligible"] is False
+        assert any(
+            reason["code"] == "item_identity" for reason in item["exclusion_reasons"]
+        ), item["exclusion_reasons"]
+
+
+def test_ambiguous_free_shipping_with_delivery_fee_requires_review() -> None:
+    """P1: 江浙沪包邮 + 新疆西藏运费到付 must NOT parse as shipping_included=True
+    with shipping_fee=0 at high confidence; it must require human review."""
+    from agentharness.procurement.parsing import coerce_field_value
+
+    document = _xlsx_bytes(
+        [
+            ["供应商", "华东物流包装"],
+            ["品名", "PE 白色快递袋 250x350mm 60um 单色印刷"],
+            ["币种", "CNY"],
+            ["单价", "500"],
+            ["计价数量", "1000"],
+            ["税率", "13%"],
+            ["是否含税", "是"],
+            ["MOQ", "1000"],
+            ["交期", "7"],
+            ["是否可开票", "是"],
+            ["备注", "江浙沪包邮，新疆西藏运费到付"],
+        ]
+    )
+    extracted = parse_quote("ambig-shipping.xlsx", document)
+    shipping = extracted["fields"]["shipping_included"]
+    assert shipping["value"] is None
+    assert shipping["status"] == "needs_review"
+    assert "shipping_included" in fields_requiring_review(extracted)
+    assert extracted["fields"].get("shipping_fee", {}).get("value") is None
+
+    # _boolean / coerce path: negative markers must not be overridden by 包邮.
+    assert coerce_field_value("shipping_included", "江浙沪包邮，新疆西藏运费到付") is None
+    assert coerce_field_value("shipping_included", "运费到付") is False
+    assert coerce_field_value("shipping_included", "运费自理") is False
+    assert coerce_field_value("shipping_included", "运费自付") is False
+    assert coerce_field_value("shipping_included", "运费另算") is False
+    assert coerce_field_value("shipping_included", "不含运费") is False
+    assert coerce_field_value("shipping_included", "包邮") is True
+    assert coerce_field_value("shipping_included", "不包邮") is False
+
+
+def test_pdf_page_count_limit_rejected_before_extraction() -> None:
+    """P2: a PDF over MAX_PDF_PAGES pages is rejected right after PdfReader
+    construction, before any per-page text extraction runs."""
+    output = io.BytesIO()
+    writer = PdfWriter()
+    for _ in range(21):  # MAX_PDF_PAGES = 20
+        writer.add_blank_page(width=72, height=72)
+    writer.write(output)
+    with pytest.raises(QuoteParseError, match="不得超过"):
+        parse_quote("many-pages.pdf", output.getvalue())
+
+
+def test_text_field_value_rejects_oversized_length() -> None:
+    """P2: manual/text values over 2000 chars are rejected; parser marks them
+    needs_review instead of raising, and numbers/booleans are unaffected."""
+    from agentharness.procurement.parsing import coerce_field_value
+
+    with pytest.raises(ValueError, match="长度不能超过"):
+        coerce_field_value("supplier_name", "x" * 2001)
+    assert coerce_field_value("unit_price", "1.5") == "1.5"
+    assert coerce_field_value("shipping_included", True) is True
+    assert coerce_field_value("supplier_name", "正常供应商") == "正常供应商"
+
+    document = _xlsx_bytes(
+        [
+            ["供应商", "超" * 2001],
+            ["品名", "PE 白色快递袋 250x350mm 60um 单色印刷"],
+            ["币种", "CNY"],
+            ["单价", "500"],
+            ["计价数量", "1000"],
+            ["税率", "13%"],
+            ["是否含税", "是"],
+            ["是否包邮", "是"],
+            ["MOQ", "1000"],
+            ["交期", "7"],
+            ["是否可开票", "是"],
+        ]
+    )
+    extracted = parse_quote("oversized-supplier.xlsx", document)
+    supplier = extracted["fields"]["supplier_name"]
+    assert supplier["value"] is None
+    assert supplier["status"] == "needs_review"
+    assert "supplier_name" in fields_requiring_review(extracted)
+
+
+def test_correct_quote_field_body_value_max_length() -> None:
+    """P2: CorrectQuoteFieldBody.value string is capped at 2000 chars."""
+    from pydantic import ValidationError
+
+    from agentharness.api.procurement import CorrectQuoteFieldBody
+
+    with pytest.raises(ValidationError):
+        CorrectQuoteFieldBody(field="supplier_name", value="x" * 2001, actor="采购员")
+    ok = CorrectQuoteFieldBody(field="shipping_fee", value=25, actor="采购员")
+    assert ok.value == 25
+
+
+def test_api_currency_codes_require_three_uppercase_letters() -> None:
+    """P2: base_currency and fx_rates keys must be 3 uppercase letters after
+    normalization; '123' / 'CN¥' must be rejected with a Chinese message."""
+    from decimal import Decimal
+
+    from pydantic import ValidationError
+
+    from agentharness.api.procurement import ProcurementConstraints
+
+    ok = ProcurementConstraints(base_currency="cny", fx_rates={"cny": "1", "usd": "7.2"})
+    assert ok.base_currency == "CNY"
+    assert ok.fx_rates == {"CNY": Decimal("1"), "USD": Decimal("7.2")}
+
+    with pytest.raises(ValidationError) as exc_info:
+        ProcurementConstraints(base_currency="123", fx_rates={"123": "1"})
+    assert "3 位大写字母" in str(exc_info.value) or "3 个大写字母" in str(exc_info.value)
+
+    with pytest.raises(ValidationError):
+        ProcurementConstraints(base_currency="CN¥", fx_rates={"CNY": "1"})
+    with pytest.raises(ValidationError):
+        ProcurementConstraints(base_currency="CNY", fx_rates={"CN¥": "1"})
+    with pytest.raises(ValidationError):
+        ProcurementConstraints(base_currency="CNY", fx_rates={"US": "1"})
+
+
+@pytest.mark.asyncio
+async def test_procurement_get_endpoints_redact_sensitive_quote_text(
+    data_dir: Path, workspace: Path
+) -> None:
+    """P2: GET /requests, /requests/{id} and /purchase-order apply the same
+    public redaction as /report (paths and API keys must never leak)."""
+    harness = Harness(data_dir=data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    transport = ASGITransport(app=app)
+    secret_path = r"C:\Users\secret\keys\service-account.json"
+    api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            created = await client.post(
+                "/api/procurement/requests",
+                json=_request_body(load_frozen_truth()),
+            )
+            assert created.status_code == 201, created.text
+            request_id = created.json()["id"]
+
+            document = _xlsx_bytes(
+                [
+                    ["供应商", secret_path],
+                    ["品名", "PE 白色快递袋 250x350mm 60um 单色印刷"],
+                    ["币种", "CNY"],
+                    ["单价", "500"],
+                    ["计价数量", "1000"],
+                    ["税率", "13%"],
+                    ["是否含税", "是"],
+                    ["是否包邮", "是"],
+                    ["MOQ", "1000"],
+                    ["交期", "7"],
+                    ["是否可开票", "是"],
+                    ["备注", api_key],
+                ]
+            )
+            imported = await client.post(
+                f"/api/procurement/requests/{request_id}/quotes",
+                json={
+                    "filename": "sensitive.xlsx",
+                    "content_base64": base64.b64encode(document).decode("ascii"),
+                },
+            )
+            assert imported.status_code == 201, imported.text
+
+            detail = (await client.get(f"/api/procurement/requests/{request_id}")).json()
+            raw = json.dumps(detail, ensure_ascii=False)
+            assert secret_path not in raw
+            assert api_key not in raw
+            assert "[REDACTED_PATH]" in raw and "[REDACTED_API_KEY]" in raw
+
+            listing = (await client.get("/api/procurement/requests?limit=200")).json()
+            raw_listing = json.dumps(listing, ensure_ascii=False)
+            assert secret_path not in raw_listing
+            assert api_key not in raw_listing
+
+            app.state.procurement_service.purchase_order = lambda rid: {
+                "id": "po-1",
+                "po_number": "PO-RFQ-1",
+                "request_id": request_id,
+                "reference": "RFQ-1",
+                "title": "测试订单",
+                "item_name": "快递袋",
+                "quantity": 1,
+                "unit": "piece",
+                "supplier_name": secret_path,
+                "quote_id": "quote-1",
+                "currency": "CNY",
+                "unit_price_base": "1.0000",
+                "total_amount_base": "1.00",
+                "snapshot_id": "snap-1",
+                "snapshot_version": 1,
+                "input_sha256": "0" * 64,
+                "approval_id": "approval-1",
+                "decision_id": "decision-1",
+                "created_at": "2026-08-08T00:00:00+00:00",
+                "evidence_sha256": "e" * 64,
+            }
+            po = (
+                await client.get(f"/api/procurement/requests/{request_id}/purchase-order")
+            ).json()
+            raw_po = json.dumps(po, ensure_ascii=False)
+            assert secret_path not in raw_po
+            assert "[REDACTED_PATH]" in raw_po
+    finally:
+        await app.state.procurement_agent.aclose()
+        await app.state.run_supervisor.aclose()
+        await harness.aclose()
+
+
+def test_record_no_award_rechecks_eligibility_with_today(data_dir: Path, monkeypatch) -> None:
+    """P3: record_no_award must recompute current eligibility with _today()
+    (like the approved path), not the stale snapshot analysis date."""
+    import agentharness.procurement.service as service_module
+    from agentharness.harness import Harness
+    from agentharness.procurement.service import ProcurementService
+
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    try:
+        request = service.create_request(_request_body(load_frozen_truth()))
+        request_id = str(request["id"])
+
+        def quote_extracted(supplier: str) -> dict:
+            values = {
+                "supplier_name": supplier,
+                "item_description": "PE 白色快递袋 250x350mm 60um 单色印刷",
+                "material": "PE",
+                "color": "白色",
+                "print_colors": 1,
+                "currency": "CNY",
+                "unit_price": "0.5",
+                "price_basis": 1,
+                "tax_rate": "0.13",
+                "tax_included": False,
+                "shipping_fee": "0",
+                "shipping_included": True,
+                "moq": 1000,
+                "lead_time_days": 30,  # 超过 max_lead_days=15 -> 全部不合格
+                "supports_invoice": True,
+                "width_mm": "250",
+                "length_mm": "350",
+                "thickness_um": "60",
+                "valid_until": "2026-12-31",
+            }
+            return {
+                "schema_version": 1,
+                "parser_version": "test",
+                "document_kind": "xlsx",
+                "fields": {
+                    name: {
+                        "value": value,
+                        "confidence": 1.0,
+                        "status": "accepted",
+                        "source": {
+                            "document_kind": "xlsx",
+                            "locator": "test",
+                            "excerpt": "",
+                            "method": "test",
+                        },
+                    }
+                    for name, value in values.items()
+                },
+                "processing_ms": 0,
+            }
+
+        service.import_quote(
+            request_id,
+            filename="供应商甲报价.xlsx",
+            data=b"quote-a",
+            extracted=quote_extracted("供应商甲"),
+        )
+        service.import_quote(
+            request_id,
+            filename="供应商乙报价.xlsx",
+            data=b"quote-b",
+            extracted=quote_extracted("供应商乙"),
+        )
+        harness.storage.runs.create_run(
+            run_id="run-noaward",
+            session_id=str(request["session_id"]),
+            root_run_id="run-noaward",
+        )
+        snapshot = service.compare_for_agent(request_id, run_id="run-noaward")
+        assert snapshot["result"]["eligible_count"] == 0
+
+        captured = {}
+
+        def fake_compare(req, quotes, *, analysis_as_of):
+            captured["analysis_as_of"] = analysis_as_of
+            return {"eligible_count": 0, "quotes": []}
+
+        monkeypatch.setattr(service_module, "_today", lambda: date(2030, 1, 1))
+        monkeypatch.setattr(service_module, "compare_quotes", fake_compare)
+        result = service.record_no_award(
+            request_id,
+            snapshot_id=snapshot["id"],
+            input_sha256=snapshot["input_sha256"],
+            note="全部不合格",
+            actor="采购员",
+        )
+        assert result["decision"]["decision"] == "no_award"
+        assert captured["analysis_as_of"] == date(2030, 1, 1)
+        assert captured["analysis_as_of"] != date.fromisoformat(
+            snapshot["result"]["analysis_as_of"]
+        )
+    finally:
+        harness.close()

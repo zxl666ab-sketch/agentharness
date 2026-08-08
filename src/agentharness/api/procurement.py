@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import re
 import sqlite3
 from datetime import date
 from decimal import Decimal
@@ -63,7 +64,10 @@ class ProcurementConstraints(BaseModel):
     @field_validator("base_currency")
     @classmethod
     def normalize_currency(cls, value: str) -> str:
-        return value.upper()
+        code = value.upper()
+        if re.fullmatch(r"[A-Z]{3}", code) is None:
+            raise ValueError("本位币必须是 3 位大写字母代码")
+        return code
 
     @field_validator("fx_rates")
     @classmethod
@@ -73,8 +77,8 @@ class ProcurementConstraints(BaseModel):
         normalized: dict[str, Decimal] = {}
         for currency, rate in value.items():
             code = str(currency).upper()
-            if len(code) != 3 or rate <= 0:
-                raise ValueError("币种代码必须为 3 个字母，且汇率必须大于 0")
+            if re.fullmatch(r"[A-Z]{3}", code) is None or rate <= 0:
+                raise ValueError("币种代码必须为 3 个大写字母，且汇率必须大于 0")
             normalized[code] = rate
         return normalized
 
@@ -170,6 +174,13 @@ class CorrectQuoteFieldBody(BaseModel):
     field: str = Field(min_length=1, max_length=100)
     value: str | int | float | bool | None
     actor: str = Field(default="采购员", min_length=1, max_length=100)
+
+    @field_validator("value")
+    @classmethod
+    def value_length_limited(cls, value: str | int | float | bool | None) -> str | int | float | bool | None:
+        if isinstance(value, str) and len(value) > 2000:
+            raise ValueError("人工修正值不能超过 2000 个字符")
+        return value
 
 
 class ResumeProcurementConversationBody(BaseModel):
@@ -319,7 +330,8 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
 
     @router.get("/requests")
     async def requests(limit: int = Query(100, ge=1, le=500)) -> list[dict[str, Any]]:
-        return service.list_requests(limit)
+        # 与 /report 一致：公开接口统一脱敏，避免报价原文摘录泄露路径/密钥。
+        return agent.harness.redactor.redact_public_obj(service.list_requests(limit))
 
     @router.post("/requests", status_code=201)
     async def create_request(body: CreateProcurementRequestBody) -> dict[str, Any]:
@@ -328,9 +340,11 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
     @router.get("/requests/{request_id}")
     async def request_detail(request_id: str) -> dict[str, Any]:
         try:
-            return service.get_request(request_id)
+            detail = service.get_request(request_id)
         except KeyError:
             raise HTTPException(404, "未找到采购需求") from None
+        # 与 /report 一致：详情中的报价原文摘录等不可信文本统一脱敏。
+        return agent.harness.redactor.redact_public_obj(detail)
 
     @router.post("/requests/{request_id}/resume", status_code=202)
     async def resume_conversation(
@@ -468,11 +482,13 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
     @router.get("/requests/{request_id}/purchase-order")
     async def purchase_order(request_id: str) -> dict[str, Any]:
         try:
-            return service.purchase_order(request_id)
+            order = service.purchase_order(request_id)
         except KeyError:
             raise HTTPException(404, "未找到采购需求") from None
         except ProcurementError as exc:
             raise HTTPException(409, str(exc)) from exc
+        # 与 /report 一致：订单中的供应商/标题等不可信文本统一脱敏。
+        return agent.harness.redactor.redact_public_obj(order)
 
     @router.get("/requests/{request_id}/purchase-order.csv")
     async def purchase_order_csv(request_id: str) -> Response:

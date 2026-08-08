@@ -19,12 +19,33 @@ class ApprovalRepo:
     def save_approval(self, approval: dict[str, Any]) -> None:
         with self._lock:
             self._conn.execute(
-                """INSERT OR REPLACE INTO approvals(
+                """INSERT INTO approvals(
                     id, run_id, tool_call_id, tool_name, effect,
                     arguments_summary, requires_confirmation, decision,
                     created_at, resolved_at, invocation_id, tool_version,
                     arguments_sha256, approval_scope, status
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                    run_id=excluded.run_id,
+                    tool_call_id=excluded.tool_call_id,
+                    tool_name=excluded.tool_name,
+                    effect=excluded.effect,
+                    arguments_summary=excluded.arguments_summary,
+                    requires_confirmation=excluded.requires_confirmation,
+                    invocation_id=excluded.invocation_id,
+                    tool_version=excluded.tool_version,
+                    arguments_sha256=excluded.arguments_sha256,
+                    approval_scope=excluded.approval_scope,
+                    created_at=COALESCE(approvals.created_at, excluded.created_at),
+                    decision=CASE WHEN excluded.decision IS NOT NULL
+                                  THEN excluded.decision ELSE approvals.decision END,
+                    resolved_at=CASE WHEN excluded.resolved_at IS NOT NULL
+                                     THEN excluded.resolved_at ELSE approvals.resolved_at END,
+                    status=CASE
+                        WHEN excluded.decision IS NOT NULL THEN excluded.status
+                        WHEN approvals.decision IS NOT NULL THEN 'resolved'
+                        ELSE 'pending'
+                    END""",
                 (
                     approval["id"],
                     approval["run_id"],
@@ -69,6 +90,14 @@ class ApprovalRepo:
         return cursor.rowcount == 1
 
     def expire_pending_approvals(self, run_id: str) -> int:
+        return self.expire_pending_for_run(run_id)
+
+    def expire_pending_for_run(self, run_id: str) -> int:
+        """Expire every unresolved (pending) approval for a run.
+
+        Marks each pending approval as ``expired`` with a ``resolved_at``
+        timestamp and returns the number of affected rows.
+        """
         with self._lock:
             cursor = self._conn.execute(
                 """UPDATE approvals SET status = 'expired', resolved_at = ?

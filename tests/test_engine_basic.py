@@ -6,16 +6,38 @@ from agentharness.contracts import (
     ApprovalDecision,
     ApprovalMode,
     BudgetConfig,
+    Checkpoint,
     EffectKind,
+    Message,
+    MessageRole,
     RunRequest,
     RunStatus,
     ToolContext,
     ToolResult,
     ToolSpec,
+    Usage,
+    new_id,
 )
 from agentharness.harness import Harness
+from agentharness.security.redaction import Redactor
 from agentharness.storage.sqlite import Storage
 from tests.fake_provider import FakeModelAdapter
+
+
+class _PermissiveRedactor(Redactor):
+    """No-op redactor; see test_context_compaction for rationale."""
+
+    def redact_text(self, text: str) -> str:
+        return text or ""
+
+    def redact_public_text(self, text: str) -> str:
+        return text or ""
+
+    def redact_obj(self, obj):
+        return obj
+
+    def redact_public_obj(self, obj):
+        return obj
 
 
 @pytest.mark.asyncio
@@ -137,3 +159,110 @@ async def test_wall_clock_pauses_while_waiting_for_human_approval(
     assert result.status == RunStatus.completed
     assert result.error is None
 
+
+@pytest.mark.asyncio
+async def test_resume_exception_marks_run_failed_not_stuck_running(
+    data_dir, workspace
+) -> None:
+    """P1 regression: an exception inside the resumed loop must finalize as
+    failed instead of leaving the run stuck in ``running`` forever."""
+    harness = Harness(data_dir=data_dir)
+    harness.register_provider("fake", FakeModelAdapter())
+    session_id = harness.storage.create_session()
+    run_id = new_id()
+    harness.storage.create_run(
+        run_id=run_id,
+        session_id=session_id,
+        root_run_id=run_id,
+        status=RunStatus.interrupted,
+        provider="fake",
+        approval="auto",
+        cwd=str(workspace),
+    )
+    user = Message(role=MessageRole.user, content="resume me")
+    harness.storage.save_message(run_id, session_id, user, seq=0)
+    harness.storage.save_checkpoint(
+        Checkpoint(
+            run_id=run_id,
+            phase="tool_batch",
+            step=0,
+            messages=[user],
+            pending_tool_calls=[],
+            completed_tool_call_ids=[],
+            usage=Usage(),
+            status=RunStatus.interrupted,
+        )
+    )
+
+    async def boom(**kwargs):
+        del kwargs
+        raise RuntimeError("boom inside resumed loop")
+
+    harness.engine._loop = boom
+    try:
+        result = await harness.resume(run_id)
+    finally:
+        await harness.aclose()
+
+    assert result.status == RunStatus.failed
+    assert "boom inside resumed loop" in (result.error or "")
+    # The run must be terminal, never left running.
+    assert harness.get_run(run_id)["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_aclose_waits_for_active_run_task_before_closing_storage(
+    data_dir, workspace
+) -> None:
+    """P3 regression: aclose must wait for active run teardown so cleanup never
+    writes to a closed database."""
+    adapter = FakeModelAdapter(script=[{"kind": "sleep", "seconds": 30.0}])
+    harness = Harness(
+        data_dir=data_dir, providers={"fake": adapter}, redactor=_PermissiveRedactor()
+    )
+    task = asyncio.create_task(
+        harness.run(
+            RunRequest(
+                message="block until shutdown",
+                provider="fake",
+                approval=ApprovalMode.auto,
+                cwd=str(workspace),
+            )
+        )
+    )
+    for _ in range(200):
+        if harness.engine._active_run_ids:
+            break
+        await asyncio.sleep(0.01)
+    assert harness.engine._active_run_ids
+
+    await harness.aclose()
+    assert harness._closed is True
+    result = await task
+    assert result.status == RunStatus.interrupted
+
+
+@pytest.mark.asyncio
+async def test_interrupt_is_noop_on_terminal_run(data_dir, workspace) -> None:
+    """P1 regression: interrupt must not flip a completed run back to
+    interrupted (which would let resume overwrite its final output)."""
+    harness = Harness(data_dir=data_dir)
+    harness.register_provider("fake", FakeModelAdapter())
+    session_id = harness.storage.create_session()
+    run_id = new_id()
+    harness.storage.create_run(
+        run_id=run_id,
+        session_id=session_id,
+        root_run_id=run_id,
+        status=RunStatus.completed,
+        provider="fake",
+        approval="auto",
+        cwd=str(workspace),
+    )
+    try:
+        await harness.engine.interrupt(run_id, "late interrupt")
+        assert harness.get_run(run_id)["status"] == "completed"
+        harness.engine.lifecycle.mark_interrupted(run_id, "late interrupt")
+        assert harness.get_run(run_id)["status"] == "completed"
+    finally:
+        await harness.aclose()

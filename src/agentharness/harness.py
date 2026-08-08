@@ -215,6 +215,12 @@ class Harness:
                 await self.engine.interrupt(run_id, "harness_shutdown")
             except Exception as exc:  # noqa: BLE001
                 errors.append(exc)
+        # Run teardown (checkpoint/lease/tool release) still writes to storage.
+        # Wait for every active run task to finish before closing the database.
+        try:
+            await self.engine.wait_for_active_runs()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
 
         seen: set[int] = set()
         for tool in self.tools.values():

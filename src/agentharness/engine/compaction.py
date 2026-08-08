@@ -135,30 +135,58 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def _render_message(message: Message) -> str:
+    """Render one message for the summarizer transcript (public shape kept)."""
+    return _render_message_with_flags(message)[0]
+
+
+def _render_message_with_flags(message: Message) -> tuple[str, bool]:
+    """Return ``(rendered_text, fully_rendered)``.
+
+    ``fully_rendered`` is False when per-message truncation dropped content
+    (overlong body or tool-call arguments), so callers can avoid marking the
+    message as summarized when the summarizer never saw it verbatim.
+    """
     role = message.role.value if hasattr(message.role, "value") else str(message.role)
     lines: list[str] = []
+    truncated = False
     content = (message.content or "").strip()
     if content:
+        if len(content) > _PER_MESSAGE_CHARS:
+            truncated = True
         lines.append(f"[{role}] {_truncate(content, _PER_MESSAGE_CHARS)}")
     for call in message.tool_calls or []:
         try:
             args = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)
         except (TypeError, ValueError):
             args = str(call.arguments)
+        if len(args) > 400:
+            truncated = True
         lines.append(f"[{role}] -> {call.name}({_truncate(args, 400)})")
     if not lines:
         lines.append(f"[{role}] (empty)")
-    return "\n".join(lines)
+    return "\n".join(lines), not truncated
 
 
-def render_transcript(
+def render_transcript_with_coverage(
     messages: list[Message],
     *,
     prior_summary: str = "",
     goal: str = "",
-) -> str:
-    """Deterministic, size-bounded prompt body for the summarizer call."""
-    rendered = [_render_message(message) for message in messages]
+) -> tuple[str, list[str]]:
+    """Size-bounded prompt body plus ids of messages the summarizer saw verbatim.
+
+    A message is only listed as covered when it entered the transcript without
+    per-message truncation and was not dropped by the 60k head/tail policy.
+    Messages that were truncated or omitted stay live (not marked summarized),
+    so the engine never silently loses tail/middle content.
+    """
+    rendered_parts = [
+        (message.id, part, fully)
+        for message in messages
+        for part, fully in (_render_message_with_flags(message),)
+    ]
+    rendered = [part for _, part, _ in rendered_parts]
+    included = [True] * len(rendered_parts)
     total = sum(len(part) for part in rendered)
     if total > _TRANSCRIPT_CHARS:
         # Keep the oldest and newest halves; the middle is the least load-bearing.
@@ -178,7 +206,19 @@ def render_transcript(
             tail.append(part)
             tail_len += len(part)
         omitted = len(rendered) - len(head) - len(tail)
+        included = [False] * len(rendered_parts)
+        for index in range(len(head)):
+            included[index] = True
+        tail_start = len(rendered) - len(tail)
+        for index in range(tail_start, len(rendered)):
+            included[index] = True
         rendered = [*head, f"[... {omitted} messages omitted ...]", *list(reversed(tail))]
+
+    covered_ids = [
+        message_id
+        for (message_id, _, fully), is_included in zip(rendered_parts, included, strict=True)
+        if is_included and fully
+    ]
 
     parts: list[str] = []
     if goal:
@@ -189,7 +229,19 @@ def render_transcript(
             + _truncate(prior_summary, _PRIOR_SUMMARY_CHARS)
         )
     parts.append("Conversation to summarize:\n" + "\n".join(rendered))
-    return "\n\n".join(parts)
+    return "\n\n".join(parts), covered_ids
+
+
+def render_transcript(
+    messages: list[Message],
+    *,
+    prior_summary: str = "",
+    goal: str = "",
+) -> str:
+    """Deterministic, size-bounded prompt body for the summarizer call."""
+    return render_transcript_with_coverage(
+        messages, prior_summary=prior_summary, goal=goal
+    )[0]
 
 
 async def summarize_history(

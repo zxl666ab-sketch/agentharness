@@ -5,6 +5,7 @@ section 3)."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import pytest
 
@@ -12,15 +13,18 @@ from agentharness.api.execution import PendingApprovalBroker
 from agentharness.api.reporting import build_run_report
 from agentharness.contracts import (
     ApprovalMode,
+    BudgetConfig,
     EffectKind,
     ModelRequest,
     ModelStreamItem,
     RunRequest,
+    RunStatus,
     StreamItemType,
     ToolContext,
     ToolResult,
     ToolSpec,
     Usage,
+    new_id,
 )
 from agentharness.harness import Harness
 from agentharness.procurement.agent import (
@@ -225,4 +229,124 @@ async def test_ai_review_toggle_off_produces_no_review_event(
         assert not any(event["type"] == "ai_review" for event in events)
     finally:
         await agent.aclose()
+        await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_delegate_depth_and_concurrency_limits_are_enforced(
+    data_dir, workspace
+) -> None:
+    """P2 regression: max_delegate_depth / max_concurrent_children must gate
+    delegate spawns before any model/tool execution."""
+    harness = Harness(data_dir=data_dir)
+    harness.register_provider("fake", FakeModelAdapter())
+    session_id = harness.storage.create_session()
+    parent_id = new_id()
+    harness.storage.create_run(
+        run_id=parent_id,
+        session_id=session_id,
+        root_run_id=parent_id,
+        status=RunStatus.completed,
+        provider="fake",
+        approval="auto",
+        cwd=str(workspace),
+        delegate_depth=0,
+    )
+    try:
+        too_deep = await harness.run(
+            RunRequest(
+                message="delegate",
+                provider="fake",
+                parent_run_id=parent_id,
+                delegate_depth=99,
+                approval=ApprovalMode.auto,
+                cwd=str(workspace),
+                budget=BudgetConfig(max_delegate_depth=3),
+            )
+        )
+        assert too_deep.status == RunStatus.failed
+        assert "max_delegate_depth" in (too_deep.error or "")
+
+        for _ in range(4):
+            harness.storage.create_run(
+                run_id=new_id(),
+                session_id=session_id,
+                root_run_id=parent_id,
+                parent_run_id=parent_id,
+                status=RunStatus.running,
+                provider="fake",
+                approval="auto",
+                cwd=str(workspace),
+            )
+        too_many = await harness.run(
+            RunRequest(
+                message="delegate",
+                provider="fake",
+                parent_run_id=parent_id,
+                delegate_depth=1,
+                approval=ApprovalMode.auto,
+                cwd=str(workspace),
+                budget=BudgetConfig(max_concurrent_children=4),
+            )
+        )
+        assert too_many.status == RunStatus.failed
+        assert "max_concurrent_children" in (too_many.error or "")
+    finally:
+        await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cancel_and_interrupt_expire_pending_approvals(
+    data_dir, workspace
+) -> None:
+    """P3 regression: cancelling/interrupting a run must expire its unresolved
+    approvals so a later resume cannot act on stale pending decisions."""
+
+    def make_run(status: RunStatus) -> str:
+        run_id = new_id()
+        harness.storage.create_run(
+            run_id=run_id,
+            session_id=session_id,
+            root_run_id=run_id,
+            status=status,
+            provider="fake",
+            approval="ask",
+            cwd=str(workspace),
+        )
+        harness.storage.save_approval(
+            {
+                "id": new_id(),
+                "run_id": run_id,
+                "tool_call_id": "call-1",
+                "tool_name": "write_file",
+                "effect": "workspace_write",
+                "arguments_summary": "write a.txt",
+                "requires_confirmation": True,
+                "decision": None,
+                "created_at": datetime.now(UTC).isoformat(),
+                "resolved_at": None,
+                "invocation_id": "inv-1",
+                "tool_version": "1",
+                "arguments_sha256": "",
+                "approval_scope": "fs_write:workspace_write:path=/tmp/a.txt",
+                "status": "pending",
+            }
+        )
+        return run_id
+
+    harness = Harness(data_dir=data_dir)
+    harness.register_provider("fake", FakeModelAdapter())
+    session_id = harness.storage.create_session()
+    try:
+        cancelled = make_run(RunStatus.waiting_approval)
+        await harness.engine.cancel(cancelled)
+        approvals = harness.storage.list_approvals(cancelled)
+        assert approvals and approvals[0]["status"] == "expired"
+
+        interrupted = make_run(RunStatus.waiting_approval)
+        await harness.engine.interrupt(interrupted, "test")
+        approvals = harness.storage.list_approvals(interrupted)
+        assert approvals and approvals[0]["status"] == "expired"
+        assert harness.get_run(interrupted)["status"] == "interrupted"
+    finally:
         await harness.aclose()

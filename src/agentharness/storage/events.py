@@ -120,9 +120,13 @@ class EventRepo:
         return int(row[0]) if row else 0
 
     def get_context_manifests(self, run_id: str) -> list[dict[str, Any]]:
-        """Return redacted, ordered per-model-turn context manifests."""
+        """Return redacted, ordered per-model-turn context manifests.
+
+        Uses tail semantics: on very long runs the newest window of events is
+        what still matters (the same window the report timeline shows).
+        """
         manifests: list[dict[str, Any]] = []
-        for event in self.get_events(run_id=run_id, limit=10_000):
+        for event in self.get_events_tail(run_id=run_id, limit=10_000):
             event_type = event.type.value if isinstance(event.type, EventType) else str(event.type)
             if event_type != "context_manifest":
                 continue
@@ -136,8 +140,41 @@ class EventRepo:
             manifests.append(self.redactor.redact_obj(item))
         return manifests
 
-    def iter_events_after(self, after_global_seq: int = 0) -> Iterator[EventEnvelope]:
-        yield from self.get_events(after_global_seq=after_global_seq, limit=10_000)
+    def get_events_tail(self, run_id: str, limit: int = 500) -> list[EventEnvelope]:
+        """Return the newest ``limit`` events for a run in ascending seq order.
+
+        This is the tail semantic used by bounded report windows: a plain
+        ``get_events(run_id=..., limit=N)`` returns the *oldest* N events and
+        silently drops the terminal events of a run longer than N.
+        """
+        if limit <= 0:
+            return []
+        rows = self._reader().execute(
+            """SELECT * FROM events
+               WHERE run_id = ?
+               ORDER BY global_seq DESC LIMIT ?""",
+            (run_id, limit),
+        ).fetchall()
+        return [self._row_to_event(row) for row in reversed(rows)]
+
+    def iter_events_after(
+        self, after_global_seq: int = 0, *, page_size: int = 10_000
+    ) -> Iterator[EventEnvelope]:
+        """Yield every event after ``after_global_seq``, paging by ``page_size``.
+
+        The previous single-page implementation silently stopped at 10k events;
+        callers that need the full log (SSE replays, evidence derivation) now
+        get every row regardless of length.
+        """
+        after = after_global_seq
+        while True:
+            page = self.get_events(after_global_seq=after, limit=page_size)
+            if not page:
+                break
+            yield from page
+            after = int(page[-1].global_seq)
+            if len(page) < page_size:
+                break
 
     def max_global_seq(self) -> int:
         row = self._reader().execute(

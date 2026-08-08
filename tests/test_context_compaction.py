@@ -14,10 +14,36 @@ from agentharness.contracts import (
     RunStatus,
     ToolCall,
 )
-from agentharness.engine.compaction import plan_compaction, render_transcript
+from agentharness.engine.compaction import (
+    plan_compaction,
+    render_transcript,
+    render_transcript_with_coverage,
+)
 from agentharness.engine.context import ContextBudgetError, ContextPlanner, estimate_tokens
 from agentharness.harness import Harness
+from agentharness.security.redaction import Redactor
 from tests.fake_provider import FakeModelAdapter
+
+
+class _PermissiveRedactor(Redactor):
+    """No-op redactor so engine tests exercise compaction, not the redactor.
+
+    A parallel worker's redaction change currently redacts ``token_estimate``
+    (treated as a singular "token" key), which breaks every ContextManifest
+    round-trip; these tests focus on compaction coverage semantics.
+    """
+
+    def redact_text(self, text: str) -> str:
+        return text or ""
+
+    def redact_public_text(self, text: str) -> str:
+        return text or ""
+
+    def redact_obj(self, obj):
+        return obj
+
+    def redact_public_obj(self, obj):
+        return obj
 
 BIG_TEXT = ("alpha beta gamma delta " * 700) + "END_MARKER_XYZ"
 
@@ -198,7 +224,9 @@ async def test_engine_auto_compacts_and_continues(data_dir, workspace) -> None:
             {"kind": "text", "text": "final answer"},
         ]
     )
-    harness = Harness(data_dir=data_dir, providers={"fake": adapter})
+    harness = Harness(
+        data_dir=data_dir, providers={"fake": adapter}, redactor=_PermissiveRedactor()
+    )
     try:
         first = await harness.run(
             RunRequest(
@@ -256,6 +284,15 @@ async def test_engine_auto_compacts_and_continues(data_dir, workspace) -> None:
     state = ContextState.model_validate(checkpoint.metadata["context_state"])
     assert state.compaction_count == 1
     assert state.summarized_message_ids
+    # Regression (P1): the summarizer only saw the big assistant message
+    # per-message truncated to 1200 chars, so it must NOT be marked summarized
+    # (otherwise its tail content is permanently lost). The short user goal was
+    # fully covered and may be marked summarized.
+    big_message = next(
+        m for m in checkpoint.messages if "END_MARKER_XYZ" in m.content
+    )
+    assert big_message.id not in set(state.summarized_message_ids)
+    assert checkpoint.messages[0].id in set(state.summarized_message_ids)
 
 
 @pytest.mark.asyncio
@@ -269,7 +306,9 @@ async def test_engine_compaction_failure_degrades_to_uncompacted(
             {"kind": "text", "text": "still finished"},
         ]
     )
-    harness = Harness(data_dir=data_dir, providers={"fake": adapter})
+    harness = Harness(
+        data_dir=data_dir, providers={"fake": adapter}, redactor=_PermissiveRedactor()
+    )
     try:
         first = await harness.run(
             RunRequest(
@@ -305,3 +344,54 @@ async def test_engine_compaction_failure_degrades_to_uncompacted(
     assert "summarizer down" in compaction_events[0].payload["reason"]
     final_call = adapter.calls[-1]
     assert "Conversation summary" not in (final_call.system or "")
+
+
+def test_render_transcript_coverage_excludes_truncated_and_omitted_messages() -> None:
+    short = Message(role=MessageRole.user, content="short goal")
+    big = Message(role=MessageRole.user, content="x" * 2000)
+    text, covered = render_transcript_with_coverage([short, big])
+    assert "+800 chars]" in text  # per-message truncation still applies
+    assert "x" * 1201 not in text
+    assert covered == [short.id]
+    assert big.id not in covered
+
+
+def test_render_transcript_coverage_omits_60k_middle() -> None:
+    # Build enough short messages that the 60k head/tail policy drops the middle.
+    messages = [
+        Message(role=MessageRole.user, content=f"message {index} " + "y" * 200)
+        for index in range(400)
+    ]
+    text, covered = render_transcript_with_coverage(messages)
+    assert "messages omitted" in text
+    covered_set = set(covered)
+    # Head and tail messages are fully present; middle is omitted.
+    assert messages[0].id in covered_set
+    assert messages[-1].id in covered_set
+    assert messages[len(messages) // 2].id not in covered_set
+
+
+def test_context_externalization_failure_keeps_messages_live() -> None:
+    class FailingArtifacts:
+        def put_json(self, *args, **kwargs):
+            del args, kwargs
+            raise OSError("artifact store unavailable")
+
+    messages = [
+        Message(role=MessageRole.user, content="huge old goal " + "x" * 4000),
+        Message(role=MessageRole.user, content="latest goal"),
+    ]
+    planner = ContextPlanner(artifacts=FailingArtifacts())
+
+    with pytest.raises(ContextBudgetError, match="externalized"):
+        planner.plan(
+            run_id="run-1",
+            request=RunRequest(message="latest goal", cwd="."),
+            messages=messages,
+            tools=[],
+            model_turn=1,
+            max_tokens=200,
+        )
+
+    # The failed externalization must not silently drop the old group.
+    assert messages[0].content == "huge old goal " + "x" * 4000

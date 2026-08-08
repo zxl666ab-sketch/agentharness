@@ -53,3 +53,24 @@ async def test_demo_create_and_clean(data_dir, workspace) -> None:
         await app.state.procurement_agent.aclose()
         await app.state.run_supervisor.aclose()
         await harness.aclose()
+
+
+
+def test_clean_demo_requests_skips_demo_without_visible_run(data_dir, monkeypatch) -> None:
+    """P3: a demo request whose analysis run is not (yet) visible must be kept,
+    never deleted by the cleanup sweep."""
+    from agentharness.harness import Harness
+    from agentharness.procurement.service import ProcurementService
+
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    try:
+        request = service.create_demo_request()
+        request_id = str(request["id"])
+        monkeypatch.setattr(service.harness, "get_run", lambda run_id: None)
+        result = service.clean_demo_requests()
+        assert result["removed"] == 0
+        assert result["skipped"] >= 1
+        assert service.get_request(request_id)["id"] == request_id
+    finally:
+        harness.close()

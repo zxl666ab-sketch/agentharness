@@ -229,26 +229,46 @@ def _normalized_quote(
     tolerance_um = _decimal(constraints.get("thickness_tolerance_um", "0"), "厚度公差")
     spec_checks: list[dict[str, Any]] = []
     description = str(fields.get("item_description") or "")
-    expected_item = _canonical_item(request.get("item_name"))
+    requested_item = str(request.get("item_name") or "").strip()
+    expected_item = _canonical_item(requested_item)
     actual_item = _canonical_item(description)
-    if expected_item is not None:
-        item_passed = actual_item == expected_item
-        spec_checks.append(
-            {
-                "field": "item_identity",
-                "expected": str(request.get("item_name") or ""),
-                "actual": description,
-                "tolerance": "exact",
-                "passed": item_passed,
-            }
-        )
-        if not item_passed:
+    if requested_item:
+        if expected_item is None:
+            # 需求物料不在可识别枚举内：不能静默放行，必须按无法复核处理，
+            # 否则错误物料报价会被判合格并进入采购订单。
+            spec_checks.append(
+                {
+                    "field": "item_identity",
+                    "expected": requested_item,
+                    "actual": description,
+                    "tolerance": "exact",
+                    "passed": False,
+                }
+            )
             exclusions.append(
                 {
                     "code": "item_identity",
-                    "message": f"报价物料“{description or '未识别'}”与需求“{request.get('item_name')}”不一致",
+                    "message": f"无法复核物料一致性（需求物料“{requested_item}”不在可识别范围内）",
                 }
             )
+        else:
+            item_passed = actual_item == expected_item
+            spec_checks.append(
+                {
+                    "field": "item_identity",
+                    "expected": requested_item,
+                    "actual": description,
+                    "tolerance": "exact",
+                    "passed": item_passed,
+                }
+            )
+            if not item_passed:
+                exclusions.append(
+                    {
+                        "code": "item_identity",
+                        "message": f"报价物料“{description or '未识别'}”与需求“{requested_item}”不一致",
+                    }
+                )
 
     exact_specs = (
         (
@@ -265,6 +285,27 @@ def _normalized_quote(
     )
     for field, expected, actual in exact_specs:
         if expected is None:
+            if str(specs.get(field) or "").strip():
+                # 期望值存在但无法规范化识别：不得跳过该硬约束，按无法复核
+                # 处理，避免枚举外的需求值（如 HDPE、米白）被静默放行。
+                spec_checks.append(
+                    {
+                        "field": field,
+                        "expected": str(specs.get(field)),
+                        "actual": actual or "未识别",
+                        "tolerance": "exact",
+                        "passed": False,
+                    }
+                )
+                exclusions.append(
+                    {
+                        "code": f"spec_{field}",
+                        "message": (
+                            f"无法复核{SPEC_LABELS[field]}一致性"
+                            f"（需求值“{specs.get(field)}”不在可识别范围内）"
+                        ),
+                    }
+                )
             continue
         passed = actual == expected
         spec_checks.append(

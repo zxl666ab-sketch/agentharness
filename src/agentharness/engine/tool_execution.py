@@ -1340,8 +1340,29 @@ class ToolInvocationExecutor:
                 return result
 
         max_attempts = spec.max_attempts
+        remaining = max(0, max_attempts - invocation.attempt_count)
         first_attempt = invocation.attempt_count + 1
-        for attempt_offset in range(max_attempts):
+        if remaining <= 0:
+            # Retry budget is a hard cap across resumes: a previous run already
+            # consumed every allowed attempt, so fail without executing the tool.
+            result = ToolResult(
+                tool_call_id=tc.id,
+                invocation_id=tc.invocation_id,
+                name=tc.name,
+                content=(
+                    f"Retry budget exhausted after {invocation.attempt_count} attempts; "
+                    "no retry attempts remain for this tool call"
+                ),
+                is_error=True,
+                error_code="retry_exhausted",
+                error_category="retry",
+                retryable=False,
+                recovery_hint=(
+                    "Resume with a fresh tool call or raise the tool's max_attempts."
+                ),
+                attempts=invocation.attempt_count,
+            )
+        for attempt_offset in range(remaining):
             attempt = first_attempt + attempt_offset
             attempt_started = time.monotonic()
             invocation = invocation.model_copy(
@@ -1516,7 +1537,7 @@ class ToolInvocationExecutor:
                 result.is_error
                 and result.retryable
                 and invocation.replay_policy == ReplayPolicy.safe
-                and attempt_offset + 1 < max_attempts
+                and attempt_offset + 1 < remaining
                 and not cancel.is_set()
             )
             if not can_retry:

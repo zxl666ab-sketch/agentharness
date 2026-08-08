@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
@@ -11,6 +12,7 @@ from agentharness.contracts import (
     MessageRole,
     ModelRequest,
     StreamItemType,
+    Usage,
     VerificationCandidate,
     VerificationCheck,
     VerificationDecision,
@@ -294,6 +296,8 @@ class VerificationLoop:
         candidate: VerificationCandidate,
         policy: VerificationPolicy,
         check: VerificationCheck,
+        *,
+        timeout_s: float = 120.0,
     ) -> tuple[VerificationFailure | None, dict[str, Any]]:
         provider_name = policy.evaluator_provider
         if not provider_name or self.evaluator_resolver is None:
@@ -327,22 +331,31 @@ class VerificationLoop:
             },
             ensure_ascii=False,
         )
+        usage = Usage()
+        usage_evidence = {"provider": provider_name}
         try:
             chunks: list[str] = []
-            async for item in adapter.stream(
-                ModelRequest(
-                    model=policy.evaluator_model,
-                    system="You are an independent read-only verifier. Return JSON only.",
-                    messages=[Message(role=MessageRole.user, content=judge_prompt)],
-                    tools=[],
-                    temperature=0,
-                    max_tokens=2_000,
-                )
-            ):
-                if item.type == StreamItemType.text_delta and item.text:
-                    chunks.append(item.text)
-                elif item.type == StreamItemType.error:
-                    raise RuntimeError(item.error or "evaluator provider error")
+            async with asyncio.timeout(timeout_s):
+                async for item in adapter.stream(
+                    ModelRequest(
+                        model=policy.evaluator_model,
+                        system="You are an independent read-only verifier. Return JSON only.",
+                        messages=[Message(role=MessageRole.user, content=judge_prompt)],
+                        tools=[],
+                        temperature=0,
+                        max_tokens=2_000,
+                    )
+                ):
+                    if item.type == StreamItemType.text_delta and item.text:
+                        chunks.append(item.text)
+                    elif item.type == StreamItemType.usage and item.usage:
+                        usage.input_tokens += item.usage.input_tokens
+                        usage.output_tokens += item.usage.output_tokens
+                        usage.cached_input_tokens += item.usage.cached_input_tokens
+                        usage.total_tokens = usage.input_tokens + usage.output_tokens
+                        usage.estimated = usage.estimated or item.usage.estimated
+                    elif item.type == StreamItemType.error:
+                        raise RuntimeError(item.error or "evaluator provider error")
             raw_verdict = "".join(chunks).strip()
             if raw_verdict.startswith("```"):
                 raw_verdict = raw_verdict.strip("`")
@@ -359,7 +372,20 @@ class VerificationLoop:
             if any(score < 0 or score > 1 for score in scores):
                 raise ValueError("evaluator scores must be between 0 and 1")
             core = sum(scores) / len(scores)
+        except TimeoutError:
+            usage_evidence["usage"] = self._usage_evidence(usage)
+            return (
+                VerificationFailure(
+                    validator="ai",
+                    error_code="evaluator_failed",
+                    message="Independent evaluator timed out.",
+                    retryable=False,
+                    recovery_hint="Ask a human to review or restore the independent evaluator.",
+                ),
+                usage_evidence,
+            )
         except Exception as exc:  # noqa: BLE001
+            usage_evidence["usage"] = self._usage_evidence(usage)
             return (
                 VerificationFailure(
                     validator="ai",
@@ -368,12 +394,13 @@ class VerificationLoop:
                     retryable=False,
                     recovery_hint="Ask a human to review or restore the independent evaluator.",
                 ),
-                {"provider": provider_name},
+                usage_evidence,
             )
         hard_safety = bool(verdict.get("hard_safety_violation"))
         improvements = [str(item) for item in (verdict.get("improvements") or [])]
         evidence = {
             "provider": provider_name,
+            "usage": self._usage_evidence(usage),
             "score": core,
             "confidence": verdict.get("confidence"),
             "hard_safety_violation": hard_safety,
@@ -398,6 +425,17 @@ class VerificationLoop:
             ),
             evidence,
         )
+
+    @staticmethod
+    def _usage_evidence(usage: Usage) -> dict[str, Any]:
+        """Chargeable usage keys understood by RunEngine._charge_verification_usage."""
+        return {
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "total_tokens": usage.total_tokens,
+            "cached_input_tokens": usage.cached_input_tokens,
+            "estimated": usage.estimated,
+        }
 
     @staticmethod
     def _evaluator_configuration_failure(

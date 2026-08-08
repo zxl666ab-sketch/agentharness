@@ -20,8 +20,7 @@ _DEFAULT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         r"\1=[REDACTED]",
     ),
-    (re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"), "[REDACTED_API_KEY]"),
-    (re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{20,}\b"), "[REDACTED_API_KEY]"),
+    (re.compile(r"\bsk-[A-Za-z0-9\-_]{20,}\b"), "[REDACTED_API_KEY]"),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED_AWS_KEY]"),
     (
         re.compile(
@@ -35,7 +34,10 @@ _DEFAULT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 _PUBLIC_PATH_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(?i)(?<![A-Za-z0-9_])[A-Z]:[\\/][^\r\n\s\"'<>|]+"),
-    re.compile(r"(?<![A-Za-z0-9_])/(?:home|Users)/[^\r\n\s\"'<>]+"),
+    re.compile(
+        r"(?<![A-Za-z0-9_])/(?:home|Users|root|tmp|etc|var|app|data|opt|usr|srv)"
+        r"/[^\r\n\s\"'<>]+"
+    ),
 ]
 
 _SENSITIVE_KEYS = {
@@ -56,6 +58,35 @@ _SENSITIVE_KEYS = {
     "cookie",
     "setcookie",
 }
+
+# Substring words: a normalized key containing any of these is treated as
+# sensitive. "token" is matched separately (see _is_sensitive_key) so that
+# plural token counters such as max_tokens / total_tokens are not redacted.
+_SENSITIVE_KEY_WORDS = (
+    "apikey",
+    "password",
+    "passwd",
+    "authorization",
+    "credential",
+    "privatekey",
+    "secret",
+)
+
+
+def _is_sensitive_key(normalized_key: str) -> bool:
+    """Exact set first, then substring matching on credential words.
+
+    ``token`` needs special handling: only keys that *end* with "token"
+    (github_token, access_token, auth_token, ...) carry a credential value.
+    Structural counters such as max_tokens / total_tokens / token_estimate /
+    token_method / token_budget must not be redacted or the context manifest
+    and usage accounting break.
+    """
+    if normalized_key in _SENSITIVE_KEYS:
+        return True
+    if normalized_key.endswith("token"):
+        return True
+    return any(word in normalized_key for word in _SENSITIVE_KEY_WORDS)
 
 
 class Redactor:
@@ -114,7 +145,7 @@ class Redactor:
                 )
                 redacted[safe_key] = (
                     "[REDACTED]"
-                    if normalized_key in _SENSITIVE_KEYS
+                    if _is_sensitive_key(normalized_key)
                     else self._redact_obj(value, public=public)
                 )
             return redacted

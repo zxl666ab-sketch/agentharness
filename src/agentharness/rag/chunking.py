@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 QUALITY_LOW_CONFIDENCE = "low_confidence"
@@ -53,13 +54,41 @@ def canonical_material(value: Any) -> str | None:
     return None
 
 
+_CJK_RANGE = "\\u4e00-\\u9fff"
+
+
+def _color_alias_pattern(alias: str) -> str:
+    """Word-boundary regex so ``pet`` never matches PE and ``黑白`` never
+    matches the single-char ``白``/``黑`` aliases.
+
+    Latin aliases need letters around them to not merge (``bluewhite`` is not
+    ``white``). CJK aliases must not be embedded in another CJK word: a single
+    char like ``白`` in ``黑白`` is adjacent to CJK and does not match, while a
+    two-char alias such as ``黑色`` still matches inside ``黑色膜``.
+    """
+    if alias.isascii():
+        return rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])"
+    if len(alias) >= 2:
+        return rf"(?<![{_CJK_RANGE}]){re.escape(alias)}"
+    return rf"(?<![{_CJK_RANGE}]){re.escape(alias)}(?![{_CJK_RANGE}])"
+
+
 def canonical_color(value: Any) -> str | None:
-    """Canonical color identity (白色/白/white -> white)."""
+    """Canonical color identity (白色/白/white -> white).
+
+    Matches aliases at word boundaries and refuses ambiguous compound colors:
+    ``黑白`` hits both ``白`` and ``黑`` and must not collapse to either.
+    """
     text = str(value or "").strip().casefold()
+    if not text:
+        return None
+    matched: list[str] = []
     for canonical, aliases in _COLOR_ALIASES.items():
-        if any(alias in text for alias in aliases):
-            return canonical
-    return None
+        if any(re.search(_color_alias_pattern(alias), text) for alias in aliases):
+            matched.append(canonical)
+    if len(set(matched)) > 1:
+        return None
+    return matched[0] if matched else None
 
 
 def canonical_facts(
@@ -160,6 +189,32 @@ def _field_value(extracted: dict[str, Any], name: str) -> Any:
     return None
 
 
+def _safe_int(value: Any) -> int | None:
+    """Best-effort integer coercion for lead_days/moq extracted values.
+
+    Accepts integral values (including ``"8.0"``/``"1000.0"``) and tolerates
+    common unit suffixes (``天``/``days``/``day``/``d``). Fractional or
+    unparseable values return None instead of raising, so a noisy OCR field
+    can never turn an approval into a 500.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip().casefold()
+    if not text:
+        return None
+    for suffix in ("天", "days", "day", "d"):
+        if text.endswith(suffix):
+            text = text[: -len(suffix)].strip()
+            break
+    try:
+        number = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+    if not number.is_finite() or number != number.to_integral_value():
+        return None
+    return int(number)
+
+
 def build_chunk(
     *,
     request: dict[str, Any],
@@ -195,8 +250,8 @@ def build_chunk(
         landed_unit_cost=str(landed_unit_cost) if landed_unit_cost is not None else None,
         unit_price=str(unit_price) if unit_price is not None else None,
         currency=str(currency) if currency is not None else None,
-        lead_days=int(lead_days) if lead_days is not None else None,
-        moq=int(moq) if moq is not None else None,
+        lead_days=_safe_int(lead_days),
+        moq=_safe_int(moq),
     )
     specifications = request.get("specifications", {})
     summary = specification_summary(specifications)
@@ -231,8 +286,8 @@ def build_chunk(
         "unit_price": str(unit_price) if unit_price is not None else None,
         "currency": str(currency) if currency is not None else None,
         "landed_unit_cost": str(landed_unit_cost) if landed_unit_cost is not None else None,
-        "lead_days": int(lead_days) if lead_days is not None else None,
-        "moq": int(moq) if moq is not None else None,
+        "lead_days": _safe_int(lead_days),
+        "moq": _safe_int(moq),
         "decision": decision["decision"],
         "decision_at": decision["created_at"],
         "content": content,

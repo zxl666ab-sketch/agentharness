@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 
@@ -109,7 +109,11 @@ def test_pipeline_includes_knowledge_references_and_audit(data_dir: Path) -> Non
             assert reference.get(key) not in (None, "")
         assert reference["request_reference"] == "RFQ-20260601-HISTORY"
         assert reference["decision"] == "approved"
-        assert reference["chunk_id"] == "h" * 16
+        # chunk_id must be the full 64-hex chunk sha256: the feedback API
+        # (procurement/service.py) only accepts 64-hex ids, and the web UI
+        # sends chunk_id back verbatim as feedback.
+        assert reference["chunk_id"] == "h" * 64
+        assert len(reference["chunk_id"]) == 64
 
         detail = service.get_request(str(request["id"]))
         assert detail["knowledge_references"] == references
@@ -120,7 +124,7 @@ def test_pipeline_includes_knowledge_references_and_audit(data_dir: Path) -> Non
         payload = retrieved[0]["payload"]
         assert payload["count"] == 1
         assert payload["injected_count"] == 1
-        assert payload["references"][0]["chunk_id"] == "h" * 16
+        assert payload["references"][0]["chunk_id"] == "h" * 64
     finally:
         harness.close()
 

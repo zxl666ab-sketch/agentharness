@@ -38,6 +38,8 @@ _TIME_HALF_LIFE_DAYS = 180
 _MISSING_FIELD_PENALTY = Decimal("0.1")
 _LOW_QUALITY_SCORE = Decimal("0.6")
 _CONFLICT_QUALITY_SCORE = Decimal("0.7")
+_KEYWORD_BONUS = Decimal("0.1")
+_STRUCTURED_SCAN_PAGE_SIZE = 5_000
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -189,23 +191,36 @@ class Retriever:
         }
 
         structured_hits: dict[str, dict[str, Any]] = {}
-        for chunk in self.rag.list_chunks(limit=100_000):
-            if str(chunk.get("request_id")) == request_id:
-                continue
-            hits, matched, missing = _structured_hits(
-                request_specs,
-                chunk.get("specifications", {}),
-                size_tolerance_mm=size_tolerance,
-                thickness_tolerance_um=thickness_tolerance,
+        # Page through the whole index with a stable order; a single
+        # list_chunks(limit=100_000) call would silently drop anything older
+        # than the newest 100k rows.
+        scan_offset = 0
+        while True:
+            page = self.rag.list_chunks(
+                limit=_STRUCTURED_SCAN_PAGE_SIZE, offset=scan_offset
             )
-            if matched == 0:
-                continue
-            structured_hits[str(chunk["chunk_sha256"])] = {
-                **chunk,
-                "_spec_hits": hits,
-                "_spec_matched": matched,
-                "_spec_missing": missing,
-            }
+            if not page:
+                break
+            for chunk in page:
+                if str(chunk.get("request_id")) == request_id:
+                    continue
+                hits, matched, missing = _structured_hits(
+                    request_specs,
+                    chunk.get("specifications", {}),
+                    size_tolerance_mm=size_tolerance,
+                    thickness_tolerance_um=thickness_tolerance,
+                )
+                if matched == 0:
+                    continue
+                structured_hits[str(chunk["chunk_sha256"])] = {
+                    **chunk,
+                    "_spec_hits": hits,
+                    "_spec_matched": matched,
+                    "_spec_missing": missing,
+                }
+            scan_offset += len(page)
+            if len(page) < _STRUCTURED_SCAN_PAGE_SIZE:
+                break
 
         candidates: dict[str, dict[str, Any]] = {}
         for chunk_sha, chunk in keyword_hits.items():
@@ -232,9 +247,9 @@ class Retriever:
             structured_score = _spec_score(
                 int(chunk["_spec_matched"]), int(chunk["_spec_missing"])
             )
-            keyword_bonus = Decimal("1") if chunk_sha in keyword_hits else Decimal("0")
+            keyword_bonus = _KEYWORD_BONUS if chunk_sha in keyword_hits else Decimal("0")
             coarse.append(
-                (max(structured_score, keyword_bonus), chunk, chunk_sha)
+                (structured_score + keyword_bonus, chunk, chunk_sha)
             )
         coarse.sort(
             key=lambda item: (

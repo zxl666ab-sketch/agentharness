@@ -49,6 +49,8 @@ class ToolInvocationRepo:
                        result_json=excluded.result_json,
                        error_code=excluded.error_code,
                        error_category=excluded.error_category,
+                       arguments_json=excluded.arguments_json,
+                       arguments_sha256=excluded.arguments_sha256,
                        updated_at=excluded.updated_at,
                        started_at=COALESCE(excluded.started_at, tool_invocations.started_at),
                        finished_at=excluded.finished_at""",

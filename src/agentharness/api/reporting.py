@@ -15,6 +15,9 @@ _ACTIVE_STATUSES = {"pending", "running", "waiting_approval"}
 # The report carries the most recent event window for the timeline; verification
 # attempts, artifact discovery and the evidence hash still derive from the full log.
 _RECENT_EVENTS_LIMIT = 200
+# Bounded event window fed to the timeline. Kept as a module constant so tests
+# can shrink it without inserting tens of thousands of rows.
+_TIMELINE_EVENT_FETCH_LIMIT = 10_000
 
 
 def _event_type(event: EventEnvelope) -> str:
@@ -312,7 +315,7 @@ def build_run_timeline(
     run = runtime.get_run(run_id)
     if run is None:
         return None
-    events = runtime.get_events(run_id=run_id, limit=10_000)
+    events = runtime.storage.events.get_events_tail(run_id=run_id, limit=_TIMELINE_EVENT_FETCH_LIMIT)
     tools = runtime.list_tool_invocations(run_id)
     items: list[dict[str, Any]] = []
     for event in events:
@@ -357,11 +360,12 @@ def build_run_timeline(
     items.sort(key=lambda item: (item.get("at") or "", item.get("kind") or ""))
     total = len(items)
     retained = items[-limit:]
+    events_total = runtime.count_events(run_id)
     return {
         "run_id": run_id,
         "items": retained,
         "total": total,
-        "truncated": total > len(retained),
+        "truncated": total > len(retained) or events_total > len(events),
         "event_count": len(events),
         "tool_count": len(tools),
         "max_global_seq": max((event.global_seq for event in events), default=0),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -32,7 +33,19 @@ from agentharness.procurement import ProcurementService
 from agentharness.procurement.agent import ProcurementAgent
 
 LEASE_SWEEP_INTERVAL_S = 30.0
+STREAM_IDLE_TIMEOUT_S = 120.0
+MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024
 logger = logging.getLogger(__name__)
+
+
+def _is_loopback(host: str) -> bool:
+    """True for localhost / loopback literals; mirrors web_main without importing it."""
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 async def _sweep_expired_leases(harness: Harness, interval_s: float | None = None) -> None:
@@ -188,7 +201,6 @@ def create_app(
         if (
             request.method == "POST"
             and request.url.path.startswith("/api/procurement/")
-            and request.url.path != "/api/procurement/config"
             and not supervisor.execution_enabled
         ):
             return JSONResponse(
@@ -201,6 +213,21 @@ def create_app(
                 status_code=405,
                 headers={"Allow": "GET, HEAD, OPTIONS"},
             )
+        return await call_next(request)
+
+    @app.middleware("http")
+    async def limit_request_body(request: Request, call_next):  # type: ignore[no-untyped-def]
+        """Reject oversized request bodies before pydantic reads them into memory."""
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > MAX_REQUEST_BODY_BYTES:
+                    return JSONResponse(
+                        {"detail": "Request body too large"}, status_code=413
+                    )
+            except ValueError:
+                # Malformed header: let the server handle it downstream.
+                pass
         return await call_next(request)
 
     app.include_router(procurement_router(procurement, procurement_agent))
@@ -235,12 +262,16 @@ def create_app(
             limit=limit,
             offset=offset,
         )
+        total = runtime.storage.runs.count_runs(
+            session_id=session_id or None,
+            status=status or None,
+        )
         return public_redact(
             {
                 "items": items,
-                "total": len(items),
+                "total": total,
                 "offset": offset,
-                "has_more": len(items) == limit,
+                "has_more": offset + len(items) < total,
             }
         )
 
@@ -275,7 +306,7 @@ def create_app(
     @app.get("/api/runs/{run_id}/events")
     async def run_events(
         run_id: str,
-        offset: int = Query(0, ge=0),
+        offset: int = Query(0, ge=0, le=1_000_000),
         limit: int = Query(500, ge=1, le=2_000),
     ) -> dict[str, Any]:
         """Paginated timeline used when a run has more events than the report window."""
@@ -383,20 +414,23 @@ def create_app(
     async def stream(
         request: Request,
         last_event_id: str | None = Header(None, alias="Last-Event-ID"),
-        after: int | None = Query(None),
+        after: int | None = Query(None, ge=0),
     ) -> StreamingResponse:
-        cursor = runtime.storage.max_global_seq() if after is None else after
+        max_seq = runtime.storage.max_global_seq()
+        # Clamp an out-of-range after value so a stale client cannot request a
+        # cursor beyond the current event frontier and wedge the stream.
+        cursor = max_seq if after is None else min(after, max_seq)
         if last_event_id:
             with suppress(ValueError):
                 cursor = max(cursor, int(last_event_id))
 
         async def generate():  # type: ignore[no-untyped-def]
             nonlocal cursor
-            idle = 0
+            idle_seconds = 0.0
             while not await request.is_disconnected():
                 rows = runtime.get_events(after_global_seq=cursor, limit=200)
                 if rows:
-                    idle = 0
+                    idle_seconds = 0.0
                     for event in rows:
                         cursor = max(cursor, event.global_seq)
                         payload = public_redact(event.model_dump(mode="json"))
@@ -408,8 +442,13 @@ def create_app(
                     await asyncio.sleep(0.05)
                 else:
                     yield ": heartbeat\n\n"
-                    idle += 1
-                    if idle > 3 and request.headers.get("x-test-short-stream") == "1":
+                    idle_seconds += 0.25
+                    if (
+                        request.headers.get("x-test-short-stream") == "1"
+                        and idle_seconds > 0.75
+                    ):
+                        break
+                    if idle_seconds >= STREAM_IDLE_TIMEOUT_S:
                         break
                     await asyncio.sleep(0.25)
 
@@ -460,7 +499,17 @@ def serve(
     *,
     workspace_roots: list[str | Path] | None = None,
     execution_enabled: bool = True,
+    allow_remote_execution: bool = False,
 ) -> None:
+    # Mirror web_main.validate_bind() without importing web_main (which would
+    # create an import cycle): refuse a non-loopback bind unless the operator
+    # explicitly opts in and accepts the auth-proxy duty.
+    if not _is_loopback(host) and not allow_remote_execution:
+        raise SystemExit(
+            '拒绝启动：非回环绑定必须显式使用 --allow-remote-execution，'
+            '并在前面部署认证代理；否则所有接口（含报价原件与 SSE 事件）'
+            '都会在无认证下被网络访问。'
+        )
     import uvicorn
 
     uvicorn.run(

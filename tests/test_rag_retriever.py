@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date
 
@@ -284,3 +284,97 @@ def test_rag_material_canonical_matches_costing_word_boundary() -> None:
     )
     for value in cases:
         assert rag_material(value) == costing_material(value), value
+
+
+def test_retriever_keeps_older_perfect_spec_match_above_new_keyword_only_hits(
+    data_dir,
+) -> None:  # type: ignore[no-untyped-def]
+    """Regression: keyword_bonus=1 tied with a 6/6 spec score, so 20 newer
+    keyword-only hits (older decision_at tie-break) pushed the one perfect
+    historical match out of the top-20 coarse window."""
+    storage = Storage(data_dir)
+    try:
+        for idx in range(20):
+            storage.rag.upsert_chunk(
+                _chunk(
+                    f"{idx:064d}",
+                    item_name="快递袋",
+                    specifications={
+                        "width_mm": "500",
+                        "length_mm": "600",
+                        "thickness_um": "40",
+                        "material": "PP",
+                        "color": "黑色",
+                        "print_colors": 2,
+                    },
+                    decision_at=f"2026-07-{idx + 1:02d}T00:00:00+00:00",
+                )
+            )
+        perfect_sha = "p" * 64
+        storage.rag.upsert_chunk(
+            _chunk(perfect_sha, decision_at="2026-06-01T00:00:00+00:00")
+        )
+        retriever = Retriever(storage)
+        results = retriever.retrieve(request=_request(), now=date(2026, 7, 15))
+        assert any(item["chunk_sha256"] == perfect_sha for item in results)
+        assert results[0]["chunk_sha256"] == perfect_sha
+    finally:
+        storage.close()
+
+
+def test_retriever_pages_structured_scan_past_hard_cap(
+    data_dir, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Regression: structured recall used one list_chunks(limit=100_000) call,
+    so chunks older than the newest 100k rows were silently invisible. The
+    retriever must page with offsets until the index is fully scanned."""
+    from agentharness.rag import retriever as retriever_module
+
+    monkeypatch.setattr(retriever_module, "_STRUCTURED_SCAN_PAGE_SIZE", 20)
+    chunks: list[dict] = []
+    for idx in range(119):
+        chunks.append(
+            _chunk(
+                f"{idx:064d}",
+                item_name="快递袋",
+                specifications={
+                    "width_mm": "500",
+                    "length_mm": "600",
+                    "thickness_um": "40",
+                    "material": "PP",
+                    "color": "黑色",
+                    "print_colors": 2,
+                },
+                decision_at=f"2026-07-{idx % 28 + 1:02d}T00:00:00+00:00",
+            )
+        )
+    perfect_sha = "z" * 64
+    chunks.append(_chunk(perfect_sha, decision_at="2026-06-01T00:00:00+00:00"))
+
+    class _CappedRag:
+        """Mimics the old single-call LIMIT cap: one oversized call only sees
+        the first ``cap`` rows, while paged calls see everything."""
+
+        def __init__(self, rows: list[dict], cap: int = 60) -> None:
+            self._rows = rows
+            self._cap = cap
+            self.calls: list[tuple[int, int]] = []
+
+        def list_chunks(self, *, limit: int = 1000, offset: int = 0) -> list[dict]:
+            self.calls.append((limit, offset))
+            if limit >= 100_000:
+                return self._rows[offset : min(offset + limit, self._cap)]
+            return self._rows[offset : offset + limit]
+
+        def fts_search(self, query: str, *, limit: int = 100) -> list[dict]:
+            return []
+
+    class _FakeStorage:
+        def __init__(self, rag: _CappedRag) -> None:
+            self.rag = rag
+
+    fake = _CappedRag(chunks, cap=60)
+    retriever = Retriever(_FakeStorage(fake))
+    results = retriever.retrieve(request=_request(), now=date(2026, 7, 15))
+    assert any(item["chunk_sha256"] == perfect_sha for item in results)
+    assert max(offset for _limit, offset in fake.calls) >= 100

@@ -1,5 +1,8 @@
 import sqlite3
 from pathlib import Path
+from unittest import mock
+
+import pytest
 
 from agentharness.contracts import (
     EventEnvelope,
@@ -8,7 +11,10 @@ from agentharness.contracts import (
     MessageRole,
     RunStatus,
     ToolCall,
+    ToolInvocationRecord,
+    ToolInvocationStatus,
 )
+from agentharness.harness import Harness
 from agentharness.security.redaction import Redactor
 from agentharness.storage.sqlite import Storage
 
@@ -380,3 +386,499 @@ def test_storage_reads_with_relative_data_dir(tmp_path: Path, monkeypatch) -> No
         assert harness.storage.session_exists(session_id)
     finally:
         harness.close()
+
+
+# ------------------------------------------------------------- event paging
+
+
+def test_iter_events_after_pages_beyond_a_single_batch(data_dir: Path) -> None:
+    """iter_events_after must yield every event, not just the first 10k."""
+    store = Storage(data_dir)
+    try:
+        sid = store.create_session()
+        store.create_run(run_id="run-pages", session_id=sid, root_run_id="run-pages")
+        store.append_events(
+            [
+                EventEnvelope(
+                    session_id=sid,
+                    root_run_id="run-pages",
+                    run_id="run-pages",
+                    type=EventType.run_status,
+                    payload={"i": i},
+                )
+                for i in range(250)
+            ]
+        )
+        all_events = list(store.events.iter_events_after(page_size=100))
+        assert len(all_events) == 250
+        assert [event.payload["i"] for event in all_events] == list(range(250))
+
+        resumed = list(
+            store.events.iter_events_after(after_global_seq=150, page_size=100)
+        )
+        assert len(resumed) == 100
+        assert resumed[0].payload["i"] == 150
+        assert resumed[-1].payload["i"] == 249
+    finally:
+        store.close()
+
+
+def test_get_events_tail_returns_newest_window_ascending(data_dir: Path) -> None:
+    store = Storage(data_dir)
+    try:
+        sid = store.create_session()
+        store.create_run(run_id="run-tail", session_id=sid, root_run_id="run-tail")
+        store.append_events(
+            [
+                EventEnvelope(
+                    session_id=sid,
+                    root_run_id="run-tail",
+                    run_id="run-tail",
+                    type=EventType.run_status,
+                    payload={"i": i},
+                )
+                for i in range(25)
+            ]
+        )
+        tail = store.events.get_events_tail(run_id="run-tail", limit=10)
+        assert len(tail) == 10
+        assert [event.payload["i"] for event in tail] == list(range(15, 25))
+        assert [event.global_seq for event in tail] == sorted(
+            event.global_seq for event in tail
+        )
+        assert store.events.get_events_tail(run_id="run-tail", limit=0) == []
+        assert len(store.events.get_events_tail(run_id="run-tail", limit=100)) == 25
+    finally:
+        store.close()
+
+
+def test_run_timeline_uses_tail_and_marks_truncation(
+    data_dir: Path, monkeypatch
+) -> None:
+    """A run longer than the timeline's event fetch window must still show its
+    newest terminal events and set truncated correctly."""
+    from agentharness.api import reporting
+
+    monkeypatch.setattr(reporting, "_TIMELINE_EVENT_FETCH_LIMIT", 10)
+    harness = Harness(data_dir=data_dir)
+    try:
+        sid = harness.storage.create_session()
+        harness.storage.create_run(
+            run_id="timeline-run", session_id=sid, root_run_id="timeline-run"
+        )
+        harness.storage.append_events(
+            [
+                EventEnvelope(
+                    session_id=sid,
+                    root_run_id="timeline-run",
+                    run_id="timeline-run",
+                    type=EventType.run_status,
+                    payload={"i": i},
+                )
+                for i in range(25)
+            ]
+        )
+        timeline = reporting.build_run_timeline(harness, "timeline-run")
+        assert timeline is not None
+        assert timeline["event_count"] == 10
+        assert timeline["truncated"] is True
+        assert timeline["max_global_seq"] == 25
+        event_seqs = [
+            item["seq"] for item in timeline["items"] if item["kind"] == "event"
+        ]
+        assert 25 in event_seqs  # newest terminal event retained
+    finally:
+        harness.close()
+
+
+# ------------------------------------------------------------- artifacts
+
+
+def test_artifacts_reject_traversal_sha_values(data_dir: Path) -> None:
+    store = Storage(data_dir)
+    try:
+        with pytest.raises(ValueError, match="invalid sha256"):
+            store.artifacts.get_bytes("../../secret")
+        with pytest.raises(ValueError, match="invalid sha256"):
+            store.artifacts.get_text("../..")
+        with pytest.raises(ValueError, match="invalid sha256"):
+            store.artifacts.get_bytes("A" * 64)
+        with pytest.raises(ValueError, match="invalid sha256"):
+            store.artifacts.get_bytes("a" * 63)
+        meta = store.artifacts.put("payload")
+        assert store.artifacts.get_text(meta["sha256"]) == "payload"
+    finally:
+        store.close()
+
+
+def test_register_artifact_returns_stored_id_on_lost_race(data_dir: Path) -> None:
+    """INSERT OR IGNORE can lose a concurrent race; the returned id must be
+    the id actually stored, never a ghost uuid that is absent from the table."""
+    store = Storage(data_dir)
+    try:
+        first = store.artifacts.put("race body")
+        existing_id = store.register_artifact(first)
+        second = dict(first)
+        second["id"] = "ghost-id"
+
+        class _RaceConnection:
+            def __init__(self, real: object) -> None:
+                self._real = real
+                self._selects = 0
+
+            def execute(self, sql: str, *args: object):  # type: ignore[no-untyped-def]
+                if str(sql).startswith("SELECT id FROM artifacts WHERE sha256"):
+                    self._selects += 1
+                    if self._selects == 1:
+                        # Simulate another process inserting between our first
+                        # SELECT and the INSERT OR IGNORE: the first SELECT
+                        # misses, the INSERT loses the race.
+                        return mock.Mock(fetchone=lambda: None)
+                return self._real.execute(sql, *args)  # type: ignore[attr-defined]
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._real, name)
+
+        original = store.artifact_index._conn  # noqa: SLF001 - white-box
+        store.artifact_index._conn = _RaceConnection(original)  # type: ignore[assignment]  # noqa: SLF001
+        try:
+            returned = store.register_artifact(second)
+        finally:
+            store.artifact_index._conn = original  # type: ignore[assignment]  # noqa: SLF001
+        assert returned == existing_id
+        assert returned != "ghost-id"
+        assert store.get_artifact(returned) is not None
+    finally:
+        store.close()
+
+
+# ------------------------------------------------------------- approvals
+
+
+def test_save_approval_conflict_preserves_resolution_audit(data_dir: Path) -> None:
+    store = Storage(data_dir)
+    try:
+        sid = store.create_session()
+        store.create_run(run_id="approval-run", session_id=sid, root_run_id="approval-run")
+        pending = {
+            "id": "approval-1",
+            "run_id": "approval-run",
+            "tool_call_id": "tool-1",
+            "tool_name": "write_file",
+            "effect": "workspace_write",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+        store.save_approval(pending)
+        resolved = {
+            **pending,
+            "decision": "allow",
+            "status": "resolved",
+            "resolved_at": "2026-01-02T00:00:00+00:00",
+        }
+        store.save_approval(resolved)
+        row = store.approvals.list_approvals("approval-run")[0]
+        assert row["decision"] == "allow"
+        assert row["status"] == "resolved"
+        assert row["resolved_at"] == "2026-01-02T00:00:00+00:00"
+        assert row["created_at"] == "2026-01-01T00:00:00+00:00"
+
+        # A stale pending re-save must never wipe the resolution audit trail.
+        store.save_approval(pending)
+        row = store.approvals.list_approvals("approval-run")[0]
+        assert row["decision"] == "allow"
+        assert row["status"] == "resolved"
+        assert row["resolved_at"] == "2026-01-02T00:00:00+00:00"
+        assert row["created_at"] == "2026-01-01T00:00:00+00:00"
+    finally:
+        store.close()
+
+
+def test_expire_pending_for_run_expires_only_pending(data_dir: Path) -> None:
+    store = Storage(data_dir)
+    try:
+        sid = store.create_session()
+        store.create_run(
+            run_id="approval-expire", session_id=sid, root_run_id="approval-expire"
+        )
+        for i in range(3):
+            store.save_approval(
+                {
+                    "id": f"pending-{i}",
+                    "run_id": "approval-expire",
+                    "tool_call_id": "tool-1",
+                    "tool_name": "write_file",
+                    "effect": "workspace_write",
+                }
+            )
+        store.save_approval(
+            {
+                "id": "resolved-1",
+                "run_id": "approval-expire",
+                "tool_call_id": "tool-1",
+                "tool_name": "write_file",
+                "effect": "workspace_write",
+                "decision": "allow",
+                "status": "resolved",
+                "resolved_at": "2026-01-01T00:00:00+00:00",
+            }
+        )
+        assert store.approvals.expire_pending_for_run("approval-expire") == 3
+        rows = {
+            approval["id"]: approval
+            for approval in store.approvals.list_approvals("approval-expire")
+        }
+        assert rows["pending-0"]["status"] == "expired"
+        assert rows["pending-0"]["resolved_at"] is not None
+        assert rows["resolved-1"]["status"] == "resolved"
+        assert rows["resolved-1"]["decision"] == "allow"
+        assert rows["resolved-1"]["resolved_at"] == "2026-01-01T00:00:00+00:00"
+        assert store.approvals.expire_pending_for_run("approval-expire") == 0
+    finally:
+        store.close()
+
+
+# ------------------------------------------------------------- procurement
+
+
+def _tree_chunk() -> dict:
+    created = "2026-01-01T00:00:00+00:00"
+    return {
+        "chunk_sha256": "d" * 64,
+        "request_id": "req-tree",
+        "quote_id": "quote-tree",
+        "artifact_id": "art-1",
+        "artifact_sha256": "e" * 64,
+        "request_reference": "RFQ-TREE",
+        "supplier_name": "华东优包",
+        "item_name": "快递袋",
+        "category": "ecommerce_packaging",
+        "specifications": {"material": "PE", "color": "白色"},
+        "unit_price": "0.42",
+        "currency": "CNY",
+        "landed_unit_cost": "0.45",
+        "lead_days": 10,
+        "moq": 5000,
+        "decision": "approved",
+        "decision_at": created,
+        "content": "RFQ-TREE 快递袋",
+        "quality_flags": [],
+        "created_at": created,
+        "updated_at": created,
+    }
+
+
+def _seed_procurement_tree(store: Storage, *, with_decision: bool = True) -> None:
+    created = "2026-01-01T00:00:00+00:00"
+    sid = store.create_session("delete-session")
+    store.create_run(run_id="delete-run", session_id=sid, root_run_id="delete-run")
+    conn = store._conn  # noqa: SLF001 - white-box seed
+    conn.execute(
+        """INSERT INTO artifacts(id, sha256, content_type, size_bytes, summary, path, created_at)
+           VALUES(?,?,?,?,?,?,?)""",
+        ("art-1", "a" * 64, "application/pdf", 10, "sum", "/tmp/art-1", created),
+    )
+    conn.execute(
+        """INSERT INTO procurement_requests(
+               id, reference, title, category, item_name, quantity, unit,
+               specifications_json, constraints_json, status, session_id,
+               created_at, updated_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "req-tree",
+            "RFQ-TREE",
+            "t",
+            "c",
+            "item",
+            1,
+            "piece",
+            "{}",
+            "{}",
+            "draft",
+            sid,
+            created,
+            created,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO procurement_quotes(
+               id, request_id, supplier_name, source_filename, source_kind,
+               source_artifact_id, source_sha256, extracted_json, status,
+               review_count, parser_version, processing_ms, created_at, updated_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "quote-tree",
+            "req-tree",
+            "华东优包",
+            "f.xlsx",
+            "xlsx",
+            "art-1",
+            "b" * 64,
+            "{}",
+            "parsed",
+            0,
+            "1",
+            0,
+            created,
+            created,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO procurement_comparison_snapshots(
+               id, request_id, run_id, version, input_sha256, result_json,
+               artifact_id, created_at
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        ("snap-tree", "req-tree", "delete-run", 1, "c" * 64, "{}", "art-1", created),
+    )
+    if with_decision:
+        conn.execute(
+            """INSERT INTO procurement_decisions(
+                   id, request_id, snapshot_id, quote_id, run_id, approval_id,
+                   decision, note, actor, created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "dec-tree",
+                "req-tree",
+                "snap-tree",
+                "quote-tree",
+                "delete-run",
+                None,
+                "approved",
+                None,
+                "actor",
+                created,
+            ),
+        )
+    conn.execute(
+        """INSERT INTO procurement_audit_events(
+               id, request_id, quote_id, run_id, type, actor, payload_json, created_at
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        (
+            "audit-tree",
+            "req-tree",
+            "quote-tree",
+            "delete-run",
+            "supplier_approved",
+            "actor",
+            "{}",
+            created,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO procurement_purchase_orders(
+               id, request_id, po_number, payload_json, created_at
+           ) VALUES(?,?,?,?,?)""",
+        ("po-tree", "req-tree", "PO-1", "{}", created),
+    )
+    store.rag.upsert_chunk(_tree_chunk())
+
+
+def test_delete_request_tree_is_atomic(data_dir: Path) -> None:
+    """A mid-way delete failure must roll back the whole request tree."""
+    store = Storage(data_dir)
+    try:
+        _seed_procurement_tree(store)
+        with store._lock:  # noqa: SLF001 - trigger fault injection
+            store._conn.execute(  # noqa: SLF001
+                """CREATE TRIGGER fail_delete_tree
+                   BEFORE DELETE ON procurement_audit_events
+                   BEGIN
+                       SELECT RAISE(ABORT, 'forced delete failure');
+                   END"""
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="forced delete failure"):
+            store.procurement.delete_request_tree("req-tree")
+        assert store.procurement.get_request("req-tree") is not None
+        assert len(store.procurement.list_quotes("req-tree")) == 1
+        assert store.procurement.get_decision("req-tree") is not None
+        assert store.rag.count_chunks() == 1
+
+        with store._lock:  # noqa: SLF001
+            store._conn.execute("DROP TRIGGER fail_delete_tree")  # noqa: SLF001
+        store.procurement.delete_request_tree("req-tree")
+        assert store.procurement.get_request("req-tree") is None
+        assert store.rag.count_chunks() == 0
+    finally:
+        store.close()
+
+
+def test_commit_decision_joins_caller_transaction(data_dir: Path) -> None:
+    """commit_decision must not BEGIN inside an open transaction."""
+    store = Storage(data_dir)
+    try:
+        _seed_procurement_tree(store, with_decision=False)
+        decision = {
+            "id": "dec-2",
+            "request_id": "req-tree",
+            "snapshot_id": "snap-tree",
+            "quote_id": "quote-tree",
+            "run_id": "delete-run",
+            "approval_id": None,
+            "decision": "approved",
+            "note": None,
+            "actor": "buyer",
+            "created_at": "2026-02-01T00:00:00+00:00",
+        }
+        audit = {
+            "id": "audit-2",
+            "request_id": "req-tree",
+            "quote_id": "quote-tree",
+            "run_id": "delete-run",
+            "type": "supplier_approved",
+            "actor": "buyer",
+            "payload": {},
+            "created_at": "2026-02-01T00:00:00+00:00",
+        }
+        with store._lock:  # noqa: SLF001
+            store._conn.execute("BEGIN")  # noqa: SLF001
+            try:
+                store.procurement.commit_decision(decision, audit)
+                assert store._conn.in_transaction is True  # noqa: SLF001
+            finally:
+                store._conn.execute("COMMIT")  # noqa: SLF001
+        stored = store.procurement.get_decision("req-tree")
+        assert stored is not None
+        assert stored["decision"] == "approved"
+    finally:
+        store.close()
+
+
+# ------------------------------------------------------------- tool invocations
+
+
+def test_save_tool_invocation_conflict_refreshes_arguments(data_dir: Path) -> None:
+    """Re-saving an invocation with changed arguments must refresh the stored
+    arguments identity instead of keeping the stale first-write values."""
+    store = Storage(data_dir)
+    try:
+        sid = store.create_session()
+        store.create_run(run_id="tool-run", session_id=sid, root_run_id="tool-run")
+        first = ToolInvocationRecord(
+            id="inv-1",
+            run_id="tool-run",
+            session_id=sid,
+            step=1,
+            ordinal=2,
+            provider_call_id="p-1",
+            tool_name="read_file",
+            arguments={"path": "a.txt"},
+            arguments_sha256="hash-a",
+        )
+        second = first.model_copy(
+            update={
+                "arguments": {"path": "b.txt"},
+                "arguments_sha256": "hash-b",
+                "status": ToolInvocationStatus.succeeded,
+            }
+        )
+        store.save_tool_invocation(first)
+        store.save_tool_invocation(second)
+        restored = store.get_tool_invocation("inv-1")
+        assert restored is not None
+        assert restored.arguments == {"path": "b.txt"}
+        assert restored.arguments_sha256 == "hash-b"
+        assert restored.status == ToolInvocationStatus.succeeded
+        assert restored.run_id == "tool-run"
+        assert restored.step == 1
+        assert restored.ordinal == 2
+    finally:
+        store.close()

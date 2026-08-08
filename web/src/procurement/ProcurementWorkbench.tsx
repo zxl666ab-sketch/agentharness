@@ -24,6 +24,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useAgentStream } from "../useAgentStream";
+import { api } from "../api/client";
 import { AuditView } from "./AuditView";
 import { friendlyProcurementError, procurementApi } from "./api";
 import { ComparisonView } from "./ComparisonView";
@@ -44,6 +45,7 @@ import type {
 type Props = {
   theme: "light" | "dark";
   backendVersion: string;
+  maxGlobalSeq?: number;
   onToggleTheme: () => void;
 };
 
@@ -119,7 +121,12 @@ function configFormFrom(config: ProcurementModelConfig): ProcurementModelConfigU
   };
 }
 
-export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: Props) {
+export function ProcurementWorkbench({
+  theme,
+  backendVersion,
+  maxGlobalSeq = 0,
+  onToggleTheme,
+}: Props) {
   const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("quotes");
@@ -152,7 +159,9 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     queryFn: () => procurementApi.report(selectedId!),
     enabled: !!selectedId && activeTab === "report" && !!detailQuery.data?.decision,
   });
-  const stream = useAgentStream(true, 0);
+  // Start from the last event the backend already has (from /api/health) so a
+  // page load does not replay the full event history through SSE.
+  const stream = useAgentStream(true, maxGlobalSeq);
   const streamRefreshTimer = useRef<number | null>(null);
 
   const requests = useMemo(() => requestsQuery.data || [], [requestsQuery.data]);
@@ -217,6 +226,26 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
       setBusy((current) => (current === "analyze" ? null : current));
     }
   }, [currentRunId, latestEvent]);
+
+  // Low-frequency poll of the current run while it is active: if the SSE
+  // terminal event was missed (reload, reconnect, concurrent runs), the busy
+  // state still clears once the request poll observes the terminal status.
+  const runStatusQuery = useQuery({
+    queryKey: ["procurement-run", currentRunId],
+    queryFn: () => api.run(currentRunId!),
+    enabled: !!currentRunId && busy === "analyze",
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      if (!status || TERMINAL_RUN_STATUSES.includes(status)) return false;
+      return stream.status === "live" ? 5000 : 750;
+    },
+  });
+  useEffect(() => {
+    const status = runStatusQuery.data?.status;
+    if (busy === "analyze" && status && TERMINAL_RUN_STATUSES.includes(status)) {
+      setBusy(null);
+    }
+  }, [busy, runStatusQuery.data?.status]);
 
   useEffect(() => () => {
     if (streamRefreshTimer.current !== null) window.clearTimeout(streamRefreshTimer.current);
