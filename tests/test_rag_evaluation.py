@@ -26,6 +26,22 @@ def test_evaluate_frozen_is_reproducible() -> None:
     ][:10]
 
 
+def test_frozen_rag_aggregates_are_locked() -> None:
+    """Lock the published frozen RAG metrics so retriever weight changes or
+    canonicalization drift fail CI instead of silently going stale in README."""
+    aggregates = evaluate_frozen()["aggregates"]
+    assert aggregates == {
+        "recall@1": 0.0714,
+        "precision@1": 0.9286,
+        "recall@3": 0.1429,
+        "precision@3": 0.9048,
+        "recall@5": 0.2143,
+        "precision@5": 0.9,
+        "mrr": 0.9464,
+        "top1_hit_rate": 0.9286,
+    }
+
+
 def test_report_renders_metrics_and_sections() -> None:
     result = evaluate_frozen()
     report = render_report(result, None)
