@@ -490,7 +490,9 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
       const updated = await procurementApi.updateConfig(payload);
       queryClient.setQueryData(["procurement-config"], updated);
       setConfigForm(configFormFrom(updated));
-      setConfigNotice("已保存到本地服务配置，重启后会自动恢复。 ");
+      setConfigNotice(
+        "已保存到本地会话配置；检测到 .env 模型配置时，重启后仍以 .env 为准。"
+      );
     } catch (error) {
       setConfigError(errorText(error));
     } finally {

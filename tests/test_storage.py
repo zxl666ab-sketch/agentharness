@@ -1,4 +1,5 @@
 import sqlite3
+from pathlib import Path
 
 from agentharness.contracts import (
     EventEnvelope,
@@ -359,3 +360,23 @@ def test_tool_calls_json_is_recursively_redacted_before_sqlite_write(data_dir):
     assert sentinel not in raw
     assert "[REDACTED_SENTINEL]" in raw
     store.close()
+
+
+def test_storage_reads_with_relative_data_dir(tmp_path: Path, monkeypatch) -> None:
+    """Regression: the CLI accepts relative --data-dir (e.g. output/...).
+
+    The read-only connection URI must resolve the path before as_uri();
+    Path.as_uri() raises ValueError on relative paths, which made every read
+    endpoint (including /api/health) return 500 in real startup.
+    """
+    from agentharness.harness import Harness
+
+    monkeypatch.chdir(tmp_path)
+    harness = Harness(data_dir=Path("data"))
+    try:
+        # writer + reader both work under a relative data_dir
+        assert harness.storage.max_global_seq() == 0
+        session_id = harness.storage.create_session(title="relative-dir")
+        assert harness.storage.session_exists(session_id)
+    finally:
+        harness.close()

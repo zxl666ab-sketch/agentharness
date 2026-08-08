@@ -55,7 +55,9 @@ class StorageCore:
             conn = sqlite3.connect(
                 # as_uri() percent-encodes '#'/'?' so data_dir names containing
                 # them no longer break the URI (previously treated as fragment).
-                self.db_path.as_uri() + "?mode=ro",
+                # resolve() first: Path.as_uri() rejects relative paths, and the
+                # CLI allows relative --data-dir (e.g. output/...).
+                self.db_path.resolve().as_uri() + "?mode=ro",
                 uri=True,
                 check_same_thread=False,
                 isolation_level=None,

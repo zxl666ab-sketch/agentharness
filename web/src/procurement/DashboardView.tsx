@@ -13,15 +13,23 @@ import { useMemo } from "react";
 
 import { api } from "../api/client";
 
-function formatCost(value: number) {
+function formatCost(value: number | null) {
+  if (value == null) return "未知";
   return `$${value.toFixed(4)}`;
+}
+
+function formatDuration(ms: number | null) {
+  if (ms == null) return "—";
+  if (ms < 1_000) return `${ms} ms`;
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(1)} s`;
+  return `${(ms / 60_000).toFixed(1)} 分钟`;
 }
 
 function formatTokens(value: number) {
   return value.toLocaleString("zh-CN");
 }
 
-function downloadCsv(rows: Array<Record<string, string | number>>, filename: string) {
+function downloadCsv(rows: Array<Record<string, string | number | boolean | null>>, filename: string) {
   const header = Object.keys(rows[0] || {}).join(",");
   const body = rows
     .map((row) =>
@@ -73,6 +81,7 @@ export function DashboardView() {
         // malformed usage is ignored
       }
       const cost = usage.estimated_cost_usd;
+      const costKnown = typeof cost === "number" && usage.cost_status !== "unknown";
       return {
         run_id: run.id,
         status: run.status,
@@ -80,7 +89,8 @@ export function DashboardView() {
         model: run.model || "—",
         created_at: run.created_at,
         total_tokens: Number(usage.total_tokens || 0),
-        cost_usd: typeof cost === "number" ? cost : 0,
+        cost_usd: costKnown ? (cost as number) : 0,
+        cost_known: costKnown,
       };
     });
   }, [runsQuery.data]);
@@ -103,11 +113,11 @@ export function DashboardView() {
 
       <section className="proc-dashboard-cards">
         <div className="proc-dash-card"><span><Database size={16} />运行总数</span><strong>{metrics?.runs ?? "—"}</strong></div>
-        <div className="proc-dash-card"><span><DollarSign size={16} />估算成本</span><strong>{metrics ? formatCost(metrics.estimated_cost_usd) : "—"}</strong></div>
+        <div className="proc-dash-card"><span><DollarSign size={16} />估算成本</span><strong>{metrics ? (metrics.cost_unknown_runs > 0 ? "未知" : formatCost(metrics.estimated_cost_usd)) : "—"}</strong></div>
         <div className="proc-dash-card"><span><Zap size={16} />Token 总量</span><strong>{metrics ? formatTokens(metrics.tokens.total) : "—"}</strong></div>
         <div className="proc-dash-card"><span><FlaskConical size={16} />模型回合</span><strong>{metrics?.model_turns ?? "—"}</strong></div>
         <div className="proc-dash-card"><span><TrendingUp size={16} />缓存命中率</span><strong>{metrics?.cache_hit_rate != null ? `${(metrics.cache_hit_rate * 100).toFixed(1)}%` : "—"}</strong></div>
-        <div className="proc-dash-card"><span><Clock3 size={16} />平均耗时</span><strong>{metrics?.avg_duration_ms != null ? `${metrics.avg_duration_ms} ms` : "—"}</strong></div>
+        <div className="proc-dash-card"><span><Clock3 size={16} />平均耗时</span><strong>{formatDuration(metrics?.avg_duration_ms ?? null)}</strong></div>
       </section>
 
       {metrics ? (
@@ -150,7 +160,7 @@ export function DashboardView() {
                 <td>{row.model}</td>
                 <td>{new Date(row.created_at).toLocaleString("zh-CN")}</td>
                 <td>{formatTokens(row.total_tokens)}</td>
-                <td>{formatCost(row.cost_usd)}</td>
+                <td>{row.cost_known ? formatCost(row.cost_usd) : "未知"}</td>
               </tr>
             ))}
             {!rows.length && !runsQuery.isPending ? (
