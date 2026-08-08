@@ -32,12 +32,18 @@ def _canonical_item(value: Any) -> str | None:
     groups = {
         "mailer": ("快递袋", "快递包装袋", "mailer", "mailing bag", "courier bag"),
         "trash_bag": ("垃圾袋", "trash bag", "garbage bag", "bin liner"),
+        # 电商包装耗材已支持的其余品类：
+        # 纸箱 / 气泡膜 / 缠绕膜 / 封箱胶带 / 珍珠棉
+        "carton": ("纸箱", "包装箱", "carton", "corrugated", "box"),
+        "bubble": ("气泡膜", "气泡袋", "气泡垫", "bubble wrap", "bubble film", "bubble"),
+        "stretch": ("缠绕膜", "拉伸膜", "stretch film", "stretch wrap", "stretch"),
+        "tape": ("封箱胶带", "胶带", "tape"),
+        "foam": ("珍珠棉", "epe", "pe foam", "foam"),
     }
     return next(
         (identity for identity, aliases in groups.items() if any(alias in text for alias in aliases)),
         None,
     )
-
 
 def _canonical_material(value: Any) -> str | None:
     text = str(value or "").strip().casefold()
@@ -45,14 +51,15 @@ def _canonical_material(value: Any) -> str | None:
         "PE": ("pe", "聚乙烯", "polyethylene"),
         "PVC": ("pvc", "聚氯乙烯", "polyvinyl chloride"),
         "PP": ("pp", "聚丙烯", "polypropylene"),
-        "PET": ("pet", "聚对苯二甲酸乙二醇酯"),
+        "PET": ("pet", "聚对苯二甲酸乙二醇"),
         "PLA": ("pla", "聚乳酸"),
+        "corrugated": ("瓦楞", "corrugated", "cardboard"),
+        "kraft": ("牛皮", "kraft"),
     }
     for canonical, values in aliases.items():
         if any(re.search(rf"(?<![a-z]){re.escape(alias)}(?![a-z])", text) for alias in values):
             return canonical
     return None
-
 
 def _canonical_color(value: Any) -> str | None:
     text = str(value or "").strip().casefold()
@@ -62,12 +69,12 @@ def _canonical_color(value: Any) -> str | None:
         "transparent": ("透明", "transparent", "clear"),
         "red": ("红色", "红", "red"),
         "blue": ("蓝色", "蓝", "blue"),
+        "kraft": ("牛皮色", "牛皮", "牛卡", "kraft"),
     }
     return next(
         (canonical for canonical, values in aliases.items() if any(alias in text for alias in values)),
         None,
     )
-
 
 def _decimal(value: Any, field: str) -> Decimal:
     try:

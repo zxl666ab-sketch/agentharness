@@ -880,15 +880,15 @@ class ProcurementFakeProvider:
             constraints["max_landed_unit_cost"] = max_unit_cost.group(1)
         return {
             "title": "快递袋采购询价",
-            "item_name": "快递袋" if "快递袋" in text else "包装耗材",
+            "item_name": "五层瓦楞纸箱" if "瓦楞纸箱" in text else "快递袋" if "快递袋" in text else "包装耗材",
             "quantity": quantity,
             "unit": "piece",
             "specifications": {
                 "width_mm": width,
                 "length_mm": length,
                 "thickness_um": thickness,
-                "material": "PE" if re.search(r"(?<![A-Za-z0-9])PE(?![A-Za-z0-9])", text, re.IGNORECASE) else "未说明",
-                "color": "白色" if "白色" in text else "未说明",
+                "material": "瓦楞纸" if "瓦楞" in text else "PE" if re.search(r"(?<![A-Za-z0-9])PE(?![A-Za-z0-9])", text, re.IGNORECASE) else "未说明",
+                "color": "牛皮色" if "牛皮" in text else "白色" if "白色" in text else "未说明",
                 "print_colors": 1 if "单色" in text else 0,
             },
             "constraints": constraints,

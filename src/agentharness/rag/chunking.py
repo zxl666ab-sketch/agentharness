@@ -26,7 +26,9 @@ _MATERIAL_ALIASES: dict[str, tuple[str, ...]] = {
     "PP": ("pp", "聚丙烯", "polypropylene"),
     "PET": ("pet", "聚对苯二甲酸乙二醇酯"),
     "PLA": ("pla", "聚乳酸"),
-}
+
+    "corrugated": ("瓦楞", "corrugated", "cardboard"),
+    "kraft": ("牛皮", "kraft"),}
 
 _COLOR_ALIASES: dict[str, tuple[str, ...]] = {
     "white": ("白色", "白", "white"),
@@ -34,7 +36,8 @@ _COLOR_ALIASES: dict[str, tuple[str, ...]] = {
     "transparent": ("透明", "transparent", "clear"),
     "red": ("红色", "红", "red"),
     "blue": ("蓝色", "蓝", "blue"),
-}
+
+    "kraft": ("牛皮色", "牛皮", "牛卡", "kraft"),}
 
 
 def canonical_material(value: Any) -> str | None:

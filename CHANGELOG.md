@@ -6,6 +6,7 @@ All notable changes are documented here. The project follows semantic versioning
 
 ### Fixed
 
+- 识别枚举扩展：将纸箱(瓦楞纸箱)/气泡膜/缠绕膜/封箱胶带/珍珠棉品类、瓦楞纸/牛皮纸材质、牛皮色颜色纳入可复核范围，fail-closed 仅作用于真正无法识别的值，修复“五层瓦楞纸箱”等合法询价被全部淘汰的问题（含回归测试）。
 - 对抗式审查修复（多子代理并行审查）：
   - 引擎：压缩仅标记摘要器真正完整看到的消息，不再丢失未覆盖内容；`resume()` 异常终态化避免卡死 running；`interrupt()` 对终态 run 无效；AI 验证器 usage 入账并给流加超时；工具重试 max_attempts 跨 resume 为硬上限；委托深度/并发执行预算；上下文外部化失败不再静默丢消息；会话标题截断；关闭时等待活跃 run 与分析线程；cancel/interrupt 失效未决审批。
   - 采购：未识别物料/材质/颜色改为 fail-closed（不再静默放行）；运费“到付/自付/另算”与包邮共现强制人工复核；PO CSV 与仪表盘 CSV 公式注入防护；并发修正/比价竞态 fail-closed；并发 /analyze 单飞；PDF 页数/提取字数上限；人工修正值长度上限；no_award 改用当日复算；导入失败不留孤儿 artifact；PO 单价×数量=总额；demo 清理不删 run 不可见请求；采购 GET 统一脱敏；币种代码校验 [A-Z]{3}。

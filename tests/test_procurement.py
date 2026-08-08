@@ -4378,12 +4378,12 @@ def test_unrecognized_required_material_color_are_fail_closed() -> None:
     must not be silently skipped; both PE and PP quotes must be ineligible with
     a spec_material/spec_color exclusion (never eligible=True with no exclusion).
     (需求值如 HDPE / 牛皮色 不在可识别枚举内；注意“米白”会被现有别名识别为白色，
-    因此这里用真正无法识别的“牛皮色”。)"""
+    因此这里用真正无法识别的“荧光黄”。)"""
     truth = load_frozen_truth()
     request = json.loads(json.dumps(truth["request"]))
     request["id"] = "hdpe-request"
     request["specifications"]["material"] = "HDPE"
-    request["specifications"]["color"] = "牛皮色"
+    request["specifications"]["color"] = "荧光黄"
 
     def quote(quote_id: str, supplier: str, description: str, material: str, color: str) -> dict:
         values = {
@@ -4439,7 +4439,7 @@ def test_unidentifiable_item_name_is_fail_closed() -> None:
     truth = load_frozen_truth()
     request = json.loads(json.dumps(truth["request"]))
     request["id"] = "bubble-request"
-    request["item_name"] = "气泡膜"
+    request["item_name"] = "太空袋"
     request["specifications"]["material"] = "PE"
 
     def quote(quote_id: str, supplier: str, description: str) -> dict:
@@ -4476,8 +4476,8 @@ def test_unidentifiable_item_name_is_fail_closed() -> None:
     result = compare_quotes(
         request,
         [
-            quote("bq1", "气泡膜厂甲", "PE 气泡膜 600mm 50m 90um"),
-            quote("bq2", "气泡膜厂乙", "PE 气泡膜 600mm 50m 90um"),
+            quote("bq1", "气泡膜厂甲", "PE 太空袋 600mm 50m 90um"),
+            quote("bq2", "气泡膜厂乙", "PE 太空袋 600mm 50m 90um"),
         ],
         analysis_as_of="2026-07-27",
     )
@@ -4487,6 +4487,95 @@ def test_unidentifiable_item_name_is_fail_closed() -> None:
             reason["code"] == "item_identity" for reason in item["exclusion_reasons"]
         ), item["exclusion_reasons"]
 
+
+
+def test_carton_requirement_is_verifiable_and_recommends() -> None:
+    """Regression (2026-08-08): the fail-closed identity checks must recognize
+    the documented packaging taxonomy (five-layer corrugated carton / kraft /
+    corrugated board). A carton RFQ must yield a recommendation instead of
+    rejecting every quote with 'cannot verify item/material/color'."""
+    from agentharness.procurement.costing import compare_quotes
+
+    request = {
+        "id": "carton-request",
+        "item_name": "五层瓦楞纸箱",
+        "quantity": 5000,
+        "unit": "piece",
+        "specifications": {
+            "width_mm": "400",
+            "length_mm": "300",
+            "thickness_um": "5000",
+            "material": "瓦楞纸",
+            "color": "牛皮色",
+            "print_colors": 1,
+        },
+        "constraints": {
+            "base_currency": "CNY",
+            "fx_rates": {"CNY": "1", "USD": "7.2"},
+            "max_lead_days": 20,
+            "invoice_required": True,
+            "size_tolerance_mm": "3",
+            "thickness_tolerance_um": "500",
+            "max_landed_unit_cost": "3.50",
+        },
+    }
+
+    def quote(quote_id: str, supplier: str, *, invoice: bool, unit_price: str,
+              currency: str = "CNY", freight: str = "0", shipping_included: bool = True,
+              moq: int = 5000, lead: int = 15) -> dict:
+        values = {
+            "supplier_name": supplier,
+            "item_description": "五层瓦楞纸箱 400x300x250mm 5000um 牛皮色 单色印刷",
+            "material": "瓦楞纸",
+            "color": "牛皮色",
+            "print_colors": 1,
+            "currency": currency,
+            "unit_price": unit_price,
+            "price_basis": 1,
+            "tax_rate": "0.13",
+            "tax_included": True,
+            "shipping_fee": freight,
+            "shipping_included": shipping_included,
+            "moq": moq,
+            "lead_time_days": lead,
+            "supports_invoice": invoice,
+            "width_mm": "400",
+            "length_mm": "300",
+            "thickness_um": "5000",
+            "valid_until": "2026-12-31",
+        }
+        return {
+            "id": quote_id,
+            "supplier_name": supplier,
+            "source_sha256": quote_id * 8,
+            "extracted": {
+                "fields": {name: {"value": value} for name, value in values.items()}
+            },
+        }
+
+    zj = quote("zj", "浙江箱业", invoice=True, unit_price="3.20")
+    hn = quote("hn", "沪宁纸品", invoice=True, unit_price="3.45")
+    south = quote("south", "华南纸业", invoice=False, unit_price="0.38",
+                  currency="USD", freight="300")
+
+    result = compare_quotes(
+        request,
+        [hn, south, zj],
+        analysis_as_of="2026-08-08",
+    )
+    by_id = {item["quote_id"]: item for item in result["quotes"]}
+    assert by_id["zj"]["eligible"] is True, by_id["zj"]["exclusion_reasons"]
+    assert by_id["hn"]["eligible"] is True, by_id["hn"]["exclusion_reasons"]
+    assert by_id["south"]["eligible"] is False
+    codes = {r["code"] for r in by_id["south"]["exclusion_reasons"]}
+    assert "invoice" in codes
+    # Identity checks must now be verifiable, not 'cannot review'.
+    for item in (by_id["zj"], by_id["hn"]):
+        checks = {c["field"]: c["passed"] for c in item["match"]["spec_checks"]}
+        assert checks["item_identity"] is True
+        assert checks["material"] is True
+        assert checks["color"] is True
+    assert result["recommended_quote_id"] == "zj"
 
 def test_ambiguous_free_shipping_with_delivery_fee_requires_review() -> None:
     """P1: 江浙沪包邮 + 新疆西藏运费到付 must NOT parse as shipping_included=True
