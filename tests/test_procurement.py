@@ -1172,6 +1172,167 @@ def test_quote_parser_still_flags_genuine_prose_invoice_contradiction() -> None:
     assert "supports_invoice" in fields_requiring_review(extracted)
 
 
+def test_quote_parser_zhuanpiao_label_no_is_accepted() -> None:
+    """Regression: “是否可开专票: 否” must parse as invoice-capable False.
+
+    The bare substring 专票 inside the label used to self-trigger the positive
+    free-text inference and replace the explicit 否 with True, so a supplier
+    that cannot issue special VAT invoices would be treated as invoice-capable
+    and would never be excluded by the invoice_required hard constraint.
+    """
+    document = _xlsx_bytes(
+        [
+            ["供应商", "专票供应商"],
+            ["品名", "PE 白色快递袋 250x350mm 60um 单色印刷"],
+            ["币种", "CNY"],
+            ["单价", "500"],
+            ["计价数量", "1000"],
+            ["税率", "13%"],
+            ["是否含税", "是"],
+            ["是否包邮", "是"],
+            ["MOQ", "1000"],
+            ["交期", "7"],
+            ["是否可开专票", "否"],
+        ]
+    )
+
+    extracted = parse_quote("invoice-zhuanpiao-no.xlsx", document)
+    invoice = extracted["fields"]["supports_invoice"]
+
+    assert invoice["value"] is False
+    assert invoice["status"] == "accepted"
+    assert "conflicts" not in invoice
+    assert "supports_invoice" not in fields_requiring_review(extracted)
+
+
+def test_quote_parser_bare_keipiao_header_no_is_accepted() -> None:
+    """Regression: a bare “可开票” table header (no 是否 prefix) with value 否
+    must stay accepted.
+
+    The label-only positive inference guard must not treat the header text as
+    prose evidence; otherwise every Chinese “cannot invoice” quote using the
+    compact header is forced into human review.
+    """
+    document = _xlsx_bytes(
+        [
+            ["供应商", "品名", "币种", "单价", "计价数量", "税率", "是否含税", "是否包邮", "MOQ", "交期", "可开票"],
+            ["可开票表头供应商", "PE 白色快递袋 250x350mm 60um 单色印刷", "CNY", "500", "1000", "13%", "是", "是", "1000", "7", "否"],
+        ]
+    )
+
+    extracted = parse_quote("invoice-keipiao-header-no.xlsx", document)
+    invoice = extracted["fields"]["supports_invoice"]
+
+    assert invoice["value"] is False
+    assert invoice["status"] == "accepted"
+    assert "conflicts" not in invoice
+    assert "supports_invoice" not in fields_requiring_review(extracted)
+
+
+def test_supports_invoice_negative_special_invoice_phrases() -> None:
+    """Regression: negative special-invoice phrases must never parse as True.
+
+    The positive marker 专票/普票 used to win over 不可/不能/不开/无法/不支持
+    phrases, which would make a supplier that cannot issue special VAT invoices
+    look invoice-capable (violating the invoice_required hard constraint).
+    """
+    from agentharness.procurement.parsing import coerce_field_value
+
+    for phrase in (
+        "不可开专票",
+        "不能开专票",
+        "不开专票",
+        "无法开专票",
+        "不可开普票",
+        "不能开普票",
+        "不开普票",
+        "无法开普票",
+        "不可开具专票",
+        "不能开具专票",
+        "无法开具专票",
+        "不能开具普票",
+        "不支持开专票",
+        "不支持开普票",
+        "不提供专票",
+        "不提供普票",
+    ):
+        assert coerce_field_value("supports_invoice", phrase) is False, phrase
+    assert coerce_field_value("supports_invoice", "可开专票") is True
+    assert coerce_field_value("supports_invoice", "可开普票") is True
+
+
+def test_api_spec_accepts_roll_goods_length_mm() -> None:
+    """The Web API must accept the same roll-goods length boundary as the
+    domain service (10,000,000 mm), not the flat-sheet 10,000 mm cap."""
+    from agentharness.api.procurement import CreateProcurementRequestBody
+
+    body = CreateProcurementRequestBody(
+        title="气泡膜卷材",
+        category="ecommerce_packaging",
+        item_name="气泡膜",
+        quantity=1000,
+        unit="piece",
+        specifications={
+            "width_mm": "600",
+            "length_mm": "50000",
+            "thickness_um": "90",
+            "material": "PE",
+            "color": "透明",
+            "print_colors": 0,
+        },
+        constraints={
+            "base_currency": "CNY",
+            "fx_rates": {"CNY": "1"},
+            "max_lead_days": 14,
+            "invoice_required": True,
+        },
+    )
+    assert body.specifications.length_mm == 50_000
+    assert body.model_dump(mode="json")["specifications"]["length_mm"] == "50000"
+
+
+@pytest.mark.asyncio
+async def test_api_create_request_accepts_roll_goods_length(
+    data_dir: Path,
+    workspace: Path,
+) -> None:
+    """End-to-end: POST /api/procurement/requests must accept a roll-goods
+    length that the domain supports (1.2 m = 1,200,000 mm)."""
+    harness = Harness(data_dir=data_dir, providers={"procurement_fake": FakeModelAdapter()})
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/procurement/requests",
+            json={
+                "title": "气泡膜卷材",
+                "category": "ecommerce_packaging",
+                "item_name": "气泡膜",
+                "quantity": 1000,
+                "unit": "piece",
+                "specifications": {
+                    "width_mm": "600",
+                    "length_mm": "1200000",
+                    "thickness_um": "90",
+                    "material": "PE",
+                    "color": "透明",
+                    "print_colors": 0,
+                },
+                "constraints": {
+                    "base_currency": "CNY",
+                    "fx_rates": {"CNY": "1"},
+                    "max_lead_days": 14,
+                    "invoice_required": True,
+                },
+            },
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["specifications"]["length_mm"] == "1200000"
+    await app.state.procurement_agent.aclose()
+    await app.state.run_supervisor.aclose()
+    await harness.aclose()
+
+
 def test_requirement_accepts_roll_goods_length_in_mm() -> None:
     """Regression: roll goods (tape/film/foam) are quoted in mm with lengths
     far above the old 10000 mm flat-sheet cap; they must not be rejected."""

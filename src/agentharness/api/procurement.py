@@ -35,7 +35,12 @@ class PackagingSpecifications(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     width_mm: Decimal = Field(gt=0, le=10_000)
-    length_mm: Decimal = Field(gt=0, le=10_000)
+    length_mm: Decimal = Field(
+        gt=0,
+        # 与服务层保持一致：卷材（胶带/缠绕膜/气泡膜等）按毫米填写长度时
+        # 可达数十万甚至上百万毫米（上限 10,000,000 mm，见 service 校验）。
+        le=10_000_000,
+    )
     thickness_um: Decimal = Field(gt=0, le=5_000)
     material: str = Field(default="PE", min_length=1, max_length=100)
     color: str = Field(default="白色", min_length=1, max_length=100)

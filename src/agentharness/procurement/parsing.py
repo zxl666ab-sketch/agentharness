@@ -69,7 +69,22 @@ _ALIASES = {
     "shipping_included": ["是否含运费", "运费包含", "是否包邮", "shippingincluded", "freightincluded"],
     "moq": ["moq", "起订量", "最小起订量", "minimumorder", "minimumorderquantity"],
     "lead_time_days": ["交期", "交货期", "生产周期", "交期天", "leaddays", "leadtime", "deliverydays"],
-    "supports_invoice": ["可开票", "是否可开票", "发票", "增值税专票", "invoice", "supportsinvoice"],
+    "supports_invoice": [
+        "可开票",
+        "是否可开票",
+        "可开专票",
+        "是否可开专票",
+        "可开普票",
+        "是否可开普票",
+        "专票",
+        "普票",
+        "增值税专票",
+        "增值税专用发票",
+        "增值税普通发票",
+        "发票",
+        "invoice",
+        "supportsinvoice",
+    ],
     "width_mm": ["宽", "宽度", "宽mm", "宽度mm", "width", "widthmm"],
     "length_mm": ["长", "长度", "高度", "长mm", "长度mm", "length", "height", "lengthmm"],
     "thickness_um": ["厚度", "厚度um", "厚度微米", "丝数", "thickness", "thicknessum", "micron"],
@@ -187,9 +202,27 @@ _INVOICE_NEGATIVE = (
     "不可开票",
     "不能开票",
     "不开票",
+    "无法开票",
+    "不可开专票",
+    "不能开专票",
+    "不开专票",
+    "无法开专票",
+    "不可开普票",
+    "不能开普票",
+    "不开普票",
+    "无法开普票",
+    "不可开具专票",
+    "不能开具专票",
+    "无法开具专票",
+    "不可开具普票",
+    "不能开具普票",
+    "无法开具普票",
+    "不支持开票",
+    "不支持开专票",
+    "不支持开普票",
     "不提供发票",
     "不提供专票",
-    "不支持开票",
+    "不提供普票",
     "noinvoice",
     "invoiceunavailable",
 )
@@ -609,19 +642,32 @@ def _infer_common(fields: dict[str, Any], text: str, document_kind: str) -> None
         inferred("tax_included", True, 0.88, "含税")
     if re.search(r"未税|不含税|tax\s+excluded|vat\s+excluded", text, re.I):
         inferred("tax_included", False, 0.91, "不含税")
+    current_invoice = fields.get("supports_invoice")
+    invoice_confirmed = (
+        isinstance(current_invoice, dict)
+        and current_invoice.get("status") == "accepted"
+        and float(current_invoice.get("confidence", 0)) >= REVIEW_THRESHOLD
+    )
     if re.search(
-        r"不可开票|不能开票|不开票|不(?:提供|支持)(?:发票|专票|开票)|no[ \t]+invoice|invoice[ \t]*:?[ \t]*(?:no|unavailable)",
+        r"不可开票|不能开票|不开票|无法开票|不可开专票|不能开专票|不开专票|无法开专票|"
+        r"不可开普票|不能开普票|不开普票|无法开普票|"
+        r"不(?:提供|支持)(?:发票|专票|普票|开票)|"
+        r"no[ \t]+invoice|invoice[ \t]*:?[ \t]*(?:no|unavailable)",
         text,
         re.I,
     ):
         inferred("supports_invoice", False, 0.91, "不可开票")
-    elif re.search(
-        r"(?<!是否)可开|专票|invoice\s*:?\s*(yes|available)",
+    elif not invoice_confirmed and re.search(
+        r"(?<!是否)可开|专票|普票|invoice\s*:?\s*(yes|available)",
         text,
         re.I,
     ):
-        # 负向后行断言排除标签自身的“是否可开票”，避免把标签文本当成正向证据，
-        # 同时保留报价正文中真实的“可开票”矛盾检测（例如显式“否”+正文“可开票”）。
+        # 正向推断只在高置信度显式结果不存在时进行：
+        # - “是否可开票”标签自身的“可开”由负向后行排除；
+        # - “可开票/专票/普票”作为表头或标签时（如“可开票: 否”），显式值已
+        #   高置信度接受，不再用标签文本制造虚假的跨来源冲突；
+        # 反向证据（“不可开票/不开专票”等）始终保留，用于发现真实矛盾
+        # （例如显式“是”+正文“本公司不可开票”）。
         inferred("supports_invoice", True, 0.88, "可开票")
     if "currency" not in fields:
         currency = _currency(text)
