@@ -54,6 +54,7 @@ const FIELD_ORDER = [
   "supports_invoice",
   "width_mm",
   "length_mm",
+  "height_mm",
   "thickness_um",
   "payment_terms",
   "valid_until",

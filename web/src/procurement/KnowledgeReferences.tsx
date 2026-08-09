@@ -144,10 +144,21 @@ export function KnowledgeReferences({ references, onFeedback }: Props) {
 
       {open ? (
         <div className="proc-modal-backdrop" role="presentation">
-          <section className="proc-knowledge-dialog" role="dialog" aria-modal="true" aria-labelledby="knowledge-source-title">
+          <section
+            className="proc-knowledge-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="knowledge-source-title"
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.stopPropagation();
+                setOpenSource(null);
+              }
+            }}
+          >
             <header>
               <div><BookOpen size={18} /><h2 id="knowledge-source-title">历史成交参考详情</h2></div>
-              <button className="proc-icon-button" type="button" title="关闭" aria-label="关闭" onClick={() => setOpenSource(null)}><X size={18} /></button>
+              <button autoFocus className="proc-icon-button" type="button" title="关闭" aria-label="关闭" onClick={() => setOpenSource(null)}><X size={18} /></button>
             </header>
             <dl className="proc-knowledge-detail">
               <div><dt>来源编号</dt><dd>{open.request_reference || "—"}</dd></div>

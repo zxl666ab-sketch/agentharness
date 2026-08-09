@@ -55,6 +55,7 @@ const FIELD_LABELS: Record<string, string> = {
   supports_invoice: "是否可开票",
   width_mm: "宽度",
   length_mm: "长度",
+  height_mm: "高度",
   thickness_um: "厚度",
   payment_terms: "付款条件",
   valid_until: "报价有效期",

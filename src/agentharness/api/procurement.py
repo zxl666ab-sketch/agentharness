@@ -42,6 +42,7 @@ class PackagingSpecifications(BaseModel):
         # 可达数十万甚至上百万毫米（上限 10,000,000 mm，见 service 校验）。
         le=10_000_000,
     )
+    height_mm: Decimal | None = Field(default=None, gt=0, le=10_000)
     thickness_um: Decimal = Field(gt=0, le=5_000)
     material: str = Field(default="PE", min_length=1, max_length=100)
     color: str = Field(default="白色", min_length=1, max_length=100)
@@ -79,6 +80,8 @@ class ProcurementConstraints(BaseModel):
             code = str(currency).upper()
             if re.fullmatch(r"[A-Z]{3}", code) is None or rate <= 0:
                 raise ValueError("币种代码必须为 3 个大写字母，且汇率必须大于 0")
+            if code in normalized:
+                raise ValueError(f"汇率币种重复：{code}")
             normalized[code] = rate
         return normalized
 
@@ -249,6 +252,16 @@ class ProcurementModelConfigBody(BaseModel):
 def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> APIRouter:
     router = APIRouter(prefix="/api/procurement", tags=["procurement"])
 
+    def public_model_config() -> dict[str, Any]:
+        payload = agent.model_config()
+        # Base URLs are operator input and may accidentally contain a gateway
+        # query credential.  Keep the useful endpoint visible while applying
+        # the same public redaction boundary as reports and artifacts.
+        base_url = payload.get("base_url")
+        if isinstance(base_url, str):
+            payload["base_url"] = agent.harness.redactor.redact_public_text(base_url)
+        return payload
+
     @router.post("/conversations", status_code=202)
     async def start_conversation(
         body: StartProcurementConversationBody,
@@ -319,12 +332,13 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
 
     @router.get("/config")
     async def config() -> dict[str, Any]:
-        return agent.model_config()
+        return public_model_config()
 
     @router.post("/config")
     async def update_config(body: ProcurementModelConfigBody) -> dict[str, Any]:
         try:
-            return await agent.configure_model(**body.model_dump())
+            await agent.configure_model(**body.model_dump())
+            return public_model_config()
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 

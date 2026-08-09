@@ -24,6 +24,7 @@ from agentharness.procurement.parsing import (
     MAX_FILE_BYTES,
     PARSER_VERSION,
     coerce_field_value,
+    decimal_is_resource_bounded,
     fields_requiring_review,
     parse_quote,
 )
@@ -50,6 +51,7 @@ REQUIRED_REQUIREMENT_FIELDS = frozenset(
 REQUIRED_SPEC_FIELDS = frozenset(
     {"width_mm", "length_mm", "thickness_um", "material", "color", "print_colors"}
 )
+SUPPORTED_SPEC_FIELDS = REQUIRED_SPEC_FIELDS | frozenset({"height_mm"})
 REQUIRED_CONSTRAINT_FIELDS = frozenset(
     {"base_currency", "fx_rates", "max_lead_days", "invoice_required"}
 )
@@ -68,6 +70,21 @@ class ProcurementError(ValueError):
     pass
 
 
+def _item_requires_height(item_name: str) -> bool:
+    """Return whether a packaging item is inherently three-dimensional.
+
+    Keep the English ``box`` alias word-bounded so products such as
+    ``box sealing tape`` do not accidentally become carton requirements.
+    """
+
+    text = item_name.casefold()
+    if "胶带" in text or re.search(r"\btape\b", text):
+        return False
+    if any(token in text for token in ("纸箱", "包装箱", "carton", "corrugated")):
+        return True
+    return bool(re.search(r"\bbox(?:es)?\b", text)) and "tape" not in text
+
+
 def _domain_decimal(
     value: Any,
     label: str,
@@ -82,8 +99,8 @@ def _domain_decimal(
         result = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise ProcurementError(f"{label} 不是有效数值") from exc
-    if not result.is_finite():
-        raise ProcurementError(f"{label} 必须是有限数值")
+    if not decimal_is_resource_bounded(result):
+        raise ProcurementError(f"{label} 超出安全数值范围")
     if minimum is not None and result < minimum:
         raise ProcurementError(f"{label} 不得小于 {minimum}")
     if exclusive_minimum is not None and result <= exclusive_minimum:
@@ -134,7 +151,7 @@ def _validated_requirement(payload: dict[str, Any]) -> dict[str, Any]:
     missing_specs = sorted(required_specs - raw_specs.keys())
     if missing_specs:
         raise ProcurementError("采购规格缺少字段：" + ", ".join(missing_specs))
-    unknown_specs = sorted(set(raw_specs) - REQUIRED_SPEC_FIELDS)
+    unknown_specs = sorted(set(raw_specs) - SUPPORTED_SPEC_FIELDS)
     if unknown_specs:
         raise ProcurementError("采购规格包含不支持的字段：" + ", ".join(unknown_specs))
     material = str(raw_specs["material"]).strip()
@@ -166,6 +183,17 @@ def _validated_requirement(payload: dict[str, Any]) -> dict[str, Any]:
             raw_specs["print_colors"], "印刷色数", minimum=0, maximum=12
         ),
     }
+    raw_height = raw_specs.get("height_mm")
+    requires_height = _item_requires_height(item_name)
+    if requires_height and raw_height in (None, ""):
+        raise ProcurementError("纸箱采购规格必须提供高度 height_mm")
+    if raw_height not in (None, ""):
+        specifications["height_mm"] = _domain_decimal(
+            raw_height,
+            "高度",
+            exclusive_minimum=Decimal("0"),
+            maximum=Decimal("10000"),
+        )
 
     raw_constraints = payload["constraints"]
     if not isinstance(raw_constraints, dict):
@@ -483,7 +511,9 @@ class ProcurementService:
         request = self.repo.get_request(request_id)
         if request is None:
             raise KeyError(request_id)
-        quotes = [self._enrich_quote(item) for item in self.repo.list_quotes(request_id)]
+        quotes = [
+            self._enrich_quote(request, item) for item in self.repo.list_quotes(request_id)
+        ]
         snapshot = (
             self.repo.get_snapshot(str(request["current_snapshot_id"]))
             if request.get("current_snapshot_id")
@@ -523,15 +553,25 @@ class ProcurementService:
         self._editable_request(request_id)
         validated = _validated_attachment(filename, data)
         source_sha = str(validated["sha256"])
-        staged = self._staged_attachments(request_id)
-        if len(staged) >= MAX_QUOTES_PER_REQUEST:
-            raise ProcurementError(f"每个采购任务最多上传 {MAX_QUOTES_PER_REQUEST} 份报价")
-        if any(item["sha256"] == source_sha for item in staged):
-            raise ProcurementError("同一报价文件已上传")
         content_type = str(validated["content_type"])
         with self.storage.transaction():
+            request = self.repo.get_request(request_id)
+            if request is None:
+                raise KeyError(request_id)
             if self.repo.get_decision(request_id) is not None:
                 raise ProcurementError("已形成审批结论的采购需求不可再修改")
+            staged = self._staged_attachments(request_id)
+            quotes = self.repo.list_quotes(request_id)
+            if len(staged) + len(quotes) >= MAX_QUOTES_PER_REQUEST:
+                raise ProcurementError(
+                    f"每个采购任务最多上传 {MAX_QUOTES_PER_REQUEST} 份报价"
+                )
+            known_hashes = {
+                *(str(item.get("sha256") or "") for item in staged),
+                *(str(item.get("source_sha256") or "") for item in quotes),
+            }
+            if source_sha in known_hashes:
+                raise ProcurementError("同一报价文件已上传")
             # 决策检查通过后才写磁盘，避免被拒导入/暂存留下未注册的孤儿 artifact。
             meta = self.storage.artifacts.put(
                 data,
@@ -559,6 +599,10 @@ class ProcurementService:
             raise KeyError(request_id)
         with self.storage.transaction():
             current = self.repo.get_request(request_id)
+            if current is None:
+                raise KeyError(request_id)
+            if self.repo.get_decision(request_id) is not None:
+                raise ProcurementError("已形成审批结论的采购需求不可再启动分析")
             existing_run_id = str((current or {}).get("analysis_run_id") or "")
             if existing_run_id and existing_run_id != run_id:
                 existing_run = self.harness.get_run(existing_run_id)
@@ -585,33 +629,48 @@ class ProcurementService:
         *,
         run_id: str,
     ) -> dict[str, Any]:
-        self._editable_request(request_id)
-        if self.repo.get_decision(request_id) is not None:
-            raise ProcurementError("已形成审批结论的采购需求不可再修改")
         validated = _validated_requirement(payload)
-        self.repo.update_request(
-            request_id,
-            title=validated["title"],
-            item_name=validated["item_name"],
-            quantity=validated["quantity"],
-            unit=validated["unit"],
-            specifications=validated["specifications"],
-            constraints=validated["constraints"],
-            status="collecting",
-        )
-        self._audit(
-            request_id,
-            "requirement_captured_by_agent",
-            actor="agent",
-            run_id=run_id,
-            payload={
+        with self.storage.transaction():
+            request = self.repo.get_request(request_id)
+            if request is None:
+                raise KeyError(request_id)
+            if self.repo.get_decision(request_id) is not None:
+                raise ProcurementError("已形成审批结论的采购需求不可再修改")
+            updated_request = {
+                **request,
                 "title": validated["title"],
                 "item_name": validated["item_name"],
                 "quantity": validated["quantity"],
+                "unit": validated["unit"],
                 "specifications": validated["specifications"],
                 "constraints": validated["constraints"],
-            },
-        )
+            }
+            self.repo.update_request(
+                request_id,
+                title=validated["title"],
+                item_name=validated["item_name"],
+                quantity=validated["quantity"],
+                unit=validated["unit"],
+                specifications=validated["specifications"],
+                constraints=validated["constraints"],
+                status="collecting",
+            )
+            # A delayed/retried capture must invalidate any prior comparison;
+            # otherwise the UI can display a snapshot calculated for old demand.
+            self._refresh_request_state(updated_request, invalidate_snapshot=True)
+            self._audit(
+                request_id,
+                "requirement_captured_by_agent",
+                actor="agent",
+                run_id=run_id,
+                payload={
+                    "title": validated["title"],
+                    "item_name": validated["item_name"],
+                    "quantity": validated["quantity"],
+                    "specifications": validated["specifications"],
+                    "constraints": validated["constraints"],
+                },
+            )
         return self.get_request(request_id)
 
     def parse_staged_quotes(self, request_id: str, *, run_id: str) -> dict[str, Any]:
@@ -699,7 +758,7 @@ class ProcurementService:
             raise KeyError(request_id)
         quotes = self.repo.list_quotes(request_id)
         unresolved = [
-            quote["id"] for quote in quotes if fields_requiring_review(quote["extracted"])
+            quote["id"] for quote in quotes if self._review_fields(request, quote["extracted"])
         ]
         if unresolved:
             raise ProcurementError("报价仍有低置信度字段，不能执行物料匹配")
@@ -863,7 +922,7 @@ class ProcurementService:
         if len(quotes) < 2:
             raise ProcurementError("至少上传 2 家供应商报价后才能比价")
         unresolved = [
-            quote["id"] for quote in quotes if fields_requiring_review(quote["extracted"])
+            quote["id"] for quote in quotes if self._review_fields(request, quote["extracted"])
         ]
         if unresolved:
             raise ProcurementError("报价仍有低置信度字段，不能执行确定性比价")
@@ -1114,6 +1173,8 @@ class ProcurementService:
                 },
             },
             rag_chunks=rag_chunks,
+            expected_snapshot_id=snapshot_id,
+            expected_run_id=run_id,
         )
         return self.get_request(request_id)
 
@@ -1180,6 +1241,8 @@ class ProcurementService:
                     "note": decision["note"],
                 },
             },
+            expected_snapshot_id=snapshot_id,
+            expected_run_id=run_id,
         )
         return self.get_request(request_id)
 
@@ -1246,25 +1309,13 @@ class ProcurementService:
         extracted: dict[str, Any] | None = None,
         actor: str = "采购员",
     ) -> dict[str, Any]:
-        request = self._editable_request(request_id)
-        quotes = self.repo.list_quotes(request_id)
-        if len(quotes) >= MAX_QUOTES_PER_REQUEST:
-            raise ProcurementError(f"每个采购任务最多上传 {MAX_QUOTES_PER_REQUEST} 份报价")
-        extracted = extracted or parse_quote(filename, data)
-        source_sha = hashlib.sha256(data).hexdigest()
-        if any(
-            quote["source_sha256"] == source_sha
-            for quote in quotes
-        ):
-            raise ProcurementError("同一报价文件已上传")
-        content_type = (
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            if Path(filename).suffix.lower() == ".xlsx"
-            else "application/pdf"
-        )
-        review_fields = fields_requiring_review(extracted)
+        self._editable_request(request_id)
+        validated = _validated_attachment(filename, data)
+        parsed = extracted or parse_quote(filename, data)
+        source_sha = str(validated["sha256"])
+        content_type = str(validated["content_type"])
         supplier = str(
-            extracted.get("fields", {}).get("supplier_name", {}).get("value")
+            parsed.get("fields", {}).get("supplier_name", {}).get("value")
             or Path(filename).stem
         )
         quote_id = new_id()
@@ -1273,18 +1324,33 @@ class ProcurementService:
             "request_id": request_id,
             "supplier_name": supplier,
             "source_filename": filename,
-            "source_kind": Path(filename).suffix.lower().removeprefix("."),
+            "source_kind": str(validated["suffix"]).removeprefix("."),
             "source_artifact_id": "",
             "source_sha256": source_sha,
-            "extracted": extracted,
-            "status": "needs_review" if review_fields else "ready",
-            "review_count": len(review_fields),
+            "extracted": parsed,
+            # Filled from the request-aware review rules while holding the
+            # write transaction below.
+            "status": "needs_review",
+            "review_count": 0,
             "parser_version": PARSER_VERSION,
-            "processing_ms": extracted.get("processing_ms", 0),
+            "processing_ms": parsed.get("processing_ms", 0),
         }
         with self.storage.transaction():
+            request = self.repo.get_request(request_id)
+            if request is None:
+                raise KeyError(request_id)
             if self.repo.get_decision(request_id) is not None:
                 raise ProcurementError("已形成审批结论的采购需求不可再修改")
+            quotes = self.repo.list_quotes(request_id)
+            if len(quotes) >= MAX_QUOTES_PER_REQUEST:
+                raise ProcurementError(
+                    f"每个采购任务最多上传 {MAX_QUOTES_PER_REQUEST} 份报价"
+                )
+            if any(str(item["source_sha256"]) == source_sha for item in quotes):
+                raise ProcurementError("同一报价文件已上传")
+            review_fields = self._review_fields(request, parsed)
+            quote["status"] = "needs_review" if review_fields else "ready"
+            quote["review_count"] = len(review_fields)
             # 决策检查通过后才写磁盘，避免被拒导入留下未注册的孤儿 artifact。
             meta = self.storage.artifacts.put(
                 data,
@@ -1315,7 +1381,7 @@ class ProcurementService:
         stored = self.repo.get_quote(quote_id)
         if stored is None:
             raise RuntimeError("报价写入后不可见")
-        return self._enrich_quote(stored)
+        return self._enrich_quote(request, stored)
 
     def correct_field(
         self,
@@ -1326,10 +1392,7 @@ class ProcurementService:
         value: Any,
         actor: str = "采购员",
     ) -> dict[str, Any]:
-        request = self._editable_request(request_id)
-        quote = self.repo.get_quote(quote_id)
-        if quote is None or quote["request_id"] != request_id:
-            raise KeyError(quote_id)
+        self._editable_request(request_id)
         if field not in FIELD_META:
             raise ProcurementError("不支持的报价字段")
         try:
@@ -1338,31 +1401,42 @@ class ProcurementService:
             raise ProcurementError(str(exc)) from exc
         if coerced is None and FIELD_META[field]["required"]:
             raise ProcurementError(f"{FIELD_META[field]['label']} 不能为空")
-        extracted = dict(quote["extracted"])
-        fields = dict(extracted.get("fields", {}))
-        old = dict(fields.get(field, {}))
-        now = _utcnow()
-        source = old.get("source") or {
-            "document_kind": quote["source_kind"],
-            "locator": "manual",
-            "excerpt": "",
-            "method": "manual",
-        }
-        fields[field] = {
-            **old,
-            "value": coerced,
-            "original_value": old.get("original_value", old.get("value")),
-            "confidence": 1.0,
-            "status": "corrected",
-            "source": source,
-            "correction": {"actor": actor, "corrected_at": now},
-        }
-        extracted["fields"] = fields
-        review_fields = fields_requiring_review(extracted)
-        supplier = str(fields.get("supplier_name", {}).get("value") or quote["supplier_name"])
         with self.storage.transaction():
+            request = self.repo.get_request(request_id)
+            if request is None:
+                raise KeyError(request_id)
             if self.repo.get_decision(request_id) is not None:
                 raise ProcurementError("已形成审批结论的采购需求不可再修改")
+            # Re-read only after the write transaction is acquired.  Two
+            # simultaneous field edits then merge into the latest JSON instead
+            # of each writing a stale whole-row copy.
+            quote = self.repo.get_quote(quote_id)
+            if quote is None or quote["request_id"] != request_id:
+                raise KeyError(quote_id)
+            extracted = dict(quote["extracted"])
+            fields = dict(extracted.get("fields", {}))
+            old = dict(fields.get(field, {}))
+            now = _utcnow()
+            source = old.get("source") or {
+                "document_kind": quote["source_kind"],
+                "locator": "manual",
+                "excerpt": "",
+                "method": "manual",
+            }
+            fields[field] = {
+                **old,
+                "value": coerced,
+                "original_value": old.get("original_value", old.get("value")),
+                "confidence": 1.0,
+                "status": "corrected",
+                "source": source,
+                "correction": {"actor": actor, "corrected_at": now},
+            }
+            extracted["fields"] = fields
+            review_fields = self._review_fields(request, extracted)
+            supplier = str(
+                fields.get("supplier_name", {}).get("value") or quote["supplier_name"]
+            )
             self.repo.update_quote(
                 quote_id,
                 extracted=extracted,
@@ -1390,7 +1464,7 @@ class ProcurementService:
         stored = self.repo.get_quote(quote_id)
         if stored is None:
             raise RuntimeError("报价修正后不可见")
-        return self._enrich_quote(stored)
+        return self._enrich_quote(request, stored)
 
 
 
@@ -1505,18 +1579,23 @@ class ProcurementService:
             order, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
         order["evidence_sha256"] = hashlib.sha256(canonical).hexdigest()
-        self.repo.save_purchase_order(order)
-        self._audit(
-            request_id,
-            "purchase_order_created",
-            actor="系统",
-            payload={
-                "po_number": order["po_number"],
-                "evidence_sha256": order["evidence_sha256"],
-                "snapshot_id": comparison.get("id"),
+        stored, _created = self.repo.save_purchase_order(
+            order,
+            {
+                "id": new_id(),
+                "request_id": request_id,
+                "quote_id": decision.get("quote_id"),
+                "run_id": request.get("analysis_run_id"),
+                "type": "purchase_order_created",
+                "actor": "系统",
+                "payload": {
+                    "po_number": order["po_number"],
+                    "evidence_sha256": order["evidence_sha256"],
+                    "snapshot_id": comparison.get("id"),
+                },
             },
         )
-        return order
+        return stored
 
     def purchase_order_csv(self, request_id: str) -> tuple[str, str]:
         """Return (filename, UTF-8 BOM CSV content) for the purchase order."""
@@ -1595,7 +1674,7 @@ class ProcurementService:
             **request,
             "quote_count": len(quotes),
             "unresolved_field_count": sum(
-                len(fields_requiring_review(item["extracted"])) for item in quotes
+                len(self._review_fields(request, item["extracted"])) for item in quotes
             ),
             "decision": decision,
         }
@@ -1621,8 +1700,31 @@ class ProcurementService:
             if str(item.get("sha256") or "") not in imported_hashes
         ]
 
-    def _enrich_quote(self, quote: dict[str, Any]) -> dict[str, Any]:
-        return {**quote, "review_fields": fields_requiring_review(quote["extracted"])}
+    def _review_fields(
+        self,
+        request: dict[str, Any],
+        extracted: dict[str, Any],
+    ) -> list[str]:
+        specifications = request.get("specifications") or {}
+        additional_required = (
+            ("height_mm",)
+            if specifications.get("height_mm") not in (None, "")
+            else ()
+        )
+        return fields_requiring_review(
+            extracted,
+            additional_required=additional_required,
+        )
+
+    def _enrich_quote(
+        self,
+        request: dict[str, Any],
+        quote: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            **quote,
+            "review_fields": self._review_fields(request, quote["extracted"]),
+        }
 
     def _editable_request(self, request_id: str) -> dict[str, Any]:
         request = self.repo.get_request(request_id)
@@ -1686,10 +1788,15 @@ class ProcurementService:
 
     def _knowledge_adopted_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
+        seen: set[tuple[str, str]] = set()
         for event in self.repo.list_knowledge_feedback_events():
             if event["type"] != "knowledge_reference_adopted":
                 continue
             chunk_sha = str(event.get("payload", {}).get("chunk_id") or "")
+            unique_key = (str(event.get("request_id") or ""), chunk_sha)
+            if unique_key in seen:
+                continue
+            seen.add(unique_key)
             chunk = self.storage.rag.get_chunk(chunk_sha) if chunk_sha else None
             if chunk is None:
                 continue
@@ -1706,21 +1813,41 @@ class ProcurementService:
         actor: str = "采购员",
     ) -> dict[str, Any]:
         """Record viewed/adopted feedback (chunk_id + action only)."""
-        if self.repo.get_request(request_id) is None:
-            raise KeyError(request_id)
         if action not in {"viewed", "adopted"}:
             raise ProcurementError("反馈动作只支持 viewed 或 adopted")
         if not chunk_id or len(chunk_id) != 64:
             raise ProcurementError("历史成交参考 ID 无效")
         if self.storage.rag.get_chunk(chunk_id) is None:
             raise ProcurementError("历史成交参考不存在")
-        self._audit(
-            request_id,
-            f"knowledge_reference_{action}",
-            actor=actor,
-            payload={"chunk_id": chunk_id, "action": action},
-        )
-        return {"ok": True, "request_id": request_id, "chunk_id": chunk_id, "action": action}
+        event_type = f"knowledge_reference_{action}"
+        with self.storage.transaction():
+            if self.repo.get_request(request_id) is None:
+                raise KeyError(request_id)
+            allowed_ids = {
+                str(reference.get("chunk_id") or reference.get("chunk_sha256") or "")
+                for reference in self._latest_knowledge_references(request_id)
+            }
+            if chunk_id not in allowed_ids:
+                raise ProcurementError("历史成交参考不属于当前采购任务的最近检索结果")
+            duplicate = any(
+                event["type"] == event_type
+                and str(event.get("payload", {}).get("chunk_id") or "") == chunk_id
+                for event in self.repo.list_audit_events(request_id)
+            )
+            if not duplicate:
+                self._audit(
+                    request_id,
+                    event_type,
+                    actor=actor,
+                    payload={"chunk_id": chunk_id, "action": action},
+                )
+        return {
+            "ok": True,
+            "recorded": not duplicate,
+            "request_id": request_id,
+            "chunk_id": chunk_id,
+            "action": action,
+        }
 
     def _sync_rag_chunk_for_quote(
         self,
@@ -1770,7 +1897,9 @@ class ProcurementService:
             # status can advance from "review" back to "ready".
             quotes_by_id[str(item["id"])] = item
         quotes = list(quotes_by_id.values())
-        unresolved = sum(len(fields_requiring_review(item["extracted"])) for item in quotes)
+        unresolved = sum(
+            len(self._review_fields(request, item["extracted"])) for item in quotes
+        )
         if unresolved:
             status = "review"
         elif len(quotes) < 2:
@@ -1825,6 +1954,7 @@ __all__ = [
     "MAX_QUOTES_PER_REQUEST",
     "REQUIRED_REQUIREMENT_FIELDS",
     "REQUIRED_SPEC_FIELDS",
+    "SUPPORTED_SPEC_FIELDS",
     "REQUIRED_CONSTRAINT_FIELDS",
     "SUPPORTED_CONSTRAINT_FIELDS",
     "ProcurementError",

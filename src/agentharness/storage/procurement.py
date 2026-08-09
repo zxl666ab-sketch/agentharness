@@ -250,6 +250,8 @@ class ProcurementRepo:
         audit_event: dict[str, Any],
         *,
         rag_chunks: list[dict[str, Any]] | None = None,
+        expected_snapshot_id: str | None = None,
+        expected_run_id: str | None = None,
     ) -> None:
         safe_decision = self.redactor.redact_obj(decision)
         safe_event = self.redactor.redact_obj(audit_event)
@@ -257,13 +259,21 @@ class ProcurementRepo:
         with self._lock:
             if self._conn.in_transaction:
                 self._commit_decision_unlocked(
-                    safe_decision, safe_event, safe_chunks
+                    safe_decision,
+                    safe_event,
+                    safe_chunks,
+                    expected_snapshot_id=expected_snapshot_id,
+                    expected_run_id=expected_run_id,
                 )
                 return
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 self._commit_decision_unlocked(
-                    safe_decision, safe_event, safe_chunks
+                    safe_decision,
+                    safe_event,
+                    safe_chunks,
+                    expected_snapshot_id=expected_snapshot_id,
+                    expected_run_id=expected_run_id,
                 )
                 self._conn.execute("COMMIT")
             except Exception:
@@ -275,23 +285,34 @@ class ProcurementRepo:
         safe_decision: dict[str, Any],
         safe_event: dict[str, Any],
         safe_chunks: list[dict[str, Any]],
+        *,
+        expected_snapshot_id: str | None,
+        expected_run_id: str | None,
     ) -> None:
         self._insert_decision(safe_decision)
         decision_type = str(safe_decision["decision"])
         status = "approved" if decision_type == "approved" else "no_award"
+        guards = ["id = ?", "status NOT IN ('approved', 'no_award')"]
+        guard_values: list[Any] = [safe_decision["request_id"]]
+        if expected_snapshot_id is not None:
+            guards.append("current_snapshot_id = ?")
+            guard_values.append(expected_snapshot_id)
+        if expected_run_id is not None:
+            guards.append("analysis_run_id = ?")
+            guard_values.append(expected_run_id)
         cursor = self._conn.execute(
-            """UPDATE procurement_requests
-               SET status = ?, approved_quote_id = ?, updated_at = ?
-               WHERE id = ? AND status NOT IN ('approved', 'no_award')""",
-            (
+            f"""UPDATE procurement_requests
+                SET status = ?, approved_quote_id = ?, updated_at = ?
+                WHERE {' AND '.join(guards)}""",
+            [
                 status,
                 safe_decision.get("quote_id"),
                 _utcnow(),
-                safe_decision["request_id"],
-            ),
+                *guard_values,
+            ],
         )
         if cursor.rowcount != 1:
-            raise ValueError("采购任务不存在或已经完成审批")
+            raise ValueError("采购任务不存在、已经完成审批或比价快照已失效")
         self._insert_audit_event(safe_event)
         if safe_chunks:
             # Same transaction: a failed approval must not leave
@@ -428,25 +449,64 @@ class ProcurementRepo:
             "DELETE FROM procurement_requests WHERE id = ?", (request_id,)
         )
 
-    def save_purchase_order(self, order: dict[str, Any]) -> None:
+    def save_purchase_order(
+        self,
+        order: dict[str, Any],
+        audit_event: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist one canonical PO and its creation audit atomically.
+
+        Concurrent JSON/CSV exports race through this method.  The winner
+        inserts; every caller reads and returns the same stored payload.
+        """
         safe = self.redactor.redact_obj(order)
+        safe_event = self.redactor.redact_obj(audit_event) if audit_event else None
         with self._lock:
-            self._conn.execute(
-                """INSERT INTO procurement_purchase_orders(
-                       id, request_id, po_number, payload_json, created_at
-                   ) VALUES(?,?,?,?,?)
-                   ON CONFLICT(request_id) DO UPDATE SET
-                       po_number=excluded.po_number,
-                       payload_json=excluded.payload_json,
-                       created_at=excluded.created_at""",
-                (
-                    safe["id"],
-                    safe["request_id"],
-                    safe["po_number"],
-                    _dumps(safe),
-                    safe.get("created_at", _utcnow()),
-                ),
-            )
+            if self._conn.in_transaction:
+                return self._save_purchase_order_unlocked(safe, safe_event)
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                result = self._save_purchase_order_unlocked(safe, safe_event)
+                self._conn.execute("COMMIT")
+                return result
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def _save_purchase_order_unlocked(
+        self,
+        safe: dict[str, Any],
+        safe_event: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], bool]:
+        cursor = self._conn.execute(
+            """INSERT INTO procurement_purchase_orders(
+                   id, request_id, po_number, payload_json, created_at
+               ) VALUES(?,?,?,?,?)
+               ON CONFLICT(request_id) DO NOTHING""",
+            (
+                safe["id"],
+                safe["request_id"],
+                safe["po_number"],
+                _dumps(safe),
+                safe.get("created_at", _utcnow()),
+            ),
+        )
+        created = cursor.rowcount == 1
+        if created and safe_event is not None:
+            self._insert_audit_event(safe_event)
+        row = self._conn.execute(
+            "SELECT payload_json FROM procurement_purchase_orders WHERE request_id = ?",
+            (safe["request_id"],),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("采购订单写入后不可见")
+        try:
+            stored = json.loads(row["payload_json"] or "{}")
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("采购订单数据损坏") from exc
+        if not isinstance(stored, dict):
+            raise RuntimeError("采购订单数据损坏")
+        return stored, created
 
     def get_purchase_order(self, request_id: str) -> dict[str, Any] | None:
         row = self._reader().execute(

@@ -178,6 +178,11 @@ def test_feedback_events_recorded_and_validate(data_dir: Path) -> None:
             str(request["id"]), chunk_id=chunk_id, action="adopted"
         )
         assert adopted["ok"] is True
+        duplicate = service.record_knowledge_feedback(
+            str(request["id"]), chunk_id=chunk_id, action="adopted"
+        )
+        assert duplicate["ok"] is True
+        assert duplicate["recorded"] is False
         events = [
             event
             for event in service.repo.list_audit_events(str(request["id"]))
@@ -187,6 +192,7 @@ def test_feedback_events_recorded_and_validate(data_dir: Path) -> None:
             "knowledge_reference_viewed",
             "knowledge_reference_adopted",
         }
+        assert len(events) == 2
         for event in events:
             assert set(event["payload"].keys()) == {"chunk_id", "action"}
 
@@ -201,6 +207,14 @@ def test_feedback_events_recorded_and_validate(data_dir: Path) -> None:
         with pytest.raises(ProcurementError):
             service.record_knowledge_feedback(
                 str(request["id"]), chunk_id="0" * 64, action="viewed"
+            )
+        # A real chunk that was never retrieved for this request cannot be used
+        # to poison the global helpfulness ranking.
+        unrelated = _history_chunk(sha="f" * 64, request_reference="RFQ-UNRELATED")
+        harness.storage.rag.upsert_chunk(unrelated)
+        with pytest.raises(ProcurementError, match="当前采购任务"):
+            service.record_knowledge_feedback(
+                str(request["id"]), chunk_id="f" * 64, action="adopted"
             )
         counts = service._knowledge_adopted_counts()  # noqa: SLF001 - white-box
         assert counts.get("华东优包") == 1

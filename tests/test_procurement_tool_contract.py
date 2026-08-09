@@ -16,6 +16,7 @@ from agentharness.procurement.agent import (
 from agentharness.procurement.service import (
     REQUIRED_SPEC_FIELDS,
     SUPPORTED_CONSTRAINT_FIELDS,
+    SUPPORTED_SPEC_FIELDS,
     ProcurementService,
     _validated_requirement,
 )
@@ -50,6 +51,8 @@ def test_capture_schema_covers_all_domain_fields(agent: ProcurementAgent) -> Non
     constraint_props = set(schema["properties"]["constraints"]["properties"])
 
     assert REQUIRED_SPEC_FIELDS <= spec_props
+    assert SUPPORTED_SPEC_FIELDS == spec_props
+    assert "height_mm" not in set(schema["properties"]["specifications"]["required"])
     assert SUPPORTED_CONSTRAINT_FIELDS <= constraint_props
     assert "required_delivery_date" in constraint_props
 

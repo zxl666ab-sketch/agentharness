@@ -707,3 +707,475 @@ async def test_concurrent_start_existing_creates_single_run(data_dir) -> None:  
         monkeypatch.undo()
         await agent.aclose()
         await harness.aclose()
+
+
+# ---------------------------------------------------------------- adversarial-review fixes (2026-08-08, round 2)
+def _ready_request_with_snapshot(
+    service: ProcurementService,
+    harness: Harness,
+) -> tuple[str, str, dict, dict]:
+    """Create the smallest valid request/run/snapshot chain for race tests."""
+    from agentharness.contracts import new_id
+
+    request = service.create_request(_requirement_body())
+    request_id = str(request["id"])
+    first = service.import_quote(
+        request_id,
+        filename="供应商甲报价.xlsx",
+        data=b"quote-race-a",
+        extracted=_ready_quote_extracted("供应商甲"),
+    )
+    service.import_quote(
+        request_id,
+        filename="供应商乙报价.xlsx",
+        data=b"quote-race-b",
+        extracted=_ready_quote_extracted("供应商乙"),
+    )
+    run_id = new_id()
+    harness.storage.runs.create_run(
+        run_id=run_id,
+        session_id=str(request["session_id"]),
+        root_run_id=run_id,
+    )
+    snapshot = service.compare_for_agent(request_id, run_id=run_id)
+    return request_id, run_id, first, snapshot
+
+
+def test_approval_commit_rejects_snapshot_invalidated_after_validation(
+    data_dir, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """A correction committed after approval validation must make the final
+    decision write fail closed instead of approving the stale snapshot."""
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    try:
+        request_id, run_id, first, snapshot = _ready_request_with_snapshot(
+            service, harness
+        )
+        real_commit = service.repo.commit_decision
+
+        def commit_after_correction(decision, audit_event, **kwargs):  # type: ignore[no-untyped-def]
+            service.correct_field(
+                request_id,
+                str(first["id"]),
+                field="shipping_fee",
+                value="7",
+                actor="并发采购员",
+            )
+            return real_commit(decision, audit_event, **kwargs)
+
+        monkeypatch.setattr(service.repo, "commit_decision", commit_after_correction)
+        with pytest.raises((ProcurementError, ValueError), match="快照|已变化"):
+            service.approve_supplier_from_agent(
+                request_id,
+                snapshot_id=str(snapshot["id"]),
+                input_sha256=str(snapshot["input_sha256"]),
+                quote_id=str(snapshot["result"]["recommended_quote_id"]),
+                run_id=run_id,
+                approval_id="approval-race",
+                note=None,
+                actor="采购员",
+            )
+
+        current = service.get_request(request_id)
+        assert current["decision"] is None
+        assert current["current_snapshot_id"] is None
+    finally:
+        harness.close()
+
+
+def test_concurrent_field_corrections_do_not_overwrite_each_other(
+    data_dir, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Two fields corrected at the same time must merge against the latest
+    quote row; storing a stale whole extracted_json loses one buyer edit."""
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from threading import Barrier
+
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    try:
+        request = service.create_request(_requirement_body())
+        request_id = str(request["id"])
+        quote = service.import_quote(
+            request_id,
+            filename="并发修正.xlsx",
+            data=b"concurrent-correction",
+            extracted=_ready_quote_extracted("并发供应商"),
+        )
+        quote_id = str(quote["id"])
+        real_transaction = service.storage.transaction
+        ready = Barrier(2)
+
+        @contextmanager
+        def synchronized_transaction():
+            ready.wait(timeout=5)
+            with real_transaction():
+                yield
+
+        monkeypatch.setattr(service.storage, "transaction", synchronized_transaction)
+
+        def correct(field: str, value: str) -> None:
+            service.correct_field(
+                request_id,
+                quote_id,
+                field=field,
+                value=value,
+                actor="采购员",
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(correct, "shipping_fee", "7"),
+                pool.submit(correct, "payment_terms", "预付 30%"),
+            ]
+            for future in futures:
+                future.result(timeout=10)
+
+        fields = service.get_request(request_id)["quotes"][0]["extracted"]["fields"]
+        assert fields["shipping_fee"]["value"] == "7"
+        assert fields["payment_terms"]["value"] == "预付 30%"
+    finally:
+        harness.close()
+
+
+def test_concurrent_duplicate_quote_import_is_single_write(
+    data_dir, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Concurrent retries of the same file must not bypass the per-request
+    source hash check and create duplicate supplier rows."""
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from threading import Barrier
+
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    try:
+        request = service.create_request(_requirement_body())
+        request_id = str(request["id"])
+        real_transaction = service.storage.transaction
+        ready = Barrier(2)
+
+        @contextmanager
+        def synchronized_transaction():
+            ready.wait(timeout=5)
+            with real_transaction():
+                yield
+
+        monkeypatch.setattr(service.storage, "transaction", synchronized_transaction)
+
+        def import_once(filename: str) -> str:
+            try:
+                service.import_quote(
+                    request_id,
+                    filename=filename,
+                    data=b"same-quote-content",
+                    extracted=_ready_quote_extracted("重复供应商"),
+                )
+                return "created"
+            except ProcurementError:
+                return "duplicate"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(
+                pool.map(import_once, ["重复报价-A.xlsx", "重复报价-B.xlsx"])
+            )
+
+        assert sorted(results) == ["created", "duplicate"]
+        assert service.get_request(request_id)["quote_count"] == 1
+    finally:
+        harness.close()
+
+
+@pytest.mark.asyncio
+async def test_stream_clamps_future_last_event_id_to_current_frontier(
+    data_dir, workspace, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """A stale browser may reconnect with a cursor from another data directory;
+    the header cursor must be clamped just like the query-string cursor."""
+    from httpx import ASGITransport, AsyncClient
+
+    from agentharness.api.server import create_app
+
+    harness = Harness(data_dir=data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    seen_cursors: list[int] = []
+
+    def no_events(*, after_global_seq=0, run_id=None, limit=500):  # type: ignore[no-untyped-def]
+        del run_id, limit
+        seen_cursors.append(after_global_seq)
+        return []
+
+    monkeypatch.setattr(harness, "get_events", no_events)
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get(
+                "/api/stream?after=0",
+                headers={
+                    "Last-Event-ID": "999999",
+                    "x-test-short-stream": "1",
+                },
+            )
+        assert response.status_code == 200
+        assert seen_cursors
+        assert seen_cursors[0] == harness.storage.max_global_seq()
+    finally:
+        await app.state.procurement_agent.aclose()
+        await app.state.run_supervisor.aclose()
+        await harness.aclose()
+
+
+def test_extreme_decimal_exponents_are_rejected_before_plain_formatting(
+    data_dir,
+) -> None:  # type: ignore[no-untyped-def]
+    """Untrusted quote/model numbers must not expand into unbounded strings."""
+    assert coerce_field_value("unit_price", "1e10000") is None
+    assert coerce_field_value("shipping_fee", "1e-10000") is None
+
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    try:
+        payload = _requirement_body()
+        payload["constraints"]["fx_rates"]["USD"] = "1e10000"
+        with pytest.raises(ProcurementError, match="范围|数值"):
+            service.create_request(payload)
+    finally:
+        harness.close()
+
+
+def test_carton_quote_missing_height_remains_in_human_review(data_dir) -> None:  # type: ignore[no-untyped-def]
+    """A three-dimensional RFQ must not become ready while the quote's third
+    dimension is absent, even though height is optional for flat products."""
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    try:
+        payload = _requirement_body()
+        payload["item_name"] = "五层瓦楞纸箱"
+        payload["specifications"]["height_mm"] = "250"
+        request = service.create_request(payload)
+        request_id = str(request["id"])
+
+        quote = service.import_quote(
+            request_id,
+            filename="纸箱报价.xlsx",
+            data=b"carton-without-height",
+            extracted=_ready_quote_extracted("纸箱供应商"),
+        )
+        assert "height_mm" in quote["review_fields"]
+        assert quote["status"] == "needs_review"
+        assert service.get_request(request_id)["status"] == "review"
+
+        corrected = service.correct_field(
+            request_id,
+            str(quote["id"]),
+            field="height_mm",
+            value="250",
+        )
+        assert "height_mm" not in corrected["review_fields"]
+        assert corrected["status"] == "ready"
+        assert service.get_request(request_id)["status"] == "collecting"
+    finally:
+        harness.close()
+
+
+def test_box_sealing_tape_does_not_require_carton_height(data_dir) -> None:  # type: ignore[no-untyped-def]
+    """The English carton alias must be word-aware and must not turn tape
+    descriptions into three-dimensional carton requirements."""
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    try:
+        payload = _requirement_body()
+        payload["item_name"] = "carton sealing tape"
+        request = service.create_request(payload)
+        assert "height_mm" not in request["specifications"]
+    finally:
+        harness.close()
+
+
+def test_requirement_recapture_applies_new_carton_height_review_rule(data_dir) -> None:  # type: ignore[no-untyped-def]
+    """When an already-collected RFQ is recaptured as a carton, existing flat
+    quotes must be re-evaluated against the new required third dimension."""
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    try:
+        draft = service.create_draft("需求重新识别")
+        run_id = "recapture-height-run"
+        harness.storage.create_run(
+            run_id=run_id,
+            session_id=str(draft["session_id"]),
+            root_run_id=run_id,
+        )
+        service.capture_requirement(str(draft["id"]), _requirement_body(), run_id=run_id)
+        service.import_quote(
+            str(draft["id"]),
+            filename="平面报价.xlsx",
+            data=b"flat-quote-for-recapture",
+            extracted=_ready_quote_extracted("平面报价供应商"),
+        )
+        carton_payload = _requirement_body()
+        carton_payload["item_name"] = "五层瓦楞纸箱"
+        carton_payload["specifications"]["height_mm"] = "250"
+        state = service.capture_requirement(str(draft["id"]), carton_payload, run_id=run_id)
+        assert state["status"] == "review"
+        assert "height_mm" in state["quotes"][0]["review_fields"]
+    finally:
+        harness.close()
+
+
+@pytest.mark.asyncio
+async def test_blank_model_config_key_preserves_existing_secret(data_dir) -> None:  # type: ignore[no-untyped-def]
+    """The settings drawer promises that a blank API-key field keeps the
+    current secret; editing only the model must not silently erase it."""
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    agent = ProcurementAgent(harness, service, run_profile=_fake_run_profile())
+    secret = "sk-preserve-existing-secret"
+    common = {
+        "provider": "openai",
+        "base_url": "https://gateway.example/v1",
+        "api_mode": "auto",
+        "reasoning_effort": None,
+        "input_price_per_million_usd": 1,
+        "output_price_per_million_usd": 2,
+        "cached_input_price_per_million_usd": 0.5,
+        "max_cost_usd": 3,
+    }
+    try:
+        await agent.configure_model(model="model-a", api_key=secret, **common)
+        await agent.configure_model(model="model-b", api_key=None, **common)
+
+        adapter = harness.providers["openai"]
+        assert adapter.api_key == secret
+        assert agent.model_config()["api_key_configured"] is True
+        persisted = agent._read_persisted_model_config()
+        assert persisted is not None
+        assert persisted["api_key"] == secret
+    finally:
+        await agent.aclose()
+        await harness.aclose()
+
+
+def test_concurrent_purchase_order_creation_returns_one_canonical_order(
+    data_dir, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Two simultaneous JSON/CSV export requests must return the same persisted
+    order and create exactly one audit event."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    harness = Harness(data_dir=data_dir)
+    service = ProcurementService(harness)
+    try:
+        request_id, run_id, _first, snapshot = _ready_request_with_snapshot(
+            service, harness
+        )
+        service.approve_supplier_from_agent(
+            request_id,
+            snapshot_id=str(snapshot["id"]),
+            input_sha256=str(snapshot["input_sha256"]),
+            quote_id=str(snapshot["result"]["recommended_quote_id"]),
+            run_id=run_id,
+            approval_id="approval-po-race",
+            note=None,
+            actor="采购员",
+        )
+
+        real_save = service.repo.save_purchase_order
+        ready = Barrier(2)
+
+        def synchronized_save(order, *args, **kwargs):  # type: ignore[no-untyped-def]
+            ready.wait(timeout=5)
+            return real_save(order, *args, **kwargs)
+
+        monkeypatch.setattr(service.repo, "save_purchase_order", synchronized_save)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            orders = list(pool.map(service.purchase_order, [request_id, request_id]))
+
+        assert orders[0]["id"] == orders[1]["id"]
+        assert orders[0]["evidence_sha256"] == orders[1]["evidence_sha256"]
+        stored = service.repo.get_purchase_order(request_id)
+        assert stored is not None
+        assert stored["id"] == orders[0]["id"]
+        events = [
+            event
+            for event in service.repo.list_audit_events(request_id)
+            if event["type"] == "purchase_order_created"
+        ]
+        assert len(events) == 1
+    finally:
+        harness.close()
+
+
+@pytest.mark.asyncio
+async def test_streamed_request_body_is_limited_without_content_length(
+    data_dir, workspace, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """Chunked uploads must have the same hard body limit as requests that
+    advertise Content-Length."""
+    from httpx import ASGITransport, AsyncClient
+
+    import agentharness.api.server as server_module
+
+    monkeypatch.setattr(server_module, "MAX_REQUEST_BODY_BYTES", 64)
+    harness = Harness(data_dir=data_dir)
+    app = server_module.create_app(harness=harness, workspace_roots=[workspace])
+
+    async def oversized_body():
+        yield b'{"provider":"procurement_fake",'
+        yield b'"model":"' + b"x" * 80 + b'"}'
+
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/procurement/config",
+                content=oversized_body(),
+                headers={"Content-Type": "application/json"},
+            )
+        assert response.status_code == 413
+        assert response.json()["detail"] == "Request body too large"
+    finally:
+        await app.state.procurement_agent.aclose()
+        await app.state.run_supervisor.aclose()
+        await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_model_config_response_redacts_secret_in_base_url(data_dir, workspace) -> None:  # type: ignore[no-untyped-def]
+    """A user can accidentally put a credential in a gateway query string;
+    config GET/POST responses must not echo it back to the browser."""
+    import json
+
+    from httpx import ASGITransport, AsyncClient
+
+    from agentharness.api.server import create_app
+
+    harness = Harness(data_dir=data_dir)
+    app = create_app(harness=harness, workspace_roots=[workspace])
+    transport = ASGITransport(app=app)
+    secret = "sk-url-secret-1234567890"
+    body = {
+        "provider": "openai",
+        "model": "model-url-secret",
+        "base_url": f"https://gateway.example/v1?api_key={secret}",
+        "api_mode": "auto",
+        "reasoning_effort": "auto",
+        "input_price_per_million_usd": 0,
+        "output_price_per_million_usd": 0,
+        "cached_input_price_per_million_usd": 0,
+        "max_cost_usd": None,
+    }
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            saved = await client.post("/api/procurement/config", json=body)
+            current = await client.get("/api/procurement/config")
+        assert saved.status_code == 409
+        assert current.status_code == 200
+        assert secret not in json.dumps(saved.json(), ensure_ascii=False)
+        assert secret not in json.dumps(current.json(), ensure_ascii=False)
+    finally:
+        await app.state.procurement_agent.aclose()
+        await app.state.run_supervisor.aclose()
+        await harness.aclose()

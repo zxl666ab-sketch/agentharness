@@ -87,6 +87,15 @@ function requestDate(value: string) {
   return new Date(value).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
 }
 
+function formatSpecifications(specifications: ProcurementRequest["specifications"]) {
+  const dimensions = [
+    specifications.width_mm,
+    specifications.length_mm,
+    specifications.height_mm,
+  ].filter((value) => value !== undefined && value !== null && value !== "");
+  return `${dimensions.map(String).join(" × ")} mm · ${String(specifications.thickness_um)} µm`;
+}
+
 const DEFAULT_CONFIG_FORM: ProcurementModelConfigUpdate = {
   provider: "openai",
   model: "gpt-4o-mini",
@@ -145,6 +154,7 @@ export function ProcurementWorkbench({
   const [configNotice, setConfigNotice] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const configFormReady = useRef(false);
+  const configCloseRef = useRef<HTMLButtonElement | null>(null);
 
   const metaQuery = useQuery({ queryKey: ["procurement-meta"], queryFn: procurementApi.meta });
   const configQuery = useQuery({ queryKey: ["procurement-config"], queryFn: procurementApi.config });
@@ -445,6 +455,21 @@ export function ProcurementWorkbench({
     }
   }, [configQuery.data, showConfig]);
 
+  useEffect(() => {
+    // Dismiss on Escape even when focus is no longer inside the drawer
+    // (clicking "save config" disables the focused submit button, which makes
+    // Chrome drop focus to <body>).
+    if (!showConfig) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        setShowConfig(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [showConfig]);
+
   function updateConfigField<K extends keyof ProcurementModelConfigUpdate>(
     field: K,
     value: ProcurementModelConfigUpdate[K]
@@ -526,6 +551,9 @@ export function ProcurementWorkbench({
       setConfigError(errorText(error));
     } finally {
       setConfigBusy(false);
+      // The submit button is disabled while saving; browsers then drop focus
+      // to <body>. Restore it to the close button once the re-render commits.
+      window.setTimeout(() => configCloseRef.current?.focus(), 0);
     }
   }
 
@@ -624,7 +652,7 @@ export function ProcurementWorkbench({
                 <div className="proc-request-facts">
                   <span><small>物料</small><strong>{detail.status === "draft" ? "待识别" : detail.item_name}</strong></span>
                   <span><small>采购量</small><strong>{detail.status === "draft" ? "待识别" : `${detail.quantity.toLocaleString("zh-CN")} 个`}</strong></span>
-                  <span><small>规格</small><strong>{detail.status === "draft" ? "待识别" : `${String(detail.specifications.width_mm)} × ${String(detail.specifications.length_mm)} mm · ${String(detail.specifications.thickness_um)} µm`}</strong></span>
+                  <span><small>规格</small><strong>{detail.status === "draft" ? "待识别" : formatSpecifications(detail.specifications)}</strong></span>
                   <span><small>最长交期</small><strong>{detail.status === "draft" ? "待识别" : `${String(detail.constraints.max_lead_days)} 天`}</strong></span>
                 </div>
                 <ol className="proc-progress" aria-label="采购进度">
@@ -703,7 +731,12 @@ export function ProcurementWorkbench({
             if (event.target === event.currentTarget) setShowConfig(false);
           }}
         >
-          <aside className="proc-config-drawer" role="dialog" aria-modal="true" aria-labelledby="proc-config-title">
+          <aside
+            className="proc-config-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="proc-config-title"
+          >
             <header className="proc-config-head">
               <div>
                 <span className="proc-config-icon"><Settings size={17} /></span>
@@ -712,11 +745,18 @@ export function ProcurementWorkbench({
                   <p>仅影响之后新启动的采购 Agent 运行</p>
                 </div>
               </div>
-              <button className="proc-icon-button compact" type="button" title="关闭配置" aria-label="关闭配置" onClick={() => setShowConfig(false)}>
+              <button ref={configCloseRef} autoFocus className="proc-icon-button compact" type="button" title="关闭配置" aria-label="关闭配置" onClick={() => setShowConfig(false)}>
                 <X size={16} />
               </button>
             </header>
 
+            <form
+              className="proc-config-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void saveConfig();
+              }}
+            >
             <div className="proc-config-body">
               {configQuery.isPending ? <div className="proc-config-loading"><LoaderCircle className="spin" size={18} />正在读取当前配置…</div> : null}
               {configQuery.isError ? (
@@ -827,10 +867,11 @@ export function ProcurementWorkbench({
             </div>
             <footer className="proc-config-actions">
               <button className="proc-button secondary" type="button" onClick={() => setShowConfig(false)}>取消</button>
-              <button className="proc-button" type="button" disabled={configBusy || configQuery.isPending || configQuery.isError} onClick={() => void saveConfig()}>
+              <button className="proc-button" type="submit" disabled={configBusy || configQuery.isPending || configQuery.isError}>
                 {configBusy ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}保存配置
               </button>
             </footer>
+            </form>
           </aside>
         </div>
       ) : null}

@@ -2,7 +2,7 @@
 import { createRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ComparisonView } from "./ComparisonView";
 import { buildCsv, DashboardView } from "./DashboardView";
@@ -13,10 +13,12 @@ import {
   ProcurementConversation,
 } from "./ProcurementConversation";
 import { QuoteWorkspace } from "./QuoteWorkspace";
+import { ProcurementWorkbench } from "./ProcurementWorkbench";
 import { procurementReportMarkdown, ReportView } from "./ReportView";
 import type {
   ProcurementAuditReport,
   ProcurementMeta,
+  ProcurementModelConfig,
   ProcurementRequest,
 } from "./types";
 
@@ -157,6 +159,10 @@ function analyzed(): ProcurementRequest {
     },
   };
 }
+
+vi.mock("../useAgentStream", () => ({
+  useAgentStream: () => ({ status: "closed", events: [] }),
+}));
 
 describe("procurement workflow views", () => {
   it("explains a blocked model request and preserves the recovery path", () => {
@@ -646,4 +652,85 @@ describe("历史成交参考（stage-6 RAG）", () => {
     expect(csv).toContain('"normal"');
     expect(csv).toContain('"\'\t=SUM(A1)"');
     expect(csv).toContain('"\'\n=cmd()"');
+
+
+  });
+
+  it("restores focus in the config drawer after saving and keeps Escape dismissal", async () => {
+    const originalFetch = globalThis.fetch;
+    const config: ProcurementModelConfig = {
+      provider: "openai",
+      model: "gpt-4o-mini",
+      base_url: null,
+      api_mode: "auto",
+      reasoning_effort: "auto",
+      api_key_configured: true,
+      api_key_preview: "••••abcd",
+      input_price_per_million_usd: 0,
+      output_price_per_million_usd: 0,
+      cached_input_price_per_million_usd: 0,
+      max_cost_usd: null,
+      ai_review_enabled: false,
+      review_provider: "openai",
+      review_model: null,
+      review_policy: "evidence",
+    };
+    const json = (data: unknown) =>
+      new Response(JSON.stringify(data), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/procurement/meta")) return json(meta);
+      if (url.endsWith("/api/procurement/config")) return json(config);
+      if (url.includes("/api/procurement/requests")) return json([]);
+      return new Response("not found", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    try {
+      await act(async () => {
+        root.render(
+          <QueryClientProvider client={client}>
+            <ProcurementWorkbench theme="light" backendVersion="0.3.0" onToggleTheme={() => undefined} />
+          </QueryClientProvider>
+        );
+      });
+      const configButton = container.querySelector('button[aria-label="API / 模型配置"]') as HTMLButtonElement;
+      expect(configButton).toBeTruthy();
+      await act(async () => {
+        configButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const dialog = container.querySelector('[role="dialog"]');
+      expect(dialog).toBeTruthy();
+      const submit = container.querySelector('[role="dialog"] button[type="submit"]') as HTMLButtonElement;
+      expect(submit.textContent).toContain("保存配置");
+      // Clicking the submit button disables it while saving (browsers then
+      // drop focus to <body>); the drawer must return focus to the close
+      // button so Escape and keyboard navigation keep working.
+      await act(async () => {
+        submit.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      });
+      expect(document.activeElement?.getAttribute("aria-label")).toBe("关闭配置");
+      // Escape must dismiss even when focus is outside the dialog.
+      document.body.focus();
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      });
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      document.body.removeChild(container);
+      globalThis.fetch = originalFetch;
+    }
   });

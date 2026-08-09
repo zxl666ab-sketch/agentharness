@@ -17,6 +17,7 @@ const FIELD_LABELS: Record<string, string> = {
   quantity: "采购数量",
   width_mm: "宽度",
   length_mm: "长度",
+  height_mm: "高度",
   thickness_um: "厚度",
   material: "材质",
   color: "颜色",
@@ -195,7 +196,7 @@ export const procurementApi = {
     chunkId: string,
     action: "viewed" | "adopted"
   ) =>
-    postJson<{ ok: boolean; request_id: string; chunk_id: string; action: string }>(
+    postJson<{ ok: boolean; recorded: boolean; request_id: string; chunk_id: string; action: string }>(
       `/api/procurement/requests/${requestId}/knowledge/feedback`,
       { chunk_id: chunkId, action }
     ),

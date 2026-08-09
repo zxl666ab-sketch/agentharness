@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -46,8 +47,8 @@ from agentharness.procurement.parsing import PARSER_VERSION
 from agentharness.procurement.service import (
     DEFAULT_SIZE_TOLERANCE_MM,
     DEFAULT_THICKNESS_TOLERANCE_UM,
-    REQUIRED_SPEC_FIELDS,
     SUPPORTED_CONSTRAINT_FIELDS,
+    SUPPORTED_SPEC_FIELDS,
     ProcurementError,
     ProcurementService,
 )
@@ -506,6 +507,13 @@ def create_procurement_tools(
                             "1000m=1000000。"
                         ),
                     },
+                    "height_mm": {
+                        "type": ["string", "number", "null"],
+                        "description": (
+                            "可选高度（mm）：三维纸箱规格 400x300x250mm 的第三个尺寸是 250，"
+                            "纸箱需求必须填写；袋、膜、胶带等平面或卷材省略。"
+                        ),
+                    },
                     "thickness_um": {
                         "type": ["string", "number"],
                         "description": "厚度（µm）：薄材用微米；厚材质（如瓦楞纸箱 5mm）填写 5000。",
@@ -610,11 +618,11 @@ def create_procurement_tools(
     spec_props = set(capture_schema["properties"]["specifications"]["properties"])
     constraint_props = set(capture_schema["properties"]["constraints"]["properties"])
     missing = sorted(
-        (REQUIRED_SPEC_FIELDS - spec_props)
+        (SUPPORTED_SPEC_FIELDS - spec_props)
         | (SUPPORTED_CONSTRAINT_FIELDS - constraint_props)
     )
     extra = sorted(
-        (spec_props - REQUIRED_SPEC_FIELDS)
+        (spec_props - SUPPORTED_SPEC_FIELDS)
         | (constraint_props - SUPPORTED_CONSTRAINT_FIELDS)
     )
     if missing or extra:
@@ -842,12 +850,14 @@ class ProcurementFakeProvider:
             return match.group(1) if match else default
 
         size = re.search(
-            r"(\d+(?:\.\d+)?)\s*[xX×*]\s*(\d+(?:\.\d+)?)\s*(?:mm|毫米)?",
+            r"(\d+(?:\.\d+)?)\s*[xX×*]\s*(\d+(?:\.\d+)?)"
+            r"(?:\s*[xX×*]\s*(\d+(?:\.\d+)?))?\s*(?:mm|毫米)?",
             text,
         )
         quantity = int(number(r"采购\s*(\d+)\s*个", "1"))
         width = size.group(1) if size else "0"
         length = size.group(2) if size else "0"
+        height = size.group(3) if size and size.group(3) else None
         thickness = number(r"厚(?:度)?\s*(\d+(?:\.\d+)?)", "0")
         lead_days = int(number(r"(\d+)\s*天内", "15"))
         usd_rate = number(r"(?:USD\s*/\s*CNY|美元[^，；。]{0,10})[^0-9]*(\d+(?:\.\d+)?)", "7.2")
@@ -886,6 +896,7 @@ class ProcurementFakeProvider:
             "specifications": {
                 "width_mm": width,
                 "length_mm": length,
+                **({"height_mm": height} if height is not None else {}),
                 "thickness_um": thickness,
                 "material": "瓦楞纸" if "瓦楞" in text else "PE" if re.search(r"(?<![A-Za-z0-9])PE(?![A-Za-z0-9])", text, re.IGNORECASE) else "未说明",
                 "color": "牛皮色" if "牛皮" in text else "白色" if "白色" in text else "未说明",
@@ -1630,6 +1641,30 @@ class ProcurementAgent:
 
         clean_model = model.strip()
         clean_base_url = (base_url or "").strip() or None
+        if clean_base_url:
+            parsed_base_url = urlsplit(clean_base_url)
+            sensitive_query_keys = {
+                "apikey",
+                "key",
+                "token",
+                "accesstoken",
+                "secret",
+                "password",
+                "signature",
+                "sig",
+            }
+            query_keys = {
+                re.sub(r"[^a-z0-9]", "", key.casefold())
+                for key, _value in parse_qsl(parsed_base_url.query, keep_blank_values=True)
+            }
+            if (
+                parsed_base_url.username is not None
+                or parsed_base_url.password is not None
+                or query_keys & sensitive_query_keys
+            ):
+                raise ValueError(
+                    "API Base URL 不能携带用户名、密码或查询凭据；请使用 API Key 字段"
+                )
         clean_mode = (api_mode or "auto").strip().lower() or "auto"
         if clean_mode not in {"auto", "chat", "responses"}:
             raise ValueError("API 模式仅支持自动、Chat Completions 或 Responses")
@@ -1686,7 +1721,27 @@ class ProcurementAgent:
         if not clean_model:
             raise ValueError("OpenAI 兼容 API 必须填写模型名称")
         current_adapter = self.harness.providers.get(PROCUREMENT_LIVE_PROVIDER)
-        configured_key = (api_key or "").strip() or None
+        # The settings UI intentionally omits a blank api_key to mean "keep the
+        # current secret".  Preserve it before replacing/closing the adapter;
+        # otherwise changing only the model silently makes the next run unauthenticated.
+        current_key = (
+            str(getattr(current_adapter, "api_key", "") or "").strip()
+            or self.run_profile.api_key
+            or None
+        )
+        configured_key = (api_key or "").strip() or current_key
+        # Environment configuration is authoritative in this mode.  A missing
+        # Base URL therefore means "use the environment's endpoint", while a
+        # user-managed configuration without environment overrides can still
+        # clear a custom endpoint back to the provider default.
+        current_base_url = (
+            str(getattr(current_adapter, "base_url", "") or "").strip()
+            or self.run_profile.base_url
+            or None
+        )
+        configured_base_url = clean_base_url or (
+            current_base_url if self._env_model_config_present() else None
+        )
         from agentharness.providers.openai_adapter import OpenAIResponsesAdapter
 
         if configured_key is None and self._env_model_config_present():
@@ -1697,7 +1752,7 @@ class ProcurementAgent:
             use_env = False
         adapter = OpenAIResponsesAdapter(
             api_key=configured_key,
-            base_url=clean_base_url,
+            base_url=configured_base_url,
             default_model=clean_model,
             api_mode=clean_mode,
             use_env=use_env,
@@ -1727,7 +1782,7 @@ class ProcurementAgent:
                 max_tool_calls_per_turn=1,
             ),
             reasoning_effort=clean_reasoning,
-            base_url=clean_base_url,
+            base_url=configured_base_url,
             api_mode=clean_mode,
             api_key=configured_key,
         )
@@ -1778,6 +1833,7 @@ class ProcurementAgent:
             "不要写反方向；"
             "规格按 宽×长×高（mm）书写：第一个数字是宽度、第二个是长度、第三个是高度，"
             "不要把宽度与长度写反（例如 400x300x250mm 表示宽 400mm、长 300mm、高 250mm）；"
+            "纸箱必须把第三个尺寸写入 height_mm，袋、膜、胶带等没有高度的物料省略 height_mm；"
             "用户给出“X 月 X 日前必须到货”等日期要求时，必须结构化为 required_delivery_date "
             "（YYYY-MM-DD），该约束与 max_lead_days 同时生效，不得丢弃；"
             f"未写年份的“X 月 X 日”一律按当前年份（{current_year} 年）解释；若按当前年份计算该日期 "

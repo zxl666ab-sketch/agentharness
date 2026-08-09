@@ -276,6 +276,7 @@ export type CreateProcurementRequest = {
   specifications: {
     width_mm: number;
     length_mm: number;
+    height_mm?: number;
     thickness_um: number;
     material: string;
     color: string;

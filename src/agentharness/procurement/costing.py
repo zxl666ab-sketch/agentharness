@@ -9,6 +9,8 @@ from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
+from agentharness.procurement.parsing import decimal_is_resource_bounded
+
 RULESET_VERSION = "landed-cost-v1"
 MONEY = Decimal("0.01")
 UNIT_MONEY = Decimal("0.0001")
@@ -19,6 +21,7 @@ SPEC_LABELS = {
     "print_colors": "印刷色数",
     "width_mm": "宽度",
     "length_mm": "长度",
+    "height_mm": "高度",
     "thickness_um": "厚度",
 }
 
@@ -34,16 +37,22 @@ def _canonical_item(value: Any) -> str | None:
         "trash_bag": ("垃圾袋", "trash bag", "garbage bag", "bin liner"),
         # 电商包装耗材已支持的其余品类：
         # 纸箱 / 气泡膜 / 缠绕膜 / 封箱胶带 / 珍珠棉
-        "carton": ("纸箱", "包装箱", "carton", "corrugated", "box"),
         "bubble": ("气泡膜", "气泡袋", "气泡垫", "bubble wrap", "bubble film", "bubble"),
         "stretch": ("缠绕膜", "拉伸膜", "stretch film", "stretch wrap", "stretch"),
         "tape": ("封箱胶带", "胶带", "tape"),
         "foam": ("珍珠棉", "epe", "pe foam", "foam"),
     }
-    return next(
-        (identity for identity, aliases in groups.items() if any(alias in text for alias in aliases)),
+    identity = next(
+        (name for name, aliases in groups.items() if any(alias in text for alias in aliases)),
         None,
     )
+    if identity is not None:
+        return identity
+    if any(alias in text for alias in ("纸箱", "包装箱", "carton", "corrugated")):
+        return "carton"
+    if re.search(r"\bbox(?:es)?\b", text):
+        return "carton"
+    return None
 
 def _canonical_material(value: Any) -> str | None:
     text = str(value or "").strip().casefold()
@@ -81,8 +90,8 @@ def _decimal(value: Any, field: str) -> Decimal:
         result = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise CostingError(f"{field} 不是有效数值") from exc
-    if not result.is_finite():
-        raise CostingError(f"{field} 不是有限数值")
+    if not decimal_is_resource_bounded(result):
+        raise CostingError(f"{field} 超出安全数值范围")
     return result
 
 
@@ -332,13 +341,34 @@ def _normalized_quote(
                 }
             )
 
-    for field, tolerance in (
+    dimensional_checks = [
         ("width_mm", tolerance_mm),
         ("length_mm", tolerance_mm),
         ("thickness_um", tolerance_um),
-    ):
+    ]
+    if specs.get("height_mm") not in (None, ""):
+        dimensional_checks.insert(2, ("height_mm", tolerance_mm))
+    for field, tolerance in dimensional_checks:
         expected = _decimal(specs.get(field), f"需求 {field}")
-        actual = _decimal(fields.get(field), f"报价 {field}")
+        raw_actual = fields.get(field)
+        if raw_actual in (None, ""):
+            spec_checks.append(
+                {
+                    "field": field,
+                    "expected": format(expected, "f"),
+                    "actual": "缺失",
+                    "tolerance": format(tolerance, "f"),
+                    "passed": False,
+                }
+            )
+            exclusions.append(
+                {
+                    "code": f"spec_{field}",
+                    "message": f"报价缺少{SPEC_LABELS[field]}，无法确认符合需求",
+                }
+            )
+            continue
+        actual = _decimal(raw_actual, f"报价 {field}")
         passed = abs(actual - expected) <= tolerance
         spec_checks.append(
             {

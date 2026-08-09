@@ -4504,6 +4504,7 @@ def test_carton_requirement_is_verifiable_and_recommends() -> None:
         "specifications": {
             "width_mm": "400",
             "length_mm": "300",
+            "height_mm": "250",
             "thickness_um": "5000",
             "material": "瓦楞纸",
             "color": "牛皮色",
@@ -4522,7 +4523,7 @@ def test_carton_requirement_is_verifiable_and_recommends() -> None:
 
     def quote(quote_id: str, supplier: str, *, invoice: bool, unit_price: str,
               currency: str = "CNY", freight: str = "0", shipping_included: bool = True,
-              moq: int = 5000, lead: int = 15) -> dict:
+              moq: int = 5000, lead: int = 15, height: str = "250") -> dict:
         values = {
             "supplier_name": supplier,
             "item_description": "五层瓦楞纸箱 400x300x250mm 5000um 牛皮色 单色印刷",
@@ -4541,6 +4542,7 @@ def test_carton_requirement_is_verifiable_and_recommends() -> None:
             "supports_invoice": invoice,
             "width_mm": "400",
             "length_mm": "300",
+            "height_mm": height,
             "thickness_um": "5000",
             "valid_until": "2026-12-31",
         }
@@ -4557,16 +4559,22 @@ def test_carton_requirement_is_verifiable_and_recommends() -> None:
     hn = quote("hn", "沪宁纸品", invoice=True, unit_price="3.45")
     south = quote("south", "华南纸业", invoice=False, unit_price="0.38",
                   currency="USD", freight="300")
+    short = quote("short", "矮箱供应商", invoice=True, unit_price="2.80", height="100")
 
     result = compare_quotes(
         request,
-        [hn, south, zj],
+        [hn, south, short, zj],
         analysis_as_of="2026-08-08",
     )
     by_id = {item["quote_id"]: item for item in result["quotes"]}
     assert by_id["zj"]["eligible"] is True, by_id["zj"]["exclusion_reasons"]
     assert by_id["hn"]["eligible"] is True, by_id["hn"]["exclusion_reasons"]
     assert by_id["south"]["eligible"] is False
+    assert by_id["short"]["eligible"] is False
+    assert any(
+        reason["code"] == "spec_height_mm"
+        for reason in by_id["short"]["exclusion_reasons"]
+    )
     codes = {r["code"] for r in by_id["south"]["exclusion_reasons"]}
     assert "invoice" in codes
     # Identity checks must now be verifiable, not 'cannot review'.
@@ -4576,6 +4584,19 @@ def test_carton_requirement_is_verifiable_and_recommends() -> None:
         assert checks["material"] is True
         assert checks["color"] is True
     assert result["recommended_quote_id"] == "zj"
+
+
+def test_carton_description_extracts_third_dimension_as_height() -> None:
+    document = _xlsx_bytes(
+        [
+            ["供应商", "三维纸箱厂"],
+            ["品名", "五层瓦楞纸箱 400x300x250mm 5000um 牛皮色 单色印刷"],
+        ]
+    )
+    extracted = parse_quote("carton-height.xlsx", document)
+    assert extracted["fields"]["width_mm"]["value"] == "400"
+    assert extracted["fields"]["length_mm"]["value"] == "300"
+    assert extracted["fields"]["height_mm"]["value"] == "250"
 
 def test_ambiguous_free_shipping_with_delivery_fee_requires_review() -> None:
     """P1: 江浙沪包邮 + 新疆西藏运费到付 must NOT parse as shipping_included=True
@@ -4695,6 +4716,11 @@ def test_api_currency_codes_require_three_uppercase_letters() -> None:
         ProcurementConstraints(base_currency="CNY", fx_rates={"CN¥": "1"})
     with pytest.raises(ValidationError):
         ProcurementConstraints(base_currency="CNY", fx_rates={"US": "1"})
+    with pytest.raises(ValidationError, match="重复"):
+        ProcurementConstraints(
+            base_currency="CNY",
+            fx_rates={"CNY": "1", "usd": "7.2", "USD": "7.3"},
+        )
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@ import io
 import re
 import time
 import zipfile
+from collections.abc import Iterable
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -26,6 +27,12 @@ MAX_PDF_PAGES = 20
 MAX_EXTRACTED_CHARS = 200_000
 MAX_TEXT_VALUE_LENGTH = 2000
 REVIEW_THRESHOLD = 0.80
+# Procurement inputs never need arbitrary-precision exponents.  These bounds
+# keep Decimal -> fixed-point conversion small and also leave enough precision
+# for the largest supported quantity/currency calculations.
+MAX_DECIMAL_SIGNIFICANT_DIGITS = 18
+MIN_DECIMAL_ADJUSTED_EXPONENT = -18
+MAX_DECIMAL_ADJUSTED_EXPONENT = 9
 
 
 class QuoteParseError(ValueError):
@@ -50,6 +57,7 @@ FIELD_META: dict[str, dict[str, Any]] = {
     "supports_invoice": {"label": "是否可开票", "kind": "boolean", "required": True},
     "width_mm": {"label": "宽度（mm）", "kind": "decimal", "required": True},
     "length_mm": {"label": "长度（mm）", "kind": "decimal", "required": True},
+    "height_mm": {"label": "高度（mm）", "kind": "decimal", "required": False},
     "thickness_um": {"label": "厚度（µm）", "kind": "decimal", "required": True},
     "payment_terms": {"label": "付款条件", "kind": "text", "required": False},
     "valid_until": {"label": "报价有效期", "kind": "date", "required": False},
@@ -87,7 +95,8 @@ _ALIASES = {
         "supportsinvoice",
     ],
     "width_mm": ["宽", "宽度", "宽mm", "宽度mm", "width", "widthmm"],
-    "length_mm": ["长", "长度", "高度", "长mm", "长度mm", "length", "height", "lengthmm"],
+    "length_mm": ["长", "长度", "长mm", "长度mm", "length", "lengthmm"],
+    "height_mm": ["高", "高度", "高mm", "高度mm", "height", "heightmm"],
     "thickness_um": ["厚度", "厚度um", "厚度微米", "丝数", "thickness", "thicknessum", "micron"],
     "payment_terms": ["付款条件", "结算方式", "账期", "payment", "paymentterms"],
     "valid_until": ["有效期", "报价有效期", "validuntil", "expiry", "expiration"],
@@ -107,13 +116,25 @@ def _plain_decimal(value: Decimal) -> str:
     return format(normalized, "f") if normalized != 0 else "0"
 
 
+def decimal_is_resource_bounded(value: Decimal) -> bool:
+    """Return whether fixed-point formatting and downstream math stay bounded."""
+    if not value.is_finite():
+        return False
+    if value == 0:
+        return True
+    if len(value.as_tuple().digits) > MAX_DECIMAL_SIGNIFICANT_DIGITS:
+        return False
+    adjusted = value.adjusted()
+    return MIN_DECIMAL_ADJUSTED_EXPONENT <= adjusted <= MAX_DECIMAL_ADJUSTED_EXPONENT
+
+
 def _decimal(value: Any) -> str | None:
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float, Decimal)):
         try:
             result = Decimal(str(value))
-            return _plain_decimal(result) if result.is_finite() else None
+            return _plain_decimal(result) if decimal_is_resource_bounded(result) else None
         except InvalidOperation:
             return None
     text = str(value).strip().replace(",", "")
@@ -122,7 +143,7 @@ def _decimal(value: Any) -> str | None:
         return None
     try:
         result = Decimal(match.group(0))
-        return _plain_decimal(result) if result.is_finite() else None
+        return _plain_decimal(result) if decimal_is_resource_bounded(result) else None
     except InvalidOperation:
         return None
 
@@ -384,7 +405,13 @@ def coerce_field_value(field: str, value: Any) -> Any:
         if result is None:
             return None
         number = Decimal(result)
-        if field in {"unit_price", "width_mm", "length_mm", "thickness_um"} and number <= 0:
+        if field in {
+            "unit_price",
+            "width_mm",
+            "length_mm",
+            "height_mm",
+            "thickness_um",
+        } and number <= 0:
             return None
         if field == "shipping_fee" and number < 0:
             return None
@@ -559,7 +586,8 @@ def _extract_specs(fields: dict[str, Any], document_kind: str) -> None:
         return
     text = str(description["value"])
     size = re.search(
-        r"(\d+(?:\.\d+)?)\s*[xX×*]\s*(\d+(?:\.\d+)?)\s*(mm|cm)?",
+        r"(\d+(?:\.\d+)?)\s*[xX×*]\s*(\d+(?:\.\d+)?)"
+        r"(?:\s*[xX×*]\s*(\d+(?:\.\d+)?))?\s*(mm|cm)?",
         text,
         re.I,
     )
@@ -570,9 +598,11 @@ def _extract_specs(fields: dict[str, Any], document_kind: str) -> None:
     if size:
         # 单位换算：报价描述里常见的 cm 需转成 mm（1 cm = 10 mm），
         # 避免把 20*30cm 当作 20×30mm 直接接受。
-        unit = (size.group(3) or "").lower()
+        unit = (size.group(4) or "").lower()
         scale = Decimal("10") if unit == "cm" else Decimal("1")
-        for field, raw in zip(("width_mm", "length_mm"), size.groups()[:2], strict=True):
+        for field, raw in zip(
+            ("width_mm", "length_mm"), size.groups()[:2], strict=True
+        ):
             value = str(Decimal(str(raw)) * scale)
             _set_field(
                 fields,
@@ -580,6 +610,21 @@ def _extract_specs(fields: dict[str, Any], document_kind: str) -> None:
                 _entry(
                     field,
                     value,
+                    0.84,
+                    document_kind=document_kind,
+                    locator=str(source.get("locator", "description")),
+                    excerpt=text,
+                    method="spec_pattern",
+                ),
+            )
+        if size.group(3) is not None:
+            height = str(Decimal(str(size.group(3))) * scale)
+            _set_field(
+                fields,
+                "height_mm",
+                _entry(
+                    "height_mm",
+                    height,
                     0.84,
                     document_kind=document_kind,
                     locator=str(source.get("locator", "description")),
@@ -1163,11 +1208,16 @@ def parse_quote(
     return _pdf_quote(filename, data, time_budget_s=time_budget_s)
 
 
-def fields_requiring_review(extracted: dict[str, Any]) -> list[str]:
+def fields_requiring_review(
+    extracted: dict[str, Any],
+    *,
+    additional_required: Iterable[str] = (),
+) -> list[str]:
     fields = extracted.get("fields") if isinstance(extracted, dict) else None
     if not isinstance(fields, dict):
         return list(FIELD_META)
     required = [field for field, meta in FIELD_META.items() if meta["required"]]
+    required.extend(field for field in additional_required if field in FIELD_META)
     if fields.get("shipping_included", {}).get("value") is False:
         required.append("shipping_fee")
     required.extend(
@@ -1190,6 +1240,7 @@ __all__ = [
     "PARSER_VERSION",
     "QuoteParseError",
     "coerce_field_value",
+    "decimal_is_resource_bounded",
     "fields_requiring_review",
     "parse_quote",
 ]

@@ -166,13 +166,17 @@ def quality_flags_for_quote(extracted: dict[str, Any]) -> list[str]:
 def specification_summary(specifications: dict[str, Any]) -> str:
     width = specifications.get("width_mm")
     length = specifications.get("length_mm")
+    height = specifications.get("height_mm")
     thickness = specifications.get("thickness_um")
     material = specifications.get("material")
     color = specifications.get("color")
     print_colors = specifications.get("print_colors")
     parts = []
     if width is not None and length is not None:
-        parts.append(f"{width}×{length}mm")
+        dimensions = f"{width}×{length}"
+        if height is not None:
+            dimensions += f"×{height}"
+        parts.append(f"{dimensions}mm")
     if thickness is not None:
         parts.append(f"{thickness}μm")
     if material:

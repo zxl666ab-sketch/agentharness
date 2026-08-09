@@ -284,10 +284,21 @@ export function ComparisonView({
 
       {confirmOpen && selected ? (
         <div className="proc-modal-backdrop" role="presentation">
-          <section className="proc-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+          <section
+            className="proc-confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-title"
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.stopPropagation();
+                setConfirmOpen(false);
+              }
+            }}
+          >
             <header>
               <div><ShieldAlert size={18} /><h2 id="confirm-title">正式选定供应商</h2></div>
-              <button className="proc-icon-button" type="button" title="关闭" aria-label="关闭" onClick={() => setConfirmOpen(false)}><X size={18} /></button>
+              <button autoFocus className="proc-icon-button" type="button" title="关闭" aria-label="关闭" onClick={() => setConfirmOpen(false)}><X size={18} /></button>
             </header>
             <div className="proc-confirm-supplier">
               <span>{selected.supplier_name}</span>
@@ -324,10 +335,21 @@ export function ComparisonView({
 
       {noAwardOpen ? (
         <div className="proc-modal-backdrop" role="presentation">
-          <section className="proc-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="no-award-title">
+          <section
+            className="proc-confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="no-award-title"
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.stopPropagation();
+                setNoAwardOpen(false);
+              }
+            }}
+          >
             <header>
               <div><ShieldAlert size={18} /><h2 id="no-award-title">确认无合格报价</h2></div>
-              <button className="proc-icon-button" type="button" title="关闭" aria-label="关闭" onClick={() => setNoAwardOpen(false)}><X size={18} /></button>
+              <button autoFocus className="proc-icon-button" type="button" title="关闭" aria-label="关闭" onClick={() => setNoAwardOpen(false)}><X size={18} /></button>
             </header>
             <div className="proc-confirm-supplier">
               <span>本轮询价不选定供应商</span>

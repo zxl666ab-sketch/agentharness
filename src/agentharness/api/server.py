@@ -38,6 +38,72 @@ MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
 
+class _RequestBodyLimitMiddleware:
+    """Bound both declared and chunked HTTP request bodies before parsing.
+
+    Procurement uploads are JSON/base64, so buffering up to the configured
+    limit is already required downstream.  Buffering here first prevents a
+    client without Content-Length from making Starlette read an unbounded body.
+    """
+
+    def __init__(self, app: Any, *, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def _reject(self, scope: Any, receive: Any, send: Any) -> None:
+        response = JSONResponse(
+            {"detail": "Request body too large"},
+            status_code=413,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "X-Frame-Options": "DENY",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
+        await response(scope, receive, send)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        for name, value in scope.get("headers", []):
+            if name.lower() != b"content-length":
+                continue
+            with suppress(ValueError):
+                if int(value) > self.max_bytes:
+                    await self._reject(scope, receive, send)
+                    return
+            break
+
+        buffered: list[dict[str, Any]] = []
+        total = 0
+        while True:
+            message = await receive()
+            buffered.append(message)
+            if message.get("type") == "http.request":
+                total += len(message.get("body", b""))
+                if total > self.max_bytes:
+                    await self._reject(scope, receive, send)
+                    return
+                if not message.get("more_body", False):
+                    break
+            else:
+                break
+
+        position = 0
+
+        async def replay() -> dict[str, Any]:
+            nonlocal position
+            if position < len(buffered):
+                message = buffered[position]
+                position += 1
+                return message
+            return await receive()
+
+        await self.app(scope, replay, send)
+
+
 def _is_loopback(host: str) -> bool:
     """True for localhost / loopback literals; mirrors web_main without importing it."""
     if host.lower() == "localhost":
@@ -215,20 +281,10 @@ def create_app(
             )
         return await call_next(request)
 
-    @app.middleware("http")
-    async def limit_request_body(request: Request, call_next):  # type: ignore[no-untyped-def]
-        """Reject oversized request bodies before pydantic reads them into memory."""
-        content_length = request.headers.get("content-length")
-        if content_length:
-            try:
-                if int(content_length) > MAX_REQUEST_BODY_BYTES:
-                    return JSONResponse(
-                        {"detail": "Request body too large"}, status_code=413
-                    )
-            except ValueError:
-                # Malformed header: let the server handle it downstream.
-                pass
-        return await call_next(request)
+    app.add_middleware(
+        _RequestBodyLimitMiddleware,
+        max_bytes=MAX_REQUEST_BODY_BYTES,
+    )
 
     app.include_router(procurement_router(procurement, procurement_agent))
 
@@ -422,7 +478,8 @@ def create_app(
         cursor = max_seq if after is None else min(after, max_seq)
         if last_event_id:
             with suppress(ValueError):
-                cursor = max(cursor, int(last_event_id))
+                header_cursor = max(0, min(int(last_event_id), max_seq))
+                cursor = max(cursor, header_cursor)
 
         async def generate():  # type: ignore[no-untyped-def]
             nonlocal cursor

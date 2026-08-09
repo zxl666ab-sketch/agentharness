@@ -348,6 +348,7 @@ def _carton_requirement() -> dict:
         "specifications": {
             "width_mm": "400",
             "length_mm": "300",
+            "height_mm": "250",
             "thickness_um": "5000",
             "material": "瓦楞纸",
             "color": "牛皮色",
@@ -402,6 +403,7 @@ async def test_api_accepts_carton_request_with_500um_tolerance(data_dir, workspa
             assert body["constraints"]["thickness_tolerance_um"] == "500"
             assert body["specifications"]["width_mm"] == "400"
             assert body["specifications"]["length_mm"] == "300"
+            assert body["specifications"]["height_mm"] == "250"
     finally:
         await app.state.procurement_agent.aclose()
         await app.state.run_supervisor.aclose()
@@ -443,6 +445,7 @@ def test_fake_extraction_keeps_spec_orientation() -> None:
     )
     assert requirement["specifications"]["width_mm"] == "400"
     assert requirement["specifications"]["length_mm"] == "300"
+    assert requirement["specifications"]["height_mm"] == "250"
     assert requirement["specifications"]["thickness_um"] == "5000"
     assert requirement["constraints"]["thickness_tolerance_um"] == "500"
     assert requirement["constraints"]["max_landed_unit_cost"] == "3.50"
