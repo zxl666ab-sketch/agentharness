@@ -23,7 +23,7 @@ public class RuntimeReportProjection {
     @Column(name = "evidence_sha256", nullable = false, length = 64)
     private String evidenceSha256;
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(nullable = false, columnDefinition = "jsonb")
+    @Column(nullable = false, columnDefinition = "json")
     private Map<String, Object> report = new LinkedHashMap<>();
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;

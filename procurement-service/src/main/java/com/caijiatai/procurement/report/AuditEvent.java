@@ -27,7 +27,7 @@ public class AuditEvent {
     @Column(nullable = false, length = 100)
     private String actor;
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(nullable = false, columnDefinition = "jsonb")
+    @Column(nullable = false, columnDefinition = "json")
     private Map<String, Object> payload = new LinkedHashMap<>();
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;

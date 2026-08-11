@@ -4,11 +4,11 @@ CREATE TABLE procurement_task (
     title varchar(200) NOT NULL,
     category varchar(100) NOT NULL,
     item_name varchar(200) NOT NULL,
-    quantity numeric(60, 18) NOT NULL CHECK (quantity > 0),
+    quantity decimal(60, 18) NOT NULL CHECK (quantity > 0),
     unit varchar(50) NOT NULL,
     schema_version integer NOT NULL CHECK (schema_version IN (1, 2)),
-    specifications jsonb NOT NULL,
-    constraints jsonb NOT NULL,
+    specifications json NOT NULL,
+    constraints json NOT NULL,
     status varchar(40) NOT NULL,
     retryable boolean NOT NULL DEFAULT false,
     retry_message varchar(500),
@@ -18,9 +18,10 @@ CREATE TABLE procurement_task (
     approved_quote_id varchar(32),
     generation integer NOT NULL DEFAULT 1,
     version bigint NOT NULL DEFAULT 0,
-    created_at timestamptz NOT NULL,
-    updated_at timestamptz NOT NULL
-);
+    created_at datetime(6) NOT NULL,
+    updated_at datetime(6) NOT NULL
+)
+ ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE INDEX idx_procurement_task_updated ON procurement_task(updated_at DESC);
 
@@ -34,9 +35,10 @@ CREATE TABLE business_artifact (
     filename varchar(255) NOT NULL,
     content_type varchar(150) NOT NULL,
     size_bytes bigint NOT NULL CHECK (size_bytes >= 0),
-    metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
-    created_at timestamptz NOT NULL
-);
+    metadata json NOT NULL DEFAULT (JSON_OBJECT()),
+    created_at datetime(6) NOT NULL
+)
+ ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE INDEX idx_business_artifact_task ON business_artifact(task_id, created_at);
 CREATE INDEX idx_business_artifact_sha ON business_artifact(sha256);
@@ -50,9 +52,10 @@ CREATE TABLE procurement_attachment (
     sha256 varchar(64) NOT NULL,
     content_type varchar(150) NOT NULL,
     size_bytes bigint NOT NULL,
-    created_at timestamptz NOT NULL,
+    created_at datetime(6) NOT NULL,
     UNIQUE(task_id, sha256)
-);
+)
+ ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE procurement_quote (
     id varchar(32) PRIMARY KEY,
@@ -62,15 +65,16 @@ CREATE TABLE procurement_quote (
     source_filename varchar(255) NOT NULL,
     source_kind varchar(20) NOT NULL,
     source_sha256 varchar(64) NOT NULL,
-    extracted jsonb NOT NULL,
+    extracted json NOT NULL,
     status varchar(40) NOT NULL,
     review_count integer NOT NULL DEFAULT 0,
     parser_version varchar(100) NOT NULL,
-    processing_ms numeric(20, 3) NOT NULL,
-    created_at timestamptz NOT NULL,
-    updated_at timestamptz NOT NULL,
+    processing_ms decimal(20, 3) NOT NULL,
+    created_at datetime(6) NOT NULL,
+    updated_at datetime(6) NOT NULL,
     UNIQUE(task_id, source_sha256)
-);
+)
+ ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE INDEX idx_procurement_quote_task ON procurement_quote(task_id, created_at);
 
@@ -79,11 +83,12 @@ CREATE TABLE quote_correction (
     task_id varchar(32) NOT NULL REFERENCES procurement_task(id) ON DELETE CASCADE,
     quote_id varchar(32) NOT NULL REFERENCES procurement_quote(id) ON DELETE CASCADE,
     field_name varchar(100) NOT NULL,
-    old_value jsonb,
-    new_value jsonb,
+    old_value json,
+    new_value json,
     actor varchar(100) NOT NULL,
-    created_at timestamptz NOT NULL
-);
+    created_at datetime(6) NOT NULL
+)
+ ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE agent_binding (
     id varchar(32) PRIMARY KEY,
@@ -91,10 +96,11 @@ CREATE TABLE agent_binding (
     session_id varchar(32) NOT NULL,
     run_id varchar(32) NOT NULL,
     generation integer NOT NULL,
-    created_at timestamptz NOT NULL,
+    created_at datetime(6) NOT NULL,
     UNIQUE(task_id, generation),
     UNIQUE(run_id)
-);
+)
+ ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE comparison_snapshot (
     id varchar(32) PRIMARY KEY,
@@ -103,11 +109,12 @@ CREATE TABLE comparison_snapshot (
     snapshot_version integer NOT NULL,
     task_version bigint NOT NULL,
     input_sha256 varchar(64) NOT NULL,
-    result jsonb NOT NULL,
+    result json NOT NULL,
     artifact_id varchar(34) NOT NULL REFERENCES business_artifact(id),
-    created_at timestamptz NOT NULL,
+    created_at datetime(6) NOT NULL,
     UNIQUE(task_id, snapshot_version)
-);
+)
+ ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE pending_decision (
     id varchar(32) PRIMARY KEY,
@@ -124,11 +131,12 @@ CREATE TABLE pending_decision (
     approval_id varchar(32),
     approval_arguments_sha256 varchar(64),
     approval_decision varchar(20),
-    approval_at timestamptz,
+    approval_at datetime(6),
     status varchar(30) NOT NULL,
-    created_at timestamptz NOT NULL,
-    updated_at timestamptz NOT NULL
-);
+    created_at datetime(6) NOT NULL,
+    updated_at datetime(6) NOT NULL
+)
+ ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE INDEX idx_pending_decision_task ON pending_decision(task_id, created_at DESC);
 
@@ -143,8 +151,9 @@ CREATE TABLE procurement_decision (
     decision varchar(20) NOT NULL CHECK (decision IN ('approved', 'no_award')),
     note text,
     actor varchar(100) NOT NULL,
-    created_at timestamptz NOT NULL
-);
+    created_at datetime(6) NOT NULL
+)
+ ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE procurement_audit_event (
     id varchar(32) PRIMARY KEY,
@@ -153,9 +162,10 @@ CREATE TABLE procurement_audit_event (
     run_id varchar(32),
     event_type varchar(100) NOT NULL,
     actor varchar(100) NOT NULL,
-    payload jsonb NOT NULL,
-    created_at timestamptz NOT NULL
-);
+    payload json NOT NULL,
+    created_at datetime(6) NOT NULL
+)
+ ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE INDEX idx_procurement_audit_task ON procurement_audit_event(task_id, created_at, id);
 
@@ -166,15 +176,16 @@ CREATE TABLE agent_command (
     generation integer NOT NULL,
     expected_task_version bigint NOT NULL,
     payload_sha256 varchar(64) NOT NULL,
-    payload jsonb NOT NULL,
+    payload json NOT NULL,
     status varchar(30) NOT NULL,
     attempt_count integer NOT NULL DEFAULT 0,
-    next_attempt_at timestamptz NOT NULL,
-    accepted_at timestamptz NOT NULL,
-    completed_at timestamptz,
+    next_attempt_at datetime(6) NOT NULL,
+    accepted_at datetime(6) NOT NULL,
+    completed_at datetime(6),
     last_error varchar(1000),
-    result jsonb
-);
+    result json
+)
+ ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE INDEX idx_agent_command_dispatch ON agent_command(status, next_attempt_at, accepted_at);
 CREATE UNIQUE INDEX uq_agent_command_generation ON agent_command(aggregate_id, generation, operation_type, payload_sha256);
@@ -185,18 +196,20 @@ CREATE TABLE idempotency_record (
     payload_sha256 varchar(64) NOT NULL,
     operation_id varchar(36),
     http_status integer,
-    response jsonb,
-    created_at timestamptz NOT NULL,
-    expires_at timestamptz NOT NULL,
+    response json,
+    created_at datetime(6) NOT NULL,
+    expires_at datetime(6) NOT NULL,
     PRIMARY KEY(scope, idempotency_key)
-);
+)
+ ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE runtime_report_projection (
     id varchar(32) PRIMARY KEY,
     task_id varchar(32) NOT NULL REFERENCES procurement_task(id) ON DELETE CASCADE,
     run_id varchar(32) NOT NULL,
     evidence_sha256 varchar(64) NOT NULL,
-    report jsonb NOT NULL,
-    created_at timestamptz NOT NULL,
+    report json NOT NULL,
+    created_at datetime(6) NOT NULL,
     UNIQUE(task_id, run_id, evidence_sha256)
-);
+)
+ ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

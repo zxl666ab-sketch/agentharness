@@ -22,10 +22,10 @@ public class QuoteCorrection {
     @Column(name = "field_name", nullable = false, length = 100)
     private String fieldName;
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(name = "old_value", columnDefinition = "jsonb")
+    @Column(name = "old_value", columnDefinition = "json")
     private Object oldValue;
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(name = "new_value", columnDefinition = "jsonb")
+    @Column(name = "new_value", columnDefinition = "json")
     private Object newValue;
     @Column(nullable = false, length = 100)
     private String actor;

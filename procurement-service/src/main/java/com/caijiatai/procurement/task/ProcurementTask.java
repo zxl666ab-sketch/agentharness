@@ -33,10 +33,10 @@ public class ProcurementTask {
     @Column(name = "schema_version", nullable = false)
     private int schemaVersion;
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(nullable = false, columnDefinition = "jsonb")
+    @Column(nullable = false, columnDefinition = "json")
     private Map<String, Object> specifications = new LinkedHashMap<>();
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(nullable = false, columnDefinition = "jsonb")
+    @Column(nullable = false, columnDefinition = "json")
     private Map<String, Object> constraints = new LinkedHashMap<>();
     @Column(nullable = false, length = 40)
     private String status;
