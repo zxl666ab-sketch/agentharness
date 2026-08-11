@@ -5,6 +5,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.transaction.annotation.Transactional;
 
 @Component
@@ -53,6 +54,8 @@ public class AgentOutboxWorker {
             } catch (AgentClient.AgentUnavailableException error) {
                 command.retry(error.getMessage());
                 tasks.markRetryable(command.getAggregateId(), "Agent 暂时不可用，命令将自动重试");
+            } catch (CannotAcquireLockException error) {
+                command.retry("数据库锁冲突，命令将自动重试");
             } catch (com.caijiatai.procurement.api.ApiException error) {
                 terminalFailure(command, error.code() + ": " + error.getMessage());
             }
