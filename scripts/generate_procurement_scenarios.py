@@ -53,6 +53,8 @@ def _quote(
         "payment_terms": "月结 30 天",
         "valid_until": "2026-12-31",
     }
+    if item.get("height_mm"):
+        fields["height_mm"] = item["height_mm"]
     return {
         "id": case_id,
         "supplier": supplier,
@@ -139,6 +141,7 @@ SCENARIOS: tuple[dict[str, Any], ...] = (
         "specifications": {
             "width_mm": "400",
             "length_mm": "300",
+            "height_mm": "250",
             "thickness_um": "5000",
             "material": "瓦楞纸",
             "color": "牛皮色",
@@ -353,9 +356,10 @@ def generate_scenarios(target: Path) -> int:
         item = {
             "description": (
                 f"{scenario['item_name']} {scenario['specifications']['width_mm']}×"
-                f"{scenario['specifications']['length_mm']} mm，厚度 "
-                f"{scenario['specifications']['thickness_um']} 微米，"
-                f"{scenario['specifications']['color']}"
+                f"{scenario['specifications']['length_mm']}"
+                + (f"×{scenario['specifications']['height_mm']}" if scenario["specifications"].get("height_mm") else "")
+                + f" mm，厚度 {scenario['specifications']['thickness_um']} 微米，"
+                + f"{scenario['specifications']['color']}"
             ),
             "material": scenario["specifications"]["material"],
             "color": scenario["specifications"]["color"],
@@ -363,7 +367,9 @@ def generate_scenarios(target: Path) -> int:
             "width_mm": scenario["specifications"]["width_mm"],
             "length_mm": scenario["specifications"]["length_mm"],
             "thickness_um": scenario["specifications"]["thickness_um"],
+            "height_mm": scenario["specifications"].get("height_mm"),
         }
+        structured_quotes = []
         for quote_spec in scenario["quotes"]:
             quote = _quote(item, **quote_spec)
             suffix = ".xlsx" if quote["kind"] == "xlsx" else ".pdf"
@@ -382,6 +388,20 @@ def generate_scenarios(target: Path) -> int:
                     "说明": quote["note"],
                 }
             )
+            structured_quotes.append({
+                "id": quote["id"],
+                "supplier": quote["supplier"],
+                "kind": quote["kind"],
+                "layout": quote["layout"],
+                "filename": quote["filename"],
+                "expected_landed_total_base": quote["expected_landed_total_base"],
+                "note": quote["note"],
+                "fields": quote["fields"],
+            })
+        (scenario_dir / "quotes.json").write_text(
+            json.dumps({"quotes": structured_quotes}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
         manifest = {
             "清单版本": 1,
@@ -391,6 +411,7 @@ def generate_scenarios(target: Path) -> int:
             "预期推荐供应商": scenario["recommendation"],
             "预期推荐理由": scenario["recommendation_reason"],
             "报价文件": quote_manifest,
+            "结构化报价": "quotes.json",
         }
         (scenario_dir / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",

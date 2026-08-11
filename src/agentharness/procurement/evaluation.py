@@ -58,6 +58,7 @@ _LABELS_EN = {
     "supports_invoice": "Invoice",
     "width_mm": "Width mm",
     "length_mm": "Length mm",
+    "height_mm": "Height mm",
     "thickness_um": "Thickness um",
     "payment_terms": "Payment Terms",
     "valid_until": "Valid Until",
@@ -81,6 +82,7 @@ _LABELS_ZH = {
     "supports_invoice": "是否可开票",
     "width_mm": "宽度（mm）",
     "length_mm": "长度（mm）",
+    "height_mm": "高度（mm）",
     "thickness_um": "厚度（微米）",
     "payment_terms": "付款条件",
     "valid_until": "报价有效期",
@@ -417,7 +419,7 @@ def _pdf_table(
         {"supplier_name", "item_description", "material", "color", "print_colors"},
         {"currency", "unit_price", "price_basis", "tax_rate", "tax_included"},
         {"shipping_fee", "shipping_included", "moq", "lead_time_days", "supports_invoice"},
-        {"width_mm", "length_mm", "thickness_um", "payment_terms", "valid_until"},
+        {"width_mm", "length_mm", "height_mm", "thickness_um", "payment_terms", "valid_until"},
     )
     y = 752
     by_field = {field: (label, value) for field, label, value in values}

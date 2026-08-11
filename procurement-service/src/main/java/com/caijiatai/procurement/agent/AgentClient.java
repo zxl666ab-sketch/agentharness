@@ -10,7 +10,7 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
 @Component
-public final class AgentClient {
+public class AgentClient {
     private final RestClient client;
     private final String token;
 

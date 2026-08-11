@@ -12,7 +12,9 @@ public record AppProperties(
         String agentInternalToken,
         URI allowedViteOrigin,
         boolean developmentMode,
-        Outbox outbox) {
+        Outbox outbox,
+        String agentMode,
+        DemoSeed demoSeed) {
 
     public AppProperties {
         if (localOperator == null || localOperator.isBlank()) {
@@ -23,6 +25,12 @@ public record AppProperties(
         }
         if (agentInternalToken == null || agentInternalToken.isBlank()) {
             throw new IllegalArgumentException("app.agent-internal-token must not be blank");
+        }
+        if (agentMode == null || agentMode.isBlank()) {
+            agentMode = "http";
+        }
+        if (demoSeed == null) {
+            demoSeed = new DemoSeed(false, Path.of("..", "output", "procurement-scenarios"));
         }
         if (outbox == null) {
             outbox = new Outbox(500);
@@ -36,4 +44,6 @@ public record AppProperties(
             }
         }
     }
+
+    public record DemoSeed(boolean enabled, Path root) {}
 }
