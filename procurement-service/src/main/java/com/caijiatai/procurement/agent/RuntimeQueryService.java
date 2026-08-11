@@ -1,5 +1,7 @@
 package com.caijiatai.procurement.agent;
 
+import com.caijiatai.procurement.approval.ProcurementDecisionRepository;
+
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -16,9 +18,11 @@ import org.springframework.stereotype.Service;
 @Service
 public final class RuntimeQueryService {
     private final RuntimeEventRepository events;
+    private final ProcurementDecisionRepository decisions;
 
-    public RuntimeQueryService(RuntimeEventRepository events) {
+    public RuntimeQueryService(RuntimeEventRepository events, ProcurementDecisionRepository decisions) {
         this.events = events;
+        this.decisions = decisions;
     }
 
     public Map<String, Object> run(String runId) {
@@ -86,6 +90,24 @@ public final class RuntimeQueryService {
             value.put("created_at", row.getOccurredAt());
             value.put("arguments", Map.of());
             value.put("result", Map.of());
+            result.add(value);
+        }
+        return result;
+    }
+
+    public List<Map<String, Object>> approvals(String runId) {
+        var result = new ArrayList<Map<String, Object>>();
+        for (var decision : decisions.findByRunIdOrderByCreatedAtAsc(runId)) {
+            var value = new LinkedHashMap<String, Object>();
+            value.put("id", decision.getApprovalId());
+            value.put("run_id", decision.getRunId());
+            value.put("tool_call_id", decision.getId());
+            value.put("tool_name", "procurement_approve_supplier");
+            value.put("effect", decision.getDecision());
+            value.put("requires_confirmation", false);
+            value.put("decision", decision.getDecision());
+            value.put("created_at", decision.getCreatedAt());
+            value.put("events", List.of());
             result.add(value);
         }
         return result;

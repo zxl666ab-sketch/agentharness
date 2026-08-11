@@ -133,7 +133,7 @@ public final class AgentProxyController {
     Object approvals(@PathVariable String runId) {
         var safe = id(runId);
         if ("kafka".equals(properties.agentMode())) {
-            return json(java.util.List.of());
+            return json(runtimeQuery.approvals(safe));
         }
         return proxy.get("/api/runs/" + safe + "/approvals");
     }
