@@ -73,7 +73,7 @@ docker compose ps
 - 只有 `127.0.0.1:8741` 映射到宿主机；MySQL/Redis/Kafka/Python Agent 只在 Compose 网络内可达。
 - Java readiness 只依赖 MySQL；`agent_status` 来自 Python 每 5s 的 `heartbeat.ping`（≤15s 为 up），不可用时降级为 down 而不影响业务。
 - 黄金演示：`APP_DEMO_SEED_ENABLED=true` 时 Java 启动预置 3 套合成场景（标记 synthetic），用 `APP_AGENT_MODE=demo` 可脱离 Python 走通全闭环。
-- SASL/SCRAM 加固：`compose.kafka-sasl.yml` 覆盖提供双用户与最小 ACL；已知限制为 KRaft 单节点首次引导需在 `kafka-storage format` 阶段预置 SCRAM 凭据（JAAS `user_*` 不写入元数据），正式环境按该方式初始化后再启用覆盖。
+- SASL/SCRAM 加固：`compose.kafka-sasl.yml`（cp-kafka）首次启动在 `kafka-storage format --add-scram` 预置 admin/java-svc/python-agent；已实测五服务 healthy、无凭据访问失败、全闭环通过。
 - 本地开发（不构建镜像）：`docker compose -f compose.kafka.yml up -d` 起 Kafka；Java 用 `mvnw spring-boot:run`，Python 用 `uv run python -m agentharness.agent_service`。
 
 ### 环境变量

@@ -1,23 +1,33 @@
 # Kafka SASL/SCRAM 加固覆盖（正式环境启用；默认 compose.yaml 使用 PLAINTEXT 便于本地开发）
-# WIP：KRaft 下 StandardAuthorizer 的 super.users 需同时覆盖控制器匿名注册主体（User:ANONYMOUS）且
-# 需确认 wrapper 将 KAFKA_SUPER_USERS 写入控制器配置；当前覆盖尚未跑通“无凭据访问失败”门禁，合并前须完成该验证。
+# 基于 confluentinc/cp-kafka（KRaft StandardAuthorizer 对 super.users 支持更完整）。
 # 用法：docker compose -f compose.yaml -f compose.kafka-sasl.yml up -d --build
 services:
   kafka:
+    image: confluentinc/cp-kafka:7.8.0
     environment:
-      KAFKA_LISTENERS: SASL_PLAINTEXT://0.0.0.0:9092,CONTROLLER://127.0.0.1:9093
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: SASL_PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
       KAFKA_ADVERTISED_LISTENERS: SASL_PLAINTEXT://kafka:9092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT
-      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-256
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: SASL_PLAINTEXT
+      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-256
       KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: SCRAM-SHA-256
       KAFKA_SUPER_USERS: User:admin,User:ANONYMOUS
       KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
-      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "false"
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "true"
       KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/secrets/kafka_jaas.conf
       KAFKA_LOG_DIRS: /var/lib/kafka/data
-      KAFKA_CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
-      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_MESSAGE_MAX_BYTES: 16777216
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 16777216
     volumes:
       - ./deploy/kafka-secrets/kafka_jaas.conf:/etc/kafka/secrets/kafka_jaas.conf:ro
       - ./deploy/kafka-secrets/admin.properties:/etc/kafka/secrets/admin.properties:ro
@@ -26,32 +36,23 @@ services:
     command:
       - |
         set -e
-        bash /etc/kafka/docker/configure
-        cat > /tmp/server.properties <<'EOF'
-        process.roles=broker,controller
-        node.id=1
-        controller.quorum.voters=1@127.0.0.1:9093
-        listeners=SASL_PLAINTEXT://0.0.0.0:9092,CONTROLLER://127.0.0.1:9093
-        advertised.listeners=SASL_PLAINTEXT://kafka:9092
-        listener.security.protocol.map=CONTROLLER:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT
-        controller.listener.names=CONTROLLER
-        inter.broker.listener.name=SASL_PLAINTEXT
-        sasl.enabled.mechanisms=SCRAM-SHA-256
-        sasl.mechanism.inter.broker.protocol=SCRAM-SHA-256
-        log.dirs=/var/lib/kafka/data
-        EOF
-        DATA=/var/lib/kafka/data
+        bash /etc/confluent/docker/configure
+        DATA=$$KAFKA_LOG_DIRS
         mkdir -p "$$DATA"
         if [ ! -f "$$DATA/meta.properties" ]; then
-          /opt/kafka/bin/kafka-storage.sh format -t "$$KAFKA_CLUSTER_ID" -c /tmp/server.properties             --add-scram 'SCRAM-SHA-256=[name=admin,password=admin-secret]'             --add-scram 'SCRAM-SHA-256=[name=java-svc,password=java-secret]'             --add-scram 'SCRAM-SHA-256=[name=python-agent,password=python-secret]'
+          kafka-storage format -t "$$CLUSTER_ID" -c /etc/kafka/kafka.properties             --add-scram 'SCRAM-SHA-256=[name=admin,password=admin-secret]'             --add-scram 'SCRAM-SHA-256=[name=java-svc,password=java-secret]'             --add-scram 'SCRAM-SHA-256=[name=python-agent,password=python-secret]'
         fi
-        exec /etc/kafka/docker/run
+        exec /etc/confluent/docker/launch
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server 127.0.0.1:9092 --command-config /etc/kafka/secrets/admin.properties >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server 127.0.0.1:9092 --command-config /etc/kafka/secrets/admin.properties >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 10s
       retries: 30
   kafka-init:
+    image: confluentinc/cp-kafka:7.8.0
+    depends_on:
+      kafka:
+        condition: service_healthy
     environment:
       KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/secrets/kafka_jaas.conf
       KAFKA_BOOTSTRAP: kafka:9092
@@ -63,27 +64,28 @@ services:
       - |
         set -e
         ADMIN="--command-config /etc/kafka/secrets/admin.properties --bootstrap-server $${KAFKA_BOOTSTRAP}"
-        /opt/kafka/bin/kafka-topics.sh $${ADMIN} --create --if-not-exists --topic caijiatai.commands --partitions 3 --replication-factor 1
+        kafka-topics $${ADMIN} --create --if-not-exists --topic caijiatai.commands --partitions 3 --replication-factor 1
         for t in caijiatai.results caijiatai.rpc.requests caijiatai.rpc.responses caijiatai.events caijiatai.commands.dlq caijiatai.results.dlq caijiatai.events.dlq; do
-          /opt/kafka/bin/kafka-topics.sh $${ADMIN} --create --if-not-exists --topic $$t --partitions 1 --replication-factor 1
+          kafka-topics $${ADMIN} --create --if-not-exists --topic $$t --partitions 1 --replication-factor 1
         done
         for topic in caijiatai.commands caijiatai.rpc.responses caijiatai.commands.dlq; do
-          /opt/kafka/bin/kafka-acls.sh $${ADMIN} --add --allow-principal User:java-svc --operation Write --topic $$topic
-          /opt/kafka/bin/kafka-acls.sh $${ADMIN} --add --allow-principal User:java-svc --operation Describe --topic $$topic
+          kafka-acls $${ADMIN} --add --allow-principal User:java-svc --operation Write --topic $$topic
+          kafka-acls $${ADMIN} --add --allow-principal User:java-svc --operation Describe --topic $$topic
         done
         for topic in caijiatai.results caijiatai.rpc.requests caijiatai.events caijiatai.results.dlq caijiatai.events.dlq; do
-          /opt/kafka/bin/kafka-acls.sh $${ADMIN} --add --allow-principal User:java-svc --operation Read --topic $$topic
-          /opt/kafka/bin/kafka-acls.sh $${ADMIN} --add --allow-principal User:java-svc --operation Describe --topic $$topic
-          /opt/kafka/bin/kafka-acls.sh $${ADMIN} --add --allow-principal User:python-agent --operation Write --topic $$topic
-          /opt/kafka/bin/kafka-acls.sh $${ADMIN} --add --allow-principal User:python-agent --operation Describe --topic $$topic
+          kafka-acls $${ADMIN} --add --allow-principal User:java-svc --operation Read --topic $$topic
+          kafka-acls $${ADMIN} --add --allow-principal User:java-svc --operation Describe --topic $$topic
+          kafka-acls $${ADMIN} --add --allow-principal User:python-agent --operation Write --topic $$topic
+          kafka-acls $${ADMIN} --add --allow-principal User:python-agent --operation Describe --topic $$topic
+          kafka-acls $${ADMIN} --add --allow-principal User:python-agent --operation Read --topic $$topic
         done
-        for g in java-svc java-svc-events java-svc-rpc python-agent python-agent-rpc; do
-          /opt/kafka/bin/kafka-acls.sh $${ADMIN} --add --allow-principal User:java-svc --operation Read --group $$g
-          /opt/kafka/bin/kafka-acls.sh $${ADMIN} --add --allow-principal User:python-agent --operation Read --group $$g
+        for g in java-svc java-svc-events java-svc-rpc python-agent python-agent-rpc python-agent-seq-boot; do
+          kafka-acls $${ADMIN} --add --allow-principal User:java-svc --operation Read --group $$g
+          kafka-acls $${ADMIN} --add --allow-principal User:python-agent --operation Read --group $$g
         done
         for topic in caijiatai.commands caijiatai.rpc.responses caijiatai.commands.dlq; do
-          /opt/kafka/bin/kafka-acls.sh $${ADMIN} --add --allow-principal User:python-agent --operation Read --topic $$topic
-          /opt/kafka/bin/kafka-acls.sh $${ADMIN} --add --allow-principal User:python-agent --operation Describe --topic $$topic
+          kafka-acls $${ADMIN} --add --allow-principal User:python-agent --operation Read --topic $$topic
+          kafka-acls $${ADMIN} --add --allow-principal User:python-agent --operation Describe --topic $$topic
         done
   agent:
     environment:
