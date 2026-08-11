@@ -1,25 +1,25 @@
 # 智采 Agent（采价台）改造规格书
 
-- 文档版本：v1.1（含评审修订）
+- 文档版本：v1.2（消息队列 RabbitMQ → Kafka）
 - 日期：2026-08-11
 - 目标版本：0.5.0
 - 基线提交：`4bcea7f`（`codex/java-python-agent-repair`「减缩版1」）
 - 开发分支：`codex/java-python-mysql-rag`（自 `4bcea7f` 新建）
-- 状态：已评审待实施
+- 状态：已评审待实施（v1.2：按用户决定将 RabbitMQ 替换为 Kafka）
 
 ## 1. 背景与目标
 
 简历第二个项目「智采 Agent」即本仓库（`agentharness`）。当前主线是 Python 单体（FastAPI + SQLite + RAG），功能可用、测试绿色；本次改造**不是为了修 bug，而是为了求职含金量**：
 
 - 把项目改造成 **Java 写业务（4 成）+ Python 写智能体（6 成）** 的双栈形态，匹配“AI 应用 / Agent 开发 + Java 后端”岗位。
-- Java 作为业务主机，先写完**完整业务**并可独立运行；Python Agent 作为**嵌入式微服务**通过 **RabbitMQ（唯一通道）** 接入。
+- Java 作为业务主机，先写完**完整业务**并可独立运行；Python Agent 作为**嵌入式微服务**通过 **Kafka（唯一通道）** 接入。
 - 保留并迁移现有 Python 侧的高价值资产：文档解析与冻结评测（617/620、31/31、0/17）、22 类异常回归、审计与断点续跑能力。
 
 ## 2. 非目标（明确不做）
 
 - 不重写 LangGraph（沿用现有自定义引擎）；不引入 MCP。
 - 不引入 Seata/2PC 分布式事务（用 outbox + 幂等 + generation/version 校验）。
-- 不引入网关/注册中心/负载均衡/Redis 分布式锁/Kafka/RocketMQ/Neo4j。
+- 不引入网关/注册中心/负载均衡/Redis 分布式锁/RocketMQ/Neo4j/ZooKeeper（Kafka 采用 KRaft 单节点）。
 - 不做高 QPS 实现；仅保留 `docs/architecture.md` 中的“扩容路径”说明（v1 为本地单用户形态）。
 - RAG（Milvus）为二期，不在 v1 必交付范围。
 
@@ -37,7 +37,7 @@
 ```mermaid
 flowchart LR
     Browser["React 工作台"] -->|"HTTP/SSE 仅 127.0.0.1:8741"| Java["Java 业务主机（Spring Boot）"]
-    Java <-->|"RabbitMQ（唯一通道）"| MQ["RabbitMQ"]
+    Java <-->|"Kafka（唯一通道）"| MQ["Kafka"]
     MQ <-->|"commands/results/rpc/events"| Py["Python Agent 微服务（FastAPI，仅内网 8742）"]
     Py -->|"外呼"| LLM["LLM API"]
     Py <-->|"二期"| VDB["Milvus"]
@@ -63,21 +63,26 @@ flowchart LR
 
 建需求（数量/规格/公差/交期/预算/汇率）→ 导入多家 XLSX/PDF 报价（原件 SHA-256 Artifact Store）→ Agent 解析+结构化（低置信度强制人工复核）→ 确定性比价（硬约束淘汰 → Decimal 到货成本排序 → 不可变快照）→ 一次性人工审批（绑定 Run/快照/输入哈希，stale 防护）→ 审计报告 + PO/供应商确认邮件（证据哈希可复现）。
 
-## 5. 通信设计（MQ-only，RabbitMQ）
+## 5. 通信设计（MQ-only，Kafka）
 
-### 5.1 队列拓扑
+> v1.2 变更：消息队列由 RabbitMQ 替换为 Kafka（KRaft 单节点，SASL/SCRAM 双用户）。
+> 语义保持：命令/结果/RPC/事件/心跳消息 schema、HMAC 签名、双侧幂等、DLQ 重试、保序与 RPC 解耦均不变。
 
-| 队列 | 方向 | 用途 |
-|---|---|---|
-| `caijiatai.commands` | Java→Python | 异步命令：start_conversation / import_quote / analyze / approve_decision / reopen_task |
-| `caijiatai.results` | Python→Java | 命令结果回传 |
-| `caijiatai.rpc.requests` | Python→Java | 同步 RPC：get_task_context / get_artifact / list_history_facts |
-| `caijiatai.rpc.responses` | Java→Python | RPC 响应（correlationId 匹配） |
-| `caijiatai.events` | Python→Java | 运行时事件/报告投影/心跳（`run.*`、`report.*`、`tool.*`、`heartbeat.ping`） |
+### 5.1 Topic 拓扑
 
-- 每个队列配 DLQ：`*.dlq`；exchange 为 `caijiatai.exchange`（direct）+ `caijiatai.events`（topic）；全部 quorum queue。
-- 统一 vhost `caijiatai`；两个用户：`java-svc`（发布 commands、消费 results/rpc.requests/events）、`python-agent`（消费 commands、发布 results/rpc.requests/events）——按队列读写最小权限授权。
-- RabbitMQ 配置 `max_message_size = 16MB`（覆盖 Artifact 分块后单消息上限）。
+| Topic | 方向 | 用途 | 消费者组 |
+|---|---|---|---|
+| `caijiatai.commands` | Java→Python | 异步命令：start_conversation / import_quote / analyze / approve_decision / reopen_task | `python-agent` |
+| `caijiatai.results` | Python→Java | 命令结果回传 | `java-svc` |
+| `caijiatai.rpc.requests` | Python→Java | 同步 RPC：get_task_context / get_artifact / list_history_facts / list_events | `java-svc-rpc`（独立组，避免队头阻塞） |
+| `caijiatai.rpc.responses` | Java→Python | RPC 响应（correlationId 匹配） | `python-agent-rpc` |
+| `caijiatai.events` | Python→Java | 运行时事件/报告投影/心跳（`run.*`、`report.*`、`tool.*`、`heartbeat.ping`） | `java-svc-events` |
+
+- 每个业务 topic 配 DLQ topic：`<topic>.dlq`；瞬时错误重试最多 5 次（5s/30s/2min 退避），校验失败/409 直接终态进 DLQ。
+- 单 broker、KRaft 模式（无 ZooKeeper）；`replication.factor=1`（本地单用户形态，扩容路径见 `docs/architecture.md`）。
+- Topic 默认分区：`caijiatai.commands=3`（按 `aggregate_id` 键路由，保序），其余 `=1`；`retention.ms`：业务 topic 7 天，`caijiatai.events` 1 天，心跳消息保留 1 小时。
+- 消息大小上限：broker `message.max.bytes=16777216`（16MB，覆盖 Artifact 分块后单消息上限）；生产者 `max.request.size` 同步配置。
+- 认证：SASL_PLAINTEXT + SCRAM-SHA-256；`java-svc` 与 `python-agent` 两个用户按 topic 最小权限 ACL（见 §5.7）。
 
 ### 5.2 消息 schema（示例）
 
@@ -112,36 +117,38 @@ flowchart LR
 }
 ```
 
-RPC 请求/响应：请求含 `correlation_id`、`kind`、`payload`、`reply_to`；响应含相同 `correlation_id` + `status` + `result`。事件消息：`type`、`task_id`、`run_id`、`global_seq`、`payload`、`occurred_at`。
+RPC 请求/响应：请求含 `correlation_id`、`kind`、`payload`、`reply_to`（topic 名）；响应含相同 `correlation_id` + `status` + `result`。事件消息：`type`、`task_id`、`run_id`、`global_seq`、`payload`、`occurred_at`。
 
 ### 5.3 可靠性
 
-- Java 侧 `agent_command` 表保留为事务性 outbox；`@Scheduled` relay 用 `PESSIMISTIC_WRITE` 取 pending 行 → 发布（publisher confirm）→ 标记 published；失败按指数退避重试。状态机：`pending → published → accepted → completed/failed`。
+- Java 侧 `agent_command` 表保留为事务性 outbox；`@Scheduled` relay 用 `PESSIMISTIC_WRITE` 取 pending 行 → 发布（acks=all + 幂等生产者）→ 标记 published；失败按指数退避重试。状态机：`pending → published → accepted → completed/failed`。
 - Python 侧 `internal_operations` 表幂等：同 operation_id + 同 payload_sha256 重放直接返回已存结果；同 id 不同 payload 返回 409；增加 `result_published_at` + 定时 sweeper 补发结果。
-- 至少一次投递 + 双侧幂等，不追求恰好一次。
-- 瞬时错误：nack(requeue=false) → DLQ → TTL 5s/30s/2min 重试，最多 5 次；校验失败/409 直接终态进 DLQ。
-- 保序：commands 单消费者 + prefetch=1；多实例扩容时改为按 task 路由（二期）。
+- 至少一次投递 + 双侧幂等，不追求恰好一次；生产者 `enable.idempotence=true` 避免 broker 层重复写入。
+- 瞬时错误：消费端 `DefaultErrorHandler` + `FixedBackOff`（5s/30s/2min，最多 5 次）→ 超出后发布到 `<topic>.dlq`；校验失败/409 直接终态进 DLQ（`DeadLetterPublishingRecoverer`，header 记录原 topic/partition/offset）。
+- 保序：`caijiatai.commands` 单消费者组单成员、`auto.offset.reset=earliest`、按 `aggregate_id` 键分区；多实例扩容时增加分区并按 task 路由（二期）。
 
 ### 5.4 RPC 设计
 
-- Python 使用独立 consumer/channel 处理 `rpc.requests`，与 commands 消费者分离，避免命令处理中等待 RPC 响应造成死锁。
+- Python 使用独立消费者组（`python-agent-rpc`）消费 `caijiatai.rpc.responses`，与 commands 消费分离，避免命令处理中等待 RPC 响应造成死锁。
+- 请求经 `caijiatai.rpc.requests`（key=correlationId）发给 Java；Java 独立组 `java-svc-rpc` 处理并把响应发到 `caijiatai.rpc.responses`（key=correlationId）；Python 按 correlationId 匹配。
 - 请求/响应 10s 超时；超时后 Python 侧重试一次并记录事件；correlationId 过期清理。
 - Artifact 传输：≤2MB 单条直传（base64），>2MB 分块（1MB/块，带序号与总块数）；Java 端按 `artifact_id` 校验所有权。
 
 ### 5.5 事件与 SSE
 
-- Python 把运行时事件（26 种类型）持久化到运行时 MySQL，并向 `caijiatai.events` 发布；`text_delta` 类高频事件 250ms 聚合节流。
+- Python 把运行时事件（26 种类型）持久化到运行时 MySQL，并发布到 `caijiatai.events`（key=task_id）；`text_delta` 类高频事件 250ms 聚合节流。
 - Java 消费事件写入 `runtime_event` 投影表（含 `global_seq`），Web SSE 从 Java 读；Java 可用 RPC `list_events(after_seq)` 补偿重放。
 - 事件不承载业务真值，仅承载运行时展示与观测。
 
 ### 5.6 心跳与健康
 
-- Python 每 5s 发布 `heartbeat.ping`（消息 TTL 10s）；Java 消费后记录 last_seen。
-- `/api/health`：`agent_status` 来自 last_seen（≤15s 为 up），Java readiness 不依赖 Python/RabbitMQ。
+- Python 每 5s 发布 `heartbeat.ping` 到 `caijiatai.events`（key=agent）；Java 消费后按消息时间戳记录 last_seen（Kafka 无消息 TTL，以时间戳判断新鲜度）。
+- `/api/health`：`agent_status` 来自 last_seen（≤15s 为 up），Java readiness 不依赖 Python/Kafka。
 
 ### 5.7 安全
 
-- Java 与 Python 使用不同 RabbitMQ 用户（`java-svc` / `python-agent`）、统一 vhost `caijiatai`；凭据经环境变量注入。
+- Java 与 Python 使用不同 Kafka 用户（`java-svc` / `python-agent`）、SASL_PLAINTEXT + SCRAM-SHA-256；凭据经环境变量注入。
+- ACL 最小权限：`java-svc`：写 commands/rpc.responses、读 results/rpc.requests/events；`python-agent`：读 commands/rpc.responses、写 results/rpc.requests/events；各 `.dlq` topic 授予对应生产者权限。
 - 消息带 HMAC-SHA256 签名（共享密钥 `AGENT_INTERNAL_HMAC_KEY`，≥32 字节）；支持轮换：配置 `active`/`previous` 双密钥，验签任一通过，轮换期双写新签。
 - `payload_sha256` 校验内容完整性。
 - Web→Java：仅 `127.0.0.1:8741`；生产模式 Host 校验 + 非安全方法 Origin 校验。
@@ -207,35 +214,37 @@ RPC 请求/响应：请求含 `correlation_id`、`kind`、`payload`、`reply_to`
   - **决策门 2**：切片在浏览器可见状态流转（运行中→完成）且重启后能续跑 → 才铺开其余命令类型（start_conversation/import_quote/approve/reopen）。
   - 2b 全量命令/结果/RPC/事件/心跳 + Redis 上下文缓存；删除内部 HTTP 端点；双侧幂等 + DLQ + HMAC。
 - **Step 3 RAG（二期，可选）**：Milvus + rank_bm25 + rerank；`list_history_facts` RPC；反馈闭环；冻结评测。
-- **Step 4 收尾**：CI（Java/Python/Web + MySQL/RabbitMQ/Redis service）；Compose 五服务；文档同步（README/architecture/threat-model/release-checklist）；版本 0.5.0；冻结评测重新锁值；合流（新分支提升为新 master）。
+- **Step 4 收尾**：CI（Java/Python/Web + MySQL/Kafka/Redis service）；Compose 五服务；文档同步（README/architecture/threat-model/release-checklist）；版本 0.5.0；冻结评测重新锁值；合流（新分支提升为新 master）。
 
 ## 10. 测试计划与验收门槛
 
 **命令级验收**：
-- Java：`mvnw.cmd test` 全绿（Testcontainers MySQL+RabbitMQ）：BigDecimal/税费/汇率、V1/V2 规格、黄金契约哈希、Artifact 防护、审批状态机、outbox 幂等/重放、stale approval、事务回滚/乐观锁、RPC 服务端、事件投影、心跳超时降级。
+- Java：`mvnw.cmd test` 全绿（Testcontainers MySQL+Kafka）：BigDecimal/税费/汇率、V1/V2 规格、黄金契约哈希、Artifact 防护、审批状态机、outbox 幂等/重放、stale approval、事务回滚/乐观锁、RPC 服务端、事件投影、心跳超时降级。
 - Python：`uv run pytest -q`（MySQL 测试 schema + fake Redis + MQ 桩）：解析 617/620、Agent 行为回归、命令幂等/409、RPC 客户端超时重试、事件发布、Redis 降级、心跳。
 - 冻结评测：`uv run python scripts/evaluate_procurement.py run` + `verify` 通过；**评测保持纯函数，不依赖运行时 DB**（`evaluate_frozen_cases` 直连 parsing + 真值 + 黄金文件）。
 - Web：`npm test && npm run lint && npm run build` + `scripts/check_web_build_determinism.py`；浏览器走通全闭环。
-- E2E：Compose 五服务 healthy；仅 8741 暴露；无 MQ 凭据访问失败；杀 agent 后命令滞留、重启续跑；杀 RabbitMQ 后 outbox 滞留、Java 降级可读。
+- E2E：Compose 五服务 healthy；仅 8741 暴露；无 MQ 凭据访问失败；杀 agent 后命令滞留、重启续跑；杀 Kafka 后 outbox 滞留、Java 降级可读。
 
 **验收门槛（0.5.0 发布门禁）**：黄金契约哈希跨语言一致；Step 1/2 决策门均通过；全量测试绿；文档与实现一致。
 
 ## 11. 部署与 CI
 
-- Compose：`mysql:8.0`（init 建两 schema）、`redis:7`、`rabbitmq:3-management`、`agent`（仅内网 8742）、`procurement`（宿主机 127.0.0.1:8741）。
-- CI：Java job（setup-java 21 + `mvnw.cmd test`）；Python job（MySQL/RabbitMQ/Redis service container）；Web job（npm + 构建确定性）。
+- Compose：`mysql:8.0`（init 建两 schema）、`redis:7`、`apache/kafka:3.9`（KRaft + SASL/SCRAM + topic 初始化）、`agent`（仅内网 8742）、`procurement`（宿主机 127.0.0.1:8741）。
+- CI：Java job（setup-java 21 + `mvnw.cmd test`）；Python job（MySQL/Kafka/Redis service container）；Web job（npm + 构建确定性）。
 
 ## 12. 环境前置与配置
 
-- 前置：Java 21（已装）、Node 20+、Python 3.11 + uv、Docker Desktop（需启动，当前未启动）、本地 MySQL80（已运行）、无本地 Redis/RabbitMQ（走 Compose）。
+- 前置：Java 21（已装）、Node 20+、Python 3.11 + uv、Docker Desktop（需启动，当前未启动）、本地 MySQL80（已运行）、无本地 Redis/Kafka（走 Compose）。
 
 | 环境变量 | 默认/示例 |
 |---|---|
 | `DATABASE_URL` | `jdbc:mysql://127.0.0.1:3306/caijiatai_business?useSSL=false&serverTimezone=UTC&characterEncoding=utf8mb4` |
 | `DATABASE_USER` / `DATABASE_PASSWORD` | `caijiatai` / 本地或 Compose 注入 |
 | `AGENTHARNESS_DATABASE_URL` | `mysql+pymysql://caijiatai:...@127.0.0.1:3306/caijiatai_runtime` |
-| `RABBITMQ_URI` | `amqp://java-svc:...@127.0.0.1:5672/caijiatai` |
-| `AGENT_RABBITMQ_URI` | `amqp://python-agent:...@127.0.0.1:5672/caijiatai` |
+| `KAFKA_BOOTSTRAP_SERVERS` | `127.0.0.1:9092` |
+| `KAFKA_SASL_USERNAME` / `KAFKA_SASL_PASSWORD` | `java-svc` / 本地或 Compose 注入 |
+| `AGENT_KAFKA_BOOTSTRAP_SERVERS` | `127.0.0.1:9092` |
+| `AGENT_KAFKA_SASL_USERNAME` / `AGENT_KAFKA_SASL_PASSWORD` | `python-agent` / 本地或 Compose 注入 |
 | `AGENT_INTERNAL_HMAC_KEY` | ≥32 字节随机串（Java/Python 共享） |
 | `REDIS_URL` | `redis://127.0.0.1:6379/0` |
 | `APP_PORT` | `8741` |
@@ -262,6 +271,7 @@ RPC 请求/响应：请求含 `correlation_id`、`kind`、`payload`、`reply_to`
 | LangGraph 重写失控 | 明确不重写（§2） |
 | 合并冲突 | 换主不合（§3） |
 | MQ-only 集成不成立 | Step 2 先做 2a 最小切片，决策门 2 把关（§9） |
+| Kafka 本地单点 | KRaft 单节点 + replication.factor=1；仅本地单用户形态（§2），扩容路径见 docs/architecture.md |
 | 冻结评测被 DB 耦合 | 评测保持纯函数（§10） |
 
 ## 15. 变更管理
@@ -281,6 +291,6 @@ RPC 请求/响应：请求含 `correlation_id`、`kind`、`payload`、`reply_to`
 - RPC kinds：`get_task_context`、`get_artifact`、`list_history_facts`（二期）、`list_events`
 
 **变化**：
-- `contracts/`：两个 HTTP OpenAPI 替换为 MQ 消息 JSON Schema + 黄金契约（保持 canonical JSON/SHA-256 不变）
+- `contracts/`：两个 HTTP OpenAPI 替换为 Kafka 消息 JSON Schema + 黄金契约（保持 canonical JSON/SHA-256 不变）；topic 与消费者组见 §5.1
 - Web `/api/stream`：数据源从“Java 反向代理 Python”改为“Java 读 `runtime_event` 投影表”
 - Web `/api/runs/**` 读接口：同样改为 Java 投影，不再代理 Python
