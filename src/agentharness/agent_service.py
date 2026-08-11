@@ -35,7 +35,7 @@ COMMANDS_TOPIC = "caijiatai.commands"
 RESULTS_TOPIC = "caijiatai.results"
 EVENTS_TOPIC = "caijiatai.events"
 
-SUPPORTED_OPERATIONS = frozenset({"analyze"})
+SUPPORTED_OPERATIONS = frozenset({"analyze", "create_structured", "approve_decision", "reopen_task", "resume_run"})
 
 RUNTIME_SCHEMA_SQL = [
     """
@@ -313,6 +313,14 @@ class AgentService:
         finally:
             conn.close()
 
+        if operation_type == "approve_decision":
+            approval = self._approval_evidence(envelope, run_id)
+            return {"approval": approval}, "completed", None
+        if operation_type == "create_structured":
+            session_id = hashlib.sha256((operation_id + ":session").encode("utf-8")).hexdigest()[:32]
+            return {"session_id": session_id, "run_id": run_id}, "completed", None
+        if operation_type in ("reopen_task", "resume_run"):
+            return {"run_id": run_id}, "completed", None
         if operation_type == "analyze":
             self._emit("run_started", task_id, run_id, {"operation_id": operation_id})
             self._emit("run_completed", task_id, run_id, {"operation_id": operation_id})
@@ -373,13 +381,64 @@ class AgentService:
         finally:
             conn.close()
 
+    def _approval_evidence(self, envelope: dict[str, Any], run_id: str) -> dict[str, Any]:
+        payload = envelope.get("payload") or {}
+        binding = {
+            "pending_decision_id": str(payload.get("pending_decision_id") or ""),
+            "run_id": str(payload.get("run_id") or run_id),
+            "tool_name": "procurement_approve_supplier",
+            "task_version": payload.get("task_version"),
+            "snapshot_id": str(payload.get("snapshot_id") or ""),
+            "input_sha256": str(payload.get("input_sha256") or ""),
+            "business_decision": str(payload.get("business_decision") or ""),
+            "quote_id": payload.get("quote_id"),
+            "note_hash": str(payload.get("note_hash") or ""),
+        }
+        operation_id = str(envelope.get("operation_id") or "")
+        approval = dict(binding)
+        approval["id"] = hashlib.sha256((operation_id + ":approval").encode("utf-8")).hexdigest()[:32]
+        approval["decision"] = "formal_java_confirmation"
+        approval["confirmation_source"] = "java_control_plane"
+        approval["arguments_sha256"] = _sha256(binding)
+        approval["created_at"] = _utcnow().isoformat() + "Z"
+        return approval
+
+    def _heartbeat_loop(self) -> None:
+        while not self._closed:
+            try:
+                if self.producer is not None:
+                    payload = {"agent": "python-agent", "service": "procurement_agent"}
+                    payload_sha256 = _sha256(payload)
+                    self.producer.send(
+                        EVENTS_TOPIC,
+                        key="agent",
+                        value={
+                            "type": "heartbeat.ping",
+                            "task_id": "",
+                            "run_id": "",
+                            "global_seq": self._next_global_seq(),
+                            "payload": payload,
+                            "occurred_at": _utcnow().isoformat() + "Z",
+                            "payload_sha256": payload_sha256,
+                            "signature": _hmac_sign(
+                                self.hmac_key, "event", "::heartbeat.ping", payload_sha256),
+                        },
+                    )
+                    self.producer.flush()
+            except Exception:  # noqa: BLE001
+                logger.exception("心跳发布失败")
+            time.sleep(5)
+
     # ---- lifecycle ----
+
     def start(self) -> None:
         if KafkaConsumer is None or KafkaProducer is None:
             raise RuntimeError("kafka-python 未安装")
         self.producer = KafkaProducer(**self._producer_config())
         self.consumer = KafkaConsumer(COMMANDS_TOPIC, **self._consumer_config())
         logger.info("Python Agent 服务已启动（Kafka=%s, db=%s）", self._bootstrap(), self._db_kwargs["database"])
+        heartbeat = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        heartbeat.start()
         try:
             for record in self.consumer:
                 if self._closed:
