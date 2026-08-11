@@ -117,3 +117,27 @@ docker compose ps
 - 最后保持 `docker compose ps` 三服务 healthy，并确认 [http://127.0.0.1:8741](http://127.0.0.1:8741) 可访问。
 
 旧 SQLite 采购数据只可归档，不自动导入或双写。任何未验证的 Compose/Testcontainers/浏览器项都不能以单元测试绿灯替代。
+
+## 0.5.0 版本门禁（Java/Python 分栈）
+
+```powershell
+# Java：Testcontainers MySQL + Kafka 全绿（含黄金契约、outbox、RPC、事件投影、心跳降级）
+cd procurement-service; .\mvnw.cmd test
+
+# Python：MySQL 测试 schema + fake Redis + MQ 桩
+cd ..; uv run pytest -q
+
+# 冻结评测（纯函数，不依赖运行时 DB）
+uv run python scripts/evaluate_procurement.py run
+uv run python scripts/evaluate_procurement.py verify
+
+# Web
+cd web; npm test; npm run lint; npm run build
+python scripts/check_web_build_determinism.py
+# 确认 procurement-service/src/main/resources/static 与 web/dist 一致
+
+# Compose 五服务
+docker compose up -d --build
+docker compose ps   # mysql/redis/kafka/agent/procurement healthy
+# 仅 127.0.0.1:8741 暴露；无 MQ 凭据访问失败；杀 agent 后命令滞留、重启续跑
+```

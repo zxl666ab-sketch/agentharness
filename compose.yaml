@@ -1,78 +1,132 @@
+# 智采 Agent 0.5.0 五服务拓扑（本地单用户形态）
+# Java 业务主机（8741，仅宿主机 127.0.0.1）+ Python Agent（仅内网 8742）
+# 消息通道为 Kafka（KRaft 单节点）；SASL/SCRAM 安全加固见 compose.kafka-sasl.yml（Step 4 后续覆盖）
 name: caijiatai
 
 services:
-  postgres:
-    image: postgres:17-alpine
+  mysql:
+    image: mysql:8.0
+    container_name: cjt-mysql
     environment:
-      POSTGRES_DB: caijiatai
-      POSTGRES_USER: caijiatai
-      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-caijiatai-local}
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U caijiatai -d caijiatai"]
-      interval: 2s
-      timeout: 3s
-      retries: 30
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root-local}
+      MYSQL_DATABASE: caijiatai_business
+      MYSQL_USER: caijiatai
+      MYSQL_PASSWORD: ${DATABASE_PASSWORD:-caijiatai-local}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
     volumes:
-      - procurement-postgres-v04:/var/lib/postgresql/data
+      - ./deploy/mysql-init:/docker-entrypoint-initdb.d:ro
+      - caijiatai-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root-local}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7
+    container_name: cjt-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: cjt-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://127.0.0.1:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_MESSAGE_MAX_BYTES: 16777216
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 16777216
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server 127.0.0.1:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+
+  kafka-init:
+    image: apache/kafka:3.9.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic caijiatai.commands --partitions 3 --replication-factor 1
+        for t in caijiatai.results caijiatai.rpc.requests caijiatai.rpc.responses caijiatai.events caijiatai.commands.dlq caijiatai.results.dlq caijiatai.events.dlq; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic $$t --partitions 1 --replication-factor 1
+        done
 
   agent:
-    image: caijiatai-agent:0.4.0
+    image: caijiatai-agent:0.5.0
     build:
       context: .
       dockerfile: Dockerfile.agent
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
     environment:
-      AGENTHARNESS_INTERNAL_ONLY: "true"
-      AGENT_INTERNAL_TOKEN: ${AGENT_INTERNAL_TOKEN:-local-compose-internal-token}
-      PROCUREMENT_INTERNAL_BASE_URL: http://procurement:8741
-      AGENTHARNESS_DATA_DIR: /data
-      AGENTHARNESS_PROCUREMENT_PROVIDER: ${AGENTHARNESS_PROCUREMENT_PROVIDER:-procurement_fake}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-    volumes:
-      - agent-runtime-v04:/data
-      - .:/workspace:ro
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8742/api/health', timeout=2)"]
-      interval: 3s
-      timeout: 3s
-      retries: 30
+      AGENTHARNESS_DATABASE_URL: mysql+pymysql://caijiatai:${DATABASE_PASSWORD:-caijiatai-local}@mysql:3306/caijiatai_runtime
+      AGENT_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      AGENT_INTERNAL_HMAC_KEY: ${AGENT_INTERNAL_HMAC_KEY:-local-hmac-key-change-me}
+    restart: unless-stopped
 
   procurement:
-    image: caijiatai-procurement:0.4.0
+    image: caijiatai-procurement:0.5.0
     build:
       context: .
       dockerfile: procurement-service/Dockerfile
     depends_on:
-      postgres:
+      mysql:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
     environment:
       APP_BIND_ADDRESS: 0.0.0.0
       APP_PORT: 8741
-      DATABASE_URL: jdbc:postgresql://postgres:5432/caijiatai
+      DATABASE_URL: jdbc:mysql://mysql:3306/caijiatai_business?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=UTF-8
       DATABASE_USER: caijiatai
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:-caijiatai-local}
+      APP_AGENT_MODE: kafka
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      AGENT_INTERNAL_HMAC_KEY: ${AGENT_INTERNAL_HMAC_KEY:-local-hmac-key-change-me}
       APP_ARTIFACT_ROOT: /data/artifacts
-      AGENT_INTERNAL_BASE_URL: http://agent:8742
-      AGENT_INTERNAL_TOKEN: ${AGENT_INTERNAL_TOKEN:-local-compose-internal-token}
       APP_LOCAL_OPERATOR: ${APP_LOCAL_OPERATOR:-采购员}
+      APP_DEMO_SEED_ENABLED: ${APP_DEMO_SEED_ENABLED:-false}
+      APP_DEMO_SEED_ROOT: /data/scenarios
+      APP_REDIS_ENABLED: "true"
+      SPRING_DATA_REDIS_HOST: redis
     ports:
       - "127.0.0.1:8741:8741"
     volumes:
-      - procurement-artifacts-v04:/data/artifacts
+      - caijiatai-artifacts:/data/artifacts
+      - ./output/procurement-scenarios:/data/scenarios:ro
     healthcheck:
-      test:
-        - CMD
-        - bash
-        - -lc
-        - >-
-          exec 3<>/dev/tcp/127.0.0.1/8741 &&
-          printf 'GET /actuator/health/readiness HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' >&3 &&
-          grep -q 'HTTP/1.1 200' <&3
-      interval: 3s
-      timeout: 3s
+      test: ["CMD", "bash", "-lc", "exec 3<>/dev/tcp/127.0.0.1/8741 && printf 'GET /actuator/health/readiness HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' >&3 && grep -q 'HTTP/1.1 200' <&3"]
+      interval: 5s
+      timeout: 5s
       retries: 40
 
 volumes:
-  procurement-postgres-v04:
-  procurement-artifacts-v04:
-  agent-runtime-v04:
+  caijiatai-mysql-data:
+  caijiatai-artifacts:

@@ -1,7 +1,7 @@
 {
   "name": "agentharness-web",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "采价台：采购询价与供应商比价工作台",
   "type": "module",
   "scripts": {

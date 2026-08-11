@@ -1,5 +1,39 @@
 # 采价台架构
 
+> 本文档为 0.5.0 架构（Java 业务主机 + Python Agent 微服务，Kafka 唯一通道）。
+> 0.5.0 之前的 PostgreSQL/HTTP+Token 段落保留为归档说明，不再作为当前拓扑依据。
+
+## 服务拓扑（0.5.0）
+
+```mermaid
+flowchart LR
+    Browser["React 浏览器工作台"] -->|"HTTP/SSE 仅 127.0.0.1:8741"| Java["Spring Boot Procurement Service"]
+    Java <-->|"Kafka（唯一通道）"| Kafka["Kafka KRaft 单节点"]
+    Kafka <-->|"commands/results/rpc/events"| Python["Python Agent 微服务"]
+    Java -->|"JPA / Flyway V1-V5"| MySQL["MySQL 8 caijiatai_business"]
+    Python -->|"pymysql 自建表"| RuntimeDB["MySQL 8 caijiatai_runtime"]
+    Java <--> Redis["Redis 任务上下文缓存"]
+    Python <--> Redis
+```
+
+Compose 默认启动 `procurement`、`agent`、`mysql`、`redis`、`kafka`（含 `kafka-init`）。
+宿主机只映射 Java 的 `127.0.0.1:8741`；MySQL/Redis/Kafka/Python 8742 仅在 Compose 网络中可达。
+
+### Kafka 契约
+
+- topics：`caijiatai.commands`（Java→Python，3 分区按 aggregate_id 路由）、`caijiatai.results`、`caijiatai.rpc.requests`、`caijiatai.rpc.responses`、`caijiatai.events`，各配 `*.dlq`。
+- 消息 HMAC-SHA256 签名（`AGENT_INTERNAL_HMAC_KEY`）+ `payload_sha256` 完整性校验；双侧幂等（Java `agent_command` outbox、Python `internal_operations`）。
+- 命令状态机：`pending → published → accepted → completed/failed`；瞬时错误最多 5 次退避后进 DLQ。
+- RPC：`get_task_context` / `get_artifact` / `list_events`，10s 超时 + 一次重试，correlationId 匹配。
+- 事件：Python 持久化到 `caijiatai_runtime.runtime_event` 并发布；Java 投影到 `caijiatai_business.runtime_event`（`global_seq` 唯一），Web SSE 从 Java 投影表读取。
+- 心跳：Python 每 5s 发布 `heartbeat.ping`；`/api/health` 的 `agent_status` 以最近心跳（≤15s）判定。
+
+### 删除
+
+- Java 内部 HTTP：`/internal/v1/tasks/{id}/context`、`/internal/v1/artifacts/{id}/raw` 及 `X-Agent-Internal-Token` 鉴权分支已删除，由 Kafka RPC 取代。
+
+# 采价台架构
+
 ## 服务拓扑
 
 ```mermaid

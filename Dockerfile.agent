@@ -16,6 +16,4 @@ COPY src ./src
 COPY contracts ./contracts
 RUN uv sync --frozen --no-dev
 
-EXPOSE 8742
-ENTRYPOINT ["/app/.venv/bin/agentharness"]
-CMD ["--host", "0.0.0.0", "--port", "8742", "--data-dir", "/data", "--workspace", "/workspace", "--no-open", "--internal-only"]
+ENTRYPOINT ["/app/.venv/bin/python", "-m", "agentharness.agent_service"]

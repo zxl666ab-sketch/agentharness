@@ -7,6 +7,7 @@ import com.caijiatai.procurement.agent.IdempotencyRecord;
 import com.caijiatai.procurement.agent.IdempotencyRecordRepository;
 import com.caijiatai.procurement.api.ApiException;
 import com.caijiatai.procurement.artifact.ArtifactStore;
+import com.caijiatai.procurement.cache.TaskContextCache;
 import com.caijiatai.procurement.comparison.ComparisonEngine;
 import com.caijiatai.procurement.comparison.ComparisonSnapshotRepository;
 import com.caijiatai.procurement.config.AppProperties;
@@ -40,6 +41,7 @@ public class ApprovalService {
     private final ComparisonEngine engine;
     private final ArtifactStore artifacts;
     private final AuditEventRepository audit;
+    private final TaskContextCache contextCache;
     private final String operator;
 
     public ApprovalService(
@@ -53,6 +55,7 @@ public class ApprovalService {
             ComparisonEngine engine,
             ArtifactStore artifacts,
             AuditEventRepository audit,
+            TaskContextCache contextCache,
             AppProperties properties) {
         this.tasks = tasks;
         this.quotes = quotes;
@@ -64,6 +67,7 @@ public class ApprovalService {
         this.engine = engine;
         this.artifacts = artifacts;
         this.audit = audit;
+        this.contextCache = contextCache;
         this.operator = properties.localOperator();
     }
 
@@ -146,6 +150,7 @@ public class ApprovalService {
                 noteHash));
         var payload = new LinkedHashMap<String, Object>(binding);
         payload.put("note", note);
+        contextCache.evict(taskId);
         var command = commands.save(AgentCommand.accept(
                 operationId,
                 "approve_decision",
@@ -214,6 +219,7 @@ public class ApprovalService {
             throw invalidApproval("审批备注摘要不匹配");
         }
         var decision = decisions.save(ProcurementDecision.create(pending, note.isBlank() ? null : note, operator));
+        contextCache.evict(task.getId());
         task.finalizeDecision(pending.getQuoteId(), "no_award".equals(pending.getDecision()));
         pending.complete();
         createExecutionArtifacts(task.getReference(), task.getId(), decision, snapshot);

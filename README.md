@@ -18,23 +18,25 @@
 
 冻结数据是合成证据，不外推未知供应商版式或真实企业提效。完整脱敏证据见 [docs/evidence](docs/evidence/README.md)。
 
-## 架构
+## 架构（0.5.0：Java 业务主机 + Python Agent 微服务，Kafka 唯一通道）
 
 ```mermaid
 flowchart LR
-    Browser["React 工作台"] -->|"仅 127.0.0.1:8741"| Java["Spring Boot 4.1 / Java 21"]
-    Java --> PG["PostgreSQL 17"]
-    Java --> Store["Java Artifact Store"]
-    Java -->|"内部 HTTP + Token"| Agent["Python Agent Runtime"]
-    Agent --> Runtime["Run / Session / Checkpoint / Approval"]
-    Agent --> Provider["Provider / 模型"]
+    Browser["React 工作台"] -->|"HTTP/SSE 仅 127.0.0.1:8741"| Java["Java 业务主机（Spring Boot 4.1 / Java 21）"]
+    Java <-->|"Kafka（唯一通道）commands/results/rpc/events"| Agent["Python Agent 微服务"]
+    Agent --> Provider["LLM API"]
+    Java --> MySQL["MySQL 8 caijiatai_business"]
+    Agent --> RuntimeDB["MySQL 8 caijiatai_runtime"]
+    Java <--> Redis["Redis 上下文缓存"]
+    Agent <--> Redis
 ```
 
-- Java 是采购任务、附件、报价、人工修正、Agent 绑定、比价快照、待决审批、正式决定、业务审计和业务 Artifact 的唯一真源。
-- Python 只拥有受限文档解析、需求抽取、Provider 调用、Run、Session、Checkpoint、Approval、工具治理、Runtime Artifact 和抽取评测。
-- PostgreSQL Schema 只由 Flyway 创建；Hibernate 使用 `ddl-auto=validate`。金额使用 `numeric`/`BigDecimal`，时间使用 `timestamptz`/`Instant`。
-- Python 在 Compose 中以 `internal-only` 运行，端口不映射到宿主机；除健康检查外的接口均校验 `X-Agent-Internal-Token`。
-- 历史 SQLite 采购表只保留为归档兼容证据，不接入当前业务，也不会自动导入 PostgreSQL。Python Runtime 与 PostgreSQL 使用全新、独立的数据卷。
+- Java 是采购任务、附件、报价、人工修正、比价快照、待决审批、正式决定、业务审计、业务 Artifact、SSE 事件投影的唯一真源；可脱离 Python 独立运行（`APP_AGENT_MODE=demo`）。
+- Python Agent 是嵌入式微服务，只保留自然语言需求结构化、XLSX/PDF 文档解析、Provider 调用、Run/事件与运行时 MySQL；通过 Kafka 命令/结果/RPC/事件与 Java 通信。
+- 业务 Schema 只由 Java Flyway 创建（V1-V5），运行时 Schema 由 Python Agent 自建；禁止交叉建表。金额使用 `DECIMAL`/`BigDecimal`，时间使用 `DATETIME(6)`/`Instant`。
+- Kafka 使用 KRaft 单节点：`caijiatai.commands/results/rpc.requests/rpc.responses/events` + 各 `*.dlq`；消息带 HMAC-SHA256 签名与 `payload_sha256`，双侧幂等。
+- 内部 HTTP 与 `X-Agent-Internal-Token` 已删除；Python 读取业务上下文/原件走 Kafka RPC（`get_task_context` / `get_artifact` / `list_events`）。
+- 历史 SQLite/PostgreSQL 数据不迁移，仅归档；Python Runtime 与业务库使用全新数据卷。
 
 详细设计见 [架构文档](docs/architecture.md)，安全边界见 [威胁模型](docs/threat-model.md)。
 
@@ -52,22 +54,13 @@ flowchart LR
 
 ## 快速开始
 
-要求 Docker Desktop 可用。首次启动：
+要求 Docker Desktop 可用。五服务拓扑（MySQL/Redis/Kafka/Agent/Procurement）：
 
 ```powershell
 Copy-Item .env.example .env
-# 在 .env 中设置随机 AGENT_INTERNAL_TOKEN 和 POSTGRES_PASSWORD
+# 在 .env 中设置随机 AGENT_INTERNAL_HMAC_KEY（≥32 字节）与 DATABASE_PASSWORD
 docker compose up -d --build
 docker compose ps
-```
-
-当前 Windows 中文路径下 Docker BuildKit 可能拒绝构建上下文；遇到 header non-printable ASCII 错误时：
-
-```powershell
-$env:DOCKER_BUILDKIT='0'
-docker build -f Dockerfile.agent -t caijiatai-agent:0.4.0 .
-docker build -f procurement-service/Dockerfile -t caijiatai-procurement:0.4.0 .
-docker compose up -d --no-build
 ```
 
 健康检查：
@@ -77,7 +70,25 @@ Invoke-RestMethod http://127.0.0.1:8741/api/health
 docker compose ps
 ```
 
-只有 `127.0.0.1:8741` 应出现在宿主端口映射中。PostgreSQL 和 Python Agent 只在 Compose 网络内可达。Java readiness 依赖 PostgreSQL；Agent 状态作为可降级能力单独报告。
+- 只有 `127.0.0.1:8741` 映射到宿主机；MySQL/Redis/Kafka/Python Agent 只在 Compose 网络内可达。
+- Java readiness 只依赖 MySQL；`agent_status` 来自 Python 每 5s 的 `heartbeat.ping`（≤15s 为 up），不可用时降级为 down 而不影响业务。
+- 黄金演示：`APP_DEMO_SEED_ENABLED=true` 时 Java 启动预置 3 套合成场景（标记 synthetic），用 `APP_AGENT_MODE=demo` 可脱离 Python 走通全闭环。
+- 本地开发（不构建镜像）：`docker compose -f compose.kafka.yml up -d` 起 Kafka；Java 用 `mvnw spring-boot:run`，Python 用 `uv run python -m agentharness.agent_service`。
+
+### 环境变量
+
+| 变量 | 默认/示例 |
+|---|---|
+| `DATABASE_URL` | `jdbc:mysql://127.0.0.1:3306/caijiatai_business?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=UTF-8` |
+| `DATABASE_USER` / `DATABASE_PASSWORD` | `caijiatai` / 本地或 Compose 注入 |
+| `AGENTHARNESS_DATABASE_URL` | `mysql+pymysql://caijiatai:...@127.0.0.1:3306/caijiatai_runtime` |
+| `KAFKA_BOOTSTRAP_SERVERS` / `AGENT_KAFKA_BOOTSTRAP_SERVERS` | `127.0.0.1:9092` |
+| `AGENT_INTERNAL_HMAC_KEY` | ≥32 字节随机串（Java/Python 共享） |
+| `REDIS_URL` / `SPRING_DATA_REDIS_HOST` | `redis://127.0.0.1:6379/0` / `redis` |
+| `APP_PORT` / `AGENT_PORT` | `8741` / `8742` |
+| `APP_AGENT_MODE` | `kafka`（默认生产形态）/ `demo`（脱离 Python）/ `http`（旧版兼容） |
+| `APP_DEMO_SEED_ENABLED` / `APP_DEMO_SEED_ROOT` | `false` / `output/procurement-scenarios` |
+| `AGENTHARNESS_PROCUREMENT_PROVIDER` | `procurement_fake`（离线演示）或 `openai` |
 
 ## 模型配置
 

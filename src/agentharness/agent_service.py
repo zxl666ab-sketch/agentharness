@@ -21,7 +21,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import Future
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pymysql
@@ -94,7 +94,7 @@ def _sha256(value: Any) -> str:
 
 
 def _hmac_sign(key: str, kind: str, operation_id: str, payload_sha256: str) -> str:
-    content = f"{kind}\n{operation_id}\n{payload_sha256}".encode("utf-8")
+    content = f"{kind}\n{operation_id}\n{payload_sha256}".encode()
     return hmac.new(key.encode("utf-8"), content, hashlib.sha256).hexdigest()
 
 
@@ -110,7 +110,7 @@ def _new_id() -> str:
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _fake_requirement(message: str) -> dict[str, Any]:
