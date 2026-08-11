@@ -18,7 +18,7 @@ import org.springframework.util.backoff.FixedBackOff;
  */
 @Configuration
 @ConditionalOnProperty(prefix = "app.agent", name = "mode", havingValue = "kafka")
-public final class KafkaDlqConfiguration {
+public class KafkaDlqConfiguration {
 
     @Bean
     ConcurrentKafkaListenerContainerFactory<String, byte[]> kafkaListenerContainerFactory(

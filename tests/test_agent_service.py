@@ -112,7 +112,7 @@ def test_analyze_publishes_result_and_events(monkeypatch, fake_db):
     assert len(result["run_id"]) == 32
     # events were emitted (run_started, run_completed)
     sent = [call.args[0] for call in service.producer.send.call_args_list if call.args[0] == svc.EVENTS_TOPIC]
-    assert len(sent) == 2
+    assert len(sent) == 4  # run_started, tool_call_start, tool_result, run_completed
 
 
 def test_idempotent_replay_skips_execution(monkeypatch, fake_db):
@@ -185,3 +185,42 @@ def test_heartbeat_message_shape():
     }
     assert message["type"] == "heartbeat.ping"
     assert message["global_seq"] == 1
+
+
+def test_coerce_requirement_normalizes_llm_output():
+    data = {
+        "schema_version": 1,
+        "title": "采购",
+        "category": "ecommerce_packaging",
+        "item_name": "快递袋",
+        "quantity": "50000",
+        "unit": "piece",
+        "specifications": {"width_mm": "250", "length_mm": "350", "thickness_um": "60", "material": "PE", "color": "白色", "print_colors": 1},
+        "constraints": {"base_currency": "cny", "fx_rates": {"CNY": "1"}, "max_lead_days": "7", "invoice_required": True, "size_tolerance_mm": "2", "thickness_tolerance_um": "3", "max_landed_unit_cost": "0.5"},
+    }
+    req = svc._coerce_requirement(data, "x")
+    assert req["quantity"] == 50000
+    assert req["constraints"]["base_currency"] == "CNY"
+    assert req["constraints"]["max_lead_days"] == 7
+    assert req["specifications"]["material"] == "PE"
+
+
+def test_coerce_requirement_rejects_bad_quantity():
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        svc._coerce_requirement({"item_name": "x", "quantity": 0}, "x")
+
+
+def test_llm_requirement_falls_back_to_fake_without_key(monkeypatch):
+    config = dict(CONFIG)
+    config["AGENTHARNESS_PROCUREMENT_PROVIDER"] = "openai"
+    config.pop("OPENAI_API_KEY", None)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    req = svc._llm_requirement("采购快递袋 50000 个，宽250mm", config)
+    assert req["quantity"] == 50000
+
+
+def test_llm_requirement_fake_provider_does_not_call_model():
+    req = svc._llm_requirement("采购快递袋 3000 个", dict(CONFIG))
+    assert req["quantity"] == 3000
+
