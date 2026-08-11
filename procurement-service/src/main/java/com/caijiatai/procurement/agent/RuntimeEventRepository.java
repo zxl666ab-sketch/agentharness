@@ -10,6 +10,10 @@ import org.springframework.data.repository.query.Param;
 public interface RuntimeEventRepository extends JpaRepository<RuntimeEvent, Long> {
     List<RuntimeEvent> findByGlobalSeqGreaterThanOrderByGlobalSeqAsc(long after, Pageable pageable);
 
+    List<RuntimeEvent> findByRunId(String runId, Pageable pageable);
+
+    RuntimeEvent findFirstByTypeOrderByGlobalSeqDesc(String type);
+
     boolean existsByGlobalSeq(long globalSeq);
 
     @Modifying

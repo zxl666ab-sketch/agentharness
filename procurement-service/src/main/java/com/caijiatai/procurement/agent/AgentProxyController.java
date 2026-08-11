@@ -20,14 +20,17 @@ public final class AgentProxyController {
     private final AppProperties properties;
     private final tools.jackson.databind.ObjectMapper mapper;
     private final com.caijiatai.procurement.api.EventStreamService eventStream;
+    private final RuntimeQueryService runtimeQuery;
 
     public AgentProxyController(RuntimeProxyService proxy, AppProperties properties,
             tools.jackson.databind.ObjectMapper mapper,
-            com.caijiatai.procurement.api.EventStreamService eventStream) {
+            com.caijiatai.procurement.api.EventStreamService eventStream,
+            RuntimeQueryService runtimeQuery) {
         this.proxy = proxy;
         this.properties = properties;
         this.mapper = mapper;
         this.eventStream = eventStream;
+        this.runtimeQuery = runtimeQuery;
     }
 
     @GetMapping("/api/runtime")
@@ -84,32 +87,73 @@ public final class AgentProxyController {
 
     @GetMapping("/api/runs")
     ResponseEntity<byte[]> runs(HttpServletRequest request) {
+        if ("kafka".equals(properties.agentMode())) {
+            return json(Map.of("runs", java.util.List.of(), "source", "runtime_event_projection"));
+        }
         return proxy.get(withQuery("/api/runs", request));
     }
 
     @GetMapping("/api/runs/{runId}")
-    ResponseEntity<byte[]> run(@PathVariable String runId) { return proxy.get("/api/runs/" + id(runId)); }
+    Object run(@PathVariable String runId) {
+        var safe = id(runId);
+        if ("kafka".equals(properties.agentMode())) {
+            return runtimeQuery.run(safe);
+        }
+        return proxy.get("/api/runs/" + safe);
+    }
 
     @GetMapping("/api/runs/{runId}/report")
-    ResponseEntity<byte[]> report(@PathVariable String runId) { return proxy.get("/api/runs/" + id(runId) + "/report"); }
+    Object report(@PathVariable String runId) {
+        var safe = id(runId);
+        if ("kafka".equals(properties.agentMode())) {
+            return json(Map.of("run_id", safe, "source", "runtime_event_projection"));
+        }
+        return proxy.get("/api/runs/" + safe + "/report");
+    }
 
     @GetMapping("/api/runs/{runId}/messages")
-    ResponseEntity<byte[]> messages(@PathVariable String runId) { return proxy.get("/api/runs/" + id(runId) + "/messages"); }
+    Object messages(@PathVariable String runId) {
+        var safe = id(runId);
+        if ("kafka".equals(properties.agentMode())) {
+            return json(java.util.List.of());
+        }
+        return proxy.get("/api/runs/" + safe + "/messages");
+    }
 
     @GetMapping("/api/runs/{runId}/events")
-    ResponseEntity<byte[]> events(@PathVariable String runId) { return proxy.get("/api/runs/" + id(runId) + "/events"); }
+    Object events(@PathVariable String runId) {
+        var safe = id(runId);
+        if ("kafka".equals(properties.agentMode())) {
+            return json(runtimeQuery.events(safe));
+        }
+        return proxy.get("/api/runs/" + safe + "/events");
+    }
 
     @GetMapping("/api/runs/{runId}/approvals")
-    ResponseEntity<byte[]> approvals(@PathVariable String runId) { return proxy.get("/api/runs/" + id(runId) + "/approvals"); }
+    Object approvals(@PathVariable String runId) {
+        var safe = id(runId);
+        if ("kafka".equals(properties.agentMode())) {
+            return json(java.util.List.of());
+        }
+        return proxy.get("/api/runs/" + safe + "/approvals");
+    }
 
     @GetMapping("/api/runs/{runId}/tool-invocations")
-    ResponseEntity<byte[]> invocations(@PathVariable String runId) {
-        return proxy.get("/api/runs/" + id(runId) + "/tool-invocations");
+    Object invocations(@PathVariable String runId) {
+        var safe = id(runId);
+        if ("kafka".equals(properties.agentMode())) {
+            return json(java.util.List.of());
+        }
+        return proxy.get("/api/runs/" + safe + "/tool-invocations");
     }
 
     @GetMapping("/api/runs/{runId}/checkpoint")
-    ResponseEntity<byte[]> checkpoint(@PathVariable String runId) {
-        return proxy.get("/api/runs/" + id(runId) + "/checkpoint");
+    Object checkpoint(@PathVariable String runId) {
+        var safe = id(runId);
+        if ("kafka".equals(properties.agentMode())) {
+            return runtimeQuery.checkpoint(safe);
+        }
+        return proxy.get("/api/runs/" + safe + "/checkpoint");
     }
 
     @GetMapping("/api/tool-invocations/{invocationId}")

@@ -33,6 +33,7 @@ public final class HealthController {
 
     private final JdbcTemplate jdbc;
     private final RestClient agent;
+    private final AppProperties properties;
     private final String token;
     private final String webBuildId;
     private final Instant startedAt = Instant.now();
@@ -44,6 +45,7 @@ public final class HealthController {
             ObjectMapper objectMapper) {
         this.jdbc = jdbc;
         this.agent = agentRestClient;
+        this.properties = properties;
         this.token = properties.agentInternalToken();
         this.webBuildId = loadWebBuildId(objectMapper);
     }
@@ -53,11 +55,17 @@ public final class HealthController {
         jdbc.queryForObject("select 1", Integer.class);
         boolean agentAvailable = false;
         Object agentHealth = null;
-        try {
-            agentHealth = agent.get().uri("/api/health").retrieve().body(Map.class);
-            agentAvailable = true;
-        } catch (RestClientException ignored) {
-            // PostgreSQL determines readiness; Agent health is a separate degraded capability.
+        if ("kafka".equals(properties.agentMode())) {
+            agentAvailable = kafkaAgentAvailable();
+            agentHealth = Map.of("status", agentAvailable ? "up" : "down",
+                    "source", "heartbeat.ping");
+        } else {
+            try {
+                agentHealth = agent.get().uri("/api/health").retrieve().body(Map.class);
+                agentAvailable = true;
+            } catch (RestClientException ignored) {
+                // MySQL determines readiness; Agent health is a separate degraded capability.
+            }
         }
         return ResponseEntity.ok(Map.ofEntries(
                 Map.entry("service", "procurement-service"),
@@ -70,6 +78,18 @@ public final class HealthController {
                 Map.entry("database", "ready"),
                 Map.entry("agent_available", agentAvailable),
                 Map.entry("agent_status", agentHealth == null ? Map.of("status", "unavailable") : agentHealth)));
+    }
+
+    private boolean kafkaAgentAvailable() {
+        try {
+            var heartbeat = jdbc.queryForObject(
+                    "select occurred_at from runtime_event where type = 'heartbeat.ping' "
+                            + "order by global_seq desc limit 1",
+                    java.sql.Timestamp.class);
+            return heartbeat != null && Instant.now().minusSeconds(15).isBefore(heartbeat.toInstant());
+        } catch (org.springframework.dao.EmptyResultDataAccessException error) {
+            return false;
+        }
     }
 
     private String loadWebBuildId(ObjectMapper mapper) {
