@@ -453,9 +453,10 @@ def test_context_cache_degrades_without_redis(monkeypatch):
 
 def test_health_server_serves_health(monkeypatch, fake_db):
     service = make_service(monkeypatch, fake_db)
+    service.config = dict(service.config, AGENT_PORT="18743")
     import urllib.request
     service.start_health_server()
-    with urllib.request.urlopen("http://127.0.0.1:8742/api/health", timeout=3) as resp:
+    with urllib.request.urlopen("http://127.0.0.1:18743/api/health", timeout=3) as resp:
         assert resp.status == 200
         assert b"procurement_agent" in resp.read()
 
@@ -583,9 +584,10 @@ def test_health_server_404(monkeypatch, fake_db):
     import urllib.error
     import urllib.request
     service = make_service(monkeypatch, fake_db)
+    service.config = dict(service.config, AGENT_PORT="18744")
     service.start_health_server()
     try:
-        urllib.request.urlopen("http://127.0.0.1:8742/other", timeout=3)
+        urllib.request.urlopen("http://127.0.0.1:18744/other", timeout=3)
         raise AssertionError("expected 404")
     except urllib.error.HTTPError as error:
         assert error.code == 404
