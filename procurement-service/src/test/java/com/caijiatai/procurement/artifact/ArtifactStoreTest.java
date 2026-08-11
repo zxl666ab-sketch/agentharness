@@ -24,7 +24,7 @@ class ArtifactStoreTest {
         when(repository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         var properties = new AppProperties(
                 "采购员", temp, URI.create("http://127.0.0.1:8742"), "token",
-                URI.create("http://127.0.0.1:5173"), false, new AppProperties.Outbox(500), "http", null);
+                URI.create("http://127.0.0.1:5173"), false, new AppProperties.Outbox(500), "http", null, "test-hmac-key");
         var store = new ArtifactStore(properties, repository);
         var artifact = store.store(
                 "procurement_original", "task", "quote.xlsx",

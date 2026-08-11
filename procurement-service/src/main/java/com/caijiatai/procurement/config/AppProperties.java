@@ -14,7 +14,8 @@ public record AppProperties(
         boolean developmentMode,
         Outbox outbox,
         String agentMode,
-        DemoSeed demoSeed) {
+        DemoSeed demoSeed,
+        String internalHmacKey) {
 
     public AppProperties {
         if (localOperator == null || localOperator.isBlank()) {
@@ -28,6 +29,9 @@ public record AppProperties(
         }
         if (agentMode == null || agentMode.isBlank()) {
             agentMode = "http";
+        }
+        if (internalHmacKey == null || internalHmacKey.isBlank()) {
+            internalHmacKey = "development-only-hmac-key-change-me";
         }
         if (demoSeed == null) {
             demoSeed = new DemoSeed(false, Path.of("..", "output", "procurement-scenarios"));

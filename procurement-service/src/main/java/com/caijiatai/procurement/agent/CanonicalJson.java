@@ -70,4 +70,13 @@ public final class CanonicalJson {
     public static Map<String, Object> sortedMap(Map<String, Object> value) {
         return new TreeMap<>(value);
     }
+
+    @SuppressWarnings("unchecked")
+    public static Map<String, Object> read(byte[] bytes) {
+        try {
+            return (Map<String, Object>) MAPPER.readValue(bytes, Map.class);
+        } catch (java.io.IOException error) {
+            throw new IllegalArgumentException("无法解析消息 JSON", error);
+        }
+    }
 }
