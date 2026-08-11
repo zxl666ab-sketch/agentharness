@@ -56,3 +56,6 @@ web/%SystemDrive%/
 # Local screenshots at repo root (optional artifacts)
 agentharness-*.png
 historical-*.png
+
+# Claude worktree dirs (transient)
+.claude/worktrees/

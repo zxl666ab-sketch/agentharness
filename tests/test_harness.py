@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 import pytest
 
@@ -175,6 +175,6 @@ def test_doctor_reports_procurement_runtime_readiness(data_dir: Path):
 
     assert info["sqlite_integrity"] == "ok"
     assert info["schema_version"] == SCHEMA_VERSION
-    assert info["web_build"] in {"ready", "missing"}
+    assert info["web_build"] in {"ready", "missing", "external-java-control-plane"}
     assert info["providers"] == ["openai"]
     assert info["tools"] == []

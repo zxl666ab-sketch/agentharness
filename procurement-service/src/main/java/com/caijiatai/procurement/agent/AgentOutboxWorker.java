@@ -1,7 +1,6 @@
 package com.caijiatai.procurement.agent;
 
 import com.caijiatai.procurement.task.ProcurementTaskRepository;
-import java.time.Instant;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -30,7 +29,7 @@ public class AgentOutboxWorker {
     @Scheduled(fixedDelayString = "${app.outbox.poll-delay-ms:500}")
     @Transactional
     public void dispatch() {
-        for (var command : commands.lockDispatchable(Instant.now(), PageRequest.of(0, 10))) {
+        for (var command : commands.lockDispatchable(PageRequest.of(0, 10))) {
             command.dispatching();
             try {
                 var response = client.dispatch(command);
