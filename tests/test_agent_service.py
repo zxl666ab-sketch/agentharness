@@ -56,6 +56,8 @@ class FakeConn:
 @pytest.fixture(autouse=True)
 def fake_db(monkeypatch):
     monkeypatch.setattr(svc.pymysql, "connect", lambda **kw: FakeConn())
+    # unit tests must not touch a real Kafka broker
+    monkeypatch.setattr(svc.AgentService, "_topic_max_global_seq", lambda self: 0)
     return FakeConn()
 
 
