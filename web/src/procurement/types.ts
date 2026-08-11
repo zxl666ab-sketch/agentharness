@@ -409,3 +409,21 @@ export type EvaluationResult = {
   acceptance: Record<string, boolean>;
   limitations: string[];
 };
+
+export type AiInterpretation = {
+  text: string;
+  snapshot_id: string;
+  run_id: string;
+};
+
+export type AiReviewSuggestion = {
+  quote_id: string;
+  field: string;
+  suggested_value: string | number | boolean | null;
+  reason: string;
+  confidence?: number | null;
+};
+
+export type AiReviewSuggestions = {
+  suggestions: AiReviewSuggestion[];
+};

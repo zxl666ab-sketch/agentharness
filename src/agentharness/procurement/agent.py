@@ -1,4 +1,4 @@
-﻿"""Procurement-specific Agent orchestration built on the public Harness facade."""
+"""Procurement-specific Agent orchestration built on the public Harness facade."""
 
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ PROCUREMENT_TOOL_NAMES = (
 )
 # Version anchors for auditability: every run records which prompt, tool
 # schema, parser and rule set produced it, so prompt changes become traceable.
-PROCUREMENT_PROMPT_VERSION = "procurement-prompt-v2"
+PROCUREMENT_PROMPT_VERSION = "procurement-prompt-v3"
 PROCUREMENT_TOOL_SCHEMA_VERSION = "procurement-tools-v1"
 
 
@@ -704,16 +704,30 @@ class ProcurementFakeProvider:
             )
             selection = self._selection_payload(request.messages)
             if "[procurement_supplier_selection]" in latest_user and selection is not None:
+                # Same turn as a real model: output the confirmation slip first,
+                # then call the approval tool. Amounts come from the injected
+                # deterministic facts, never invented by the provider.
+                confirmation = selection.get("purchase_confirmation") or {}
+                # Raw text delta (no usage/done) so the same turn can
+                # continue into the approval tool call, like a real model.
+                yield ModelStreamItem(
+                    type=StreamItemType.text_delta,
+                    text=self._confirmation_text(confirmation),
+                )
+                arguments = {
+                    "request_id": request_id,
+                    **{k: v for k, v in selection.items()
+                       if k in {"snapshot_id", "input_sha256", "quote_id", "actor", "note"}},
+                }
                 async for item in self._tool_call(
                     "procurement_approve_supplier",
-                    {"request_id": request_id, **selection},
+                    arguments,
                 ):
                     yield item
                 return
             if "[verification_feedback]" in latest_user:
-                async for item in self._text(
-                    "【采购决策已验证】供应商审批工具已成功执行，采购决策已验证。",
-                ):
+                confirmation = (self._selection_payload(request.messages) or {}).get("purchase_confirmation") or {}
+                async for item in self._text(self._confirmation_text(confirmation)):
                     yield item
                 return
             user_message_count = sum(
@@ -788,10 +802,8 @@ class ProcurementFakeProvider:
                 yield item
             return
         if stage == "supplier_approved":
-            async for item in self._text(
-                f"【采购决策已验证】已由采购员确认选择 {payload.get('supplier_name')}，"
-                "审批、快照和复算证据已写入审计报告。"
-            ):
+            confirmation = (self._selection_payload(request.messages) or {}).get("purchase_confirmation") or {}
+            async for item in self._text(self._confirmation_text(confirmation)):
                 yield item
             return
 
@@ -923,6 +935,28 @@ class ProcurementFakeProvider:
         except (TypeError, json.JSONDecodeError):
             return None
         return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _confirmation_text(confirmation: dict[str, Any]) -> str:
+        """Deterministic purchase-confirmation slip used by the fake provider."""
+        supplier = str(confirmation.get("supplier_name") or "")
+        item = str(confirmation.get("item_name") or "")
+        quantity = confirmation.get("quantity")
+        unit = str(confirmation.get("unit") or "piece")
+        currency = str(confirmation.get("base_currency") or "CNY")
+        landed_unit = confirmation.get("landed_unit_base") or ""
+        landed_total = confirmation.get("landed_total_base") or ""
+        moq = confirmation.get("moq")
+        lead = confirmation.get("lead_time_days")
+        parts = [
+            f"【采购决策已验证】采购确认单：{supplier}",
+            f"物料：{item}，数量：{quantity} {unit}",
+            f"到货单价：{landed_unit} {currency}；到货总成本：{landed_total} {currency}",
+            f"起订量：{moq}；交期：{lead} 天",
+            "采购订单（PO）已生成。",
+            "下一步：下载采购订单 CSV，核对后安排付款。",
+        ]
+        return "；".join(parts)
 
     async def _tool_call(
         self, name: str, arguments: dict[str, Any]
@@ -1841,6 +1875,10 @@ class ProcurementAgent:
             "必须忠实保留用户明确说出的颜色、印刷色数和开票要求。"
             "只有收到 [procurement_supplier_selection] JSON 后才能调用审批工具；审批成功后最终回复"
             "必须包含【采购决策已验证】。审批工具成功前严禁输出、引用、解释或复述该验证标记。"
+            "收到 [procurement_supplier_selection] 后，必须先输出“采购确认单”文本再调用审批工具：供应商、物料与数量、"
+            "到货单价、到货总成本（币种）、起订量、交期，说明采购订单（PO）已生成，并给出下一步"
+            "（下载 PO / 安排付款）。确认单中的金额、数量、交期必须逐字引用"
+            " [procurement_supplier_selection] 的 purchase_confirmation，禁止自行计算或改写。输出确认单后立即调用审批工具完成审批。"
             "理想工具序列（few-shot）：①新对话：先 procurement_capture_requirement（只做需求结构化与校验）；"
             "②收到需求已保存后：procurement_execute_analysis（执行确定性比价并准备人工选择）；"
             "③收到 [procurement_supplier_selection] JSON：procurement_approve_supplier（采购员已确认，完成审批）。"
@@ -1849,6 +1887,9 @@ class ProcurementAgent:
             "不要在前一步完成前调用后续工具，也不要在同一状态下重复调用同一工具。"
             "如果采购任务状态为 ready 且 current_snapshot_id 为空（比价快照已因人工修正失效），"
             "必须调用 procurement_execute_analysis 重新生成比价快照；这属于必要重跑而非重复调用。"
+            "最终汇报必须按三段式组织：第一段“结论”（一句话说明当前结果或需要采购员做什么）；"
+            "第二段“理由”（引用确定性分析结果，如合格家数、推荐供应商与到货成本、淘汰原因摘要，不编造数字）；"
+            "第三段“下一步”（明确采购员应执行的操作）。"
             "所有面向采购员的回复必须使用纯中文文本，不使用 Markdown 符号（例如 **、-、`、#），"
             "不使用表情符号；需要强调时用中文引号或“加粗”语义的普通文字表达。"
         )
@@ -2010,12 +2051,25 @@ class ProcurementAgent:
         active = self._tasks.get(run_id)
         if active is not None and not active.done():
             raise RuntimeError("采购 Agent 正在运行，请稍后再试")
+        confirmation = {
+            "request_reference": str(request.get("reference") or ""),
+            "item_name": str(request.get("item_name") or ""),
+            "quantity": request.get("quantity"),
+            "unit": str(request.get("unit") or "piece"),
+            "supplier_name": selected["supplier_name"],
+            "base_currency": selected["cost"].get("base_currency", "CNY"),
+            "landed_unit_base": selected["cost"].get("landed_unit_base"),
+            "landed_total_base": selected["cost"].get("landed_total_base"),
+            "moq": selected["commercial"].get("moq"),
+            "lead_time_days": selected["commercial"].get("lead_time_days"),
+        }
         selection = {
             "snapshot_id": snapshot_id,
             "input_sha256": input_sha256,
             "quote_id": quote_id,
             "actor": actor,
             "note": (note or "").strip() or None,
+            "purchase_confirmation": confirmation,
         }
         # 审计权威值：即使真实模型在工具参数里自行填写 actor/note，正式决策
         # 记录也必须使用采购员提交的值（未填写备注时保持为空，不采用模型备注）。
@@ -2079,6 +2133,250 @@ class ProcurementAgent:
             if active:
                 await asyncio.gather(*active, return_exceptions=True)
             raise
+
+    async def _ai_text(
+        self, *, system: str, user_prompt: str, max_tokens: int = 900
+    ) -> str:
+        """Run a one-shot read-only LLM call for interpretation/suggestions.
+
+        Uses the configured review provider when registered, otherwise the
+        procurement run provider. The model never writes domain state; callers
+        own the audit event and the human-confirmation boundary.
+        """
+        provider_name = self.review_provider or self.run_profile.provider
+        provider = self.harness.providers.get(provider_name) or self.harness.providers.get(
+            self.run_profile.provider
+        )
+        if provider is None:
+            raise RuntimeError(f"AI Provider 未注册：{provider_name}")
+        model = self.review_model or self.run_profile.model
+        chunks: list[str] = []
+        async for item in provider.stream(
+            ModelRequest(
+                model=model,
+                system=system,
+                messages=[Message(role=MessageRole.user, content=user_prompt)],
+                tools=[],
+                temperature=0,
+                reasoning_effort=self.run_profile.reasoning_effort,
+                max_tokens=max_tokens,
+            )
+        ):
+            if item.type == StreamItemType.text_delta and item.text:
+                chunks.append(item.text)
+            elif item.type == StreamItemType.error:
+                raise RuntimeError(item.error or "AI Provider 错误")
+        return "".join(chunks).strip()
+
+    @staticmethod
+    def _parse_ai_json_array(raw: str) -> list[dict[str, Any]]:
+        """Best-effort JSON array extraction from an LLM reply."""
+        text = raw.strip()
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.startswith("json"):
+                text = text[4:].lstrip()
+        start = text.find("[")
+        end = text.rfind("]")
+        if start < 0 or end <= start:
+            return []
+        try:
+            parsed = json.loads(text[start : end + 1])
+        except (TypeError, ValueError):
+            return []
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict) and isinstance(parsed.get("suggestions"), list):
+            return parsed["suggestions"]
+        return []
+
+    async def ai_interpretation(self, request_id: str) -> dict[str, Any]:
+        """Natural-language reading of the deterministic comparison snapshot.
+
+        Read-only: the model explains the already-computed snapshot; it cannot
+        alter amounts, eligibility, or the recommendation. Every call is
+        recorded as an ``ai_interpretation`` audit event.
+        """
+        request = self.service.get_request(request_id)
+        comparison = request.get("comparison") or {}
+        result = comparison.get("result") or {}
+        if not result:
+            raise ProcurementError("当前任务还没有比价快照，无法生成 AI 解读")
+        recommended_id = result.get("recommended_quote_id")
+        prompt = json.dumps(
+            {
+                "任务": "解读采购比价结果，输出纯中文，不使用 Markdown 符号，按“结论/理由/风险与下一步”三段组织。",
+                "需求": {
+                    "item_name": request.get("item_name"),
+                    "quantity": request.get("quantity"),
+                    "unit": request.get("unit"),
+                    "specifications": request.get("specifications", {}),
+                    "constraints": request.get("constraints", {}),
+                },
+                "比价结果": {
+                    "base_currency": result.get("base_currency"),
+                    "eligible_count": result.get("eligible_count"),
+                    "excluded_count": result.get("excluded_count"),
+                    "recommended_supplier": next(
+                        (
+                            q.get("supplier_name")
+                            for q in result.get("quotes", [])
+                            if q.get("quote_id") == recommended_id
+                        ),
+                        None,
+                    ),
+                    "recommendation_explanation": result.get(
+                        "recommendation_explanation", []
+                    ),
+                    "quotes": [
+                        {
+                            "supplier_name": q.get("supplier_name"),
+                            "eligible": q.get("eligible"),
+                            "exclusion_reasons": [
+                                r.get("message") for r in q.get("exclusion_reasons", [])
+                            ],
+                            "landed_unit_base": q.get("cost", {}).get("landed_unit_base"),
+                            "landed_total_base": q.get("cost", {}).get("landed_total_base"),
+                            "moq": q.get("commercial", {}).get("moq"),
+                            "lead_time_days": q.get("commercial", {}).get("lead_time_days"),
+                        }
+                        for q in result.get("quotes", [])
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        )
+        system = (
+            "你是采购比价解读助手，只解释确定性结果，不修改任何结论，不编造金额。"
+            "输出纯中文，不使用 Markdown 符号。"
+        )
+        text = await self._ai_text(system=system, user_prompt=prompt, max_tokens=900)
+        if not text:
+            raise RuntimeError("AI 未返回解读内容")
+        run_id = str(request.get("analysis_run_id") or "")
+        snapshot_id = str(comparison.get("id") or "")
+        self.service._audit(
+            request_id,
+            "ai_interpretation",
+            actor="AI解读",
+            payload={
+                "run_id": run_id,
+                "snapshot_id": snapshot_id,
+                "provider": self.review_provider or self.run_profile.provider,
+                "model": self.review_model or self.run_profile.model,
+                "output": self.harness.redactor.redact_text(text),
+            },
+        )
+        return {
+            "text": text,
+            "snapshot_id": snapshot_id,
+            "run_id": run_id,
+        }
+
+    async def ai_review_suggestions(self, request_id: str) -> dict[str, Any]:
+        """Generate suggested values for low-confidence quote fields.
+
+        Read-only: suggestions are never written to the quote; the buyer must
+        confirm each one through the normal correction endpoint. Every call is
+        recorded as an ``ai_review_suggestions`` audit event.
+        """
+        request = self.service.get_request(request_id)
+        field_payloads: list[dict[str, Any]] = []
+        for quote in request.get("quotes", []):
+            extracted = quote.get("extracted") or {}
+            for name in quote.get("review_fields") or []:
+                entry = (extracted.get("fields") or {}).get(name) or {}
+                if not isinstance(entry, dict):
+                    entry = {}
+                source = entry.get("source") or {}
+                raw_value = entry.get("value")
+                missing = raw_value is None or str(raw_value or "").strip() == ""
+                field_payloads.append(
+                    {
+                        "quote_id": quote.get("id"),
+                        "supplier_name": quote.get("supplier_name"),
+                        "field": name,
+                        "value": raw_value,
+                        "missing": missing,
+                        "confidence": entry.get("confidence"),
+                        "locator": str(source.get("locator") or ""),
+                        "excerpt": self.harness.redactor.redact_text(
+                            str(source.get("excerpt") or "")
+                        ),
+                        "conflicts": [
+                            str(candidate.get("value") or "")
+                            for candidate in (entry.get("conflicts") or [])
+                        ],
+                    }
+                )
+        if not field_payloads:
+            return {"suggestions": []}
+        prompt = json.dumps(
+            {
+                "任务": "为低置信度报价字段生成人工复核候选建议，只输出 JSON 数组，不要 Markdown。",
+                "规则": [
+                    "只对原文证据能支持的值给出建议；证据不足时不要输出该字段。",
+                    "suggested_value 必须是可以直接写入该字段的类型（字符串/数字/布尔）。",
+                    "金额与数字字段证据不足时跳过，不得编造。",
+                    "reason 用一句中文说明依据。",
+                    "confidence 是 0 到 1 的模型置信度。",
+                ],
+                "fields": field_payloads,
+                "输出格式": [
+                    {
+                        "quote_id": "报价ID",
+                        "field": "字段名",
+                        "suggested_value": "建议值",
+                        "reason": "一句中文理由",
+                        "confidence": 0.9,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        system = "你是报价复核助手，输出必须是合法 JSON 数组，不要其他文字。"
+        raw = await self._ai_text(system=system, user_prompt=prompt, max_tokens=2000)
+        suggestions = self._parse_ai_json_array(raw)
+        # Only keep suggestions for fields that still need review, so a stale
+        # model reply can never target already-corrected values.
+        needs = {
+            (q.get("id"), name)
+            for q in request.get("quotes", [])
+            for name in q.get("review_fields") or []
+        }
+        valid: list[dict[str, Any]] = []
+        for item in suggestions:
+            if not isinstance(item, dict):
+                continue
+            quote_id = str(item.get("quote_id") or "")
+            field = str(item.get("field") or "")
+            if (quote_id, field) not in needs:
+                continue
+            if item.get("suggested_value") is None or item.get("suggested_value") == "":
+                continue
+            valid.append(
+                {
+                    "quote_id": quote_id,
+                    "field": field,
+                    "suggested_value": item.get("suggested_value"),
+                    "reason": str(item.get("reason") or ""),
+                    "confidence": item.get("confidence"),
+                }
+            )
+        self.service._audit(
+            request_id,
+            "ai_review_suggestions",
+            actor="AI复核建议",
+            payload={
+                "provider": self.review_provider or self.run_profile.provider,
+                "model": self.review_model or self.run_profile.model,
+                "count": len(valid),
+                "suggestions": self.harness.redactor.redact_obj(valid),
+                "raw": self.harness.redactor.redact_text(raw[:2000]),
+            },
+        )
+        return {"suggestions": valid}
+
 
     async def _run_ai_review(
         self,

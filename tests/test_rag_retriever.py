@@ -281,6 +281,8 @@ def test_rag_material_canonical_matches_costing_word_boundary() -> None:
         "PET", "PET膜", "聚对苯二甲酸乙二醇酯",
         "PLA", "聚乳酸",
         "per", "pet", "apple", "pete", "未注明",
+        "铜版纸", "coated paper", "art paper", "不干胶铜版纸",
+        "BOPP", "bopp", "双向拉伸聚丙烯", "BOPP 基材，水性丙烯酸胶",
     )
     for value in cases:
         assert rag_material(value) == costing_material(value), value
@@ -378,3 +380,117 @@ def test_retriever_pages_structured_scan_past_hard_cap(
     results = retriever.retrieve(request=_request(), now=date(2026, 7, 15))
     assert any(item["chunk_sha256"] == perfect_sha for item in results)
     assert max(offset for _limit, offset in fake.calls) >= 100
+
+
+def test_retriever_excludes_other_item_history_from_references(data_dir) -> None:  # type: ignore[no-untyped-def]
+    """Regression: carton history must never be returned as a reference for a
+    PE express-bag request, even when a weak spec dimension (print_colors)
+    matches; a small index must not fill the top-5 with unrelated items."""
+    storage = Storage(data_dir)
+    try:
+        storage.rag.upsert_chunk(
+            _chunk("1" * 64, item_name="PE白色快递袋", decision_at="2026-07-02T00:00:00+00:00")
+        )
+        storage.rag.upsert_chunk(
+            _chunk("2" * 64, item_name="PE白色快递袋", decision_at="2026-07-01T00:00:00+00:00")
+        )
+        for idx, sha in enumerate(("3" * 64, "4" * 64, "5" * 64), start=3):
+            storage.rag.upsert_chunk(
+                _chunk(
+                    sha,
+                    item_name="五层瓦楞纸箱",
+                    specifications={
+                        "width_mm": "400",
+                        "length_mm": "300",
+                        "thickness_um": "5000",
+                        "material": "瓦楞纸",
+                        "color": "牛皮色",
+                        "print_colors": 1,
+                    },
+                    decision_at=f"2026-07-{idx:02d}T00:00:00+00:00",
+                )
+            )
+        retriever = Retriever(storage)
+        results = retriever.retrieve(request=_request(), now=date(2026, 7, 15))
+        assert [item["chunk_sha256"] for item in results] == ["1" * 64, "2" * 64]
+        assert all(item["item_name"] == "PE白色快递袋" for item in results)
+    finally:
+        storage.close()
+
+
+def test_retriever_label_request_excludes_bag_and_carton_history(data_dir) -> None:  # type: ignore[no-untyped-def]
+    """Regression: once labels are canonicalizable, a thermal-label request
+    must not retrieve unrelated mailer/carton history even on weak spec hits."""
+    storage = Storage(data_dir)
+    try:
+        storage.rag.upsert_chunk(
+            _chunk("1" * 64, item_name="PE白色快递袋", decision_at="2026-07-02T00:00:00+00:00")
+        )
+        storage.rag.upsert_chunk(
+            _chunk("2" * 64, item_name="五层瓦楞纸箱", decision_at="2026-07-01T00:00:00+00:00")
+        )
+        retriever = Retriever(storage)
+        results = retriever.retrieve(
+            request=_request(
+                item_name="热敏不干胶标签",
+                specifications={
+                    "width_mm": "100",
+                    "length_mm": "150",
+                    "thickness_um": "80",
+                    "material": "铜版纸",
+                    "color": "白色",
+                    "print_colors": 1,
+                },
+            ),
+            now=date(2026, 7, 15),
+        )
+        assert results == []
+    finally:
+        storage.close()
+
+
+def test_retriever_label_history_is_retrieved_for_label_request(data_dir) -> None:  # type: ignore[no-untyped-def]
+    """A canonicalizable label history chunk is a valid reference for a
+    thermal-label request while mailer/carton chunks stay excluded."""
+    storage = Storage(data_dir)
+    try:
+        label_sha = "l" * 64
+        storage.rag.upsert_chunk(
+            _chunk(
+                label_sha,
+                item_name="热敏不干胶标签",
+                specifications={
+                    "width_mm": "100",
+                    "length_mm": "150",
+                    "thickness_um": "80",
+                    "material": "铜版纸",
+                    "color": "白色",
+                    "print_colors": 1,
+                },
+                decision_at="2026-07-03T00:00:00+00:00",
+            )
+        )
+        storage.rag.upsert_chunk(
+            _chunk("1" * 64, item_name="PE白色快递袋", decision_at="2026-07-02T00:00:00+00:00")
+        )
+        storage.rag.upsert_chunk(
+            _chunk("2" * 64, item_name="五层瓦楞纸箱", decision_at="2026-07-01T00:00:00+00:00")
+        )
+        retriever = Retriever(storage)
+        results = retriever.retrieve(
+            request=_request(
+                item_name="热敏不干胶标签",
+                specifications={
+                    "width_mm": "100",
+                    "length_mm": "150",
+                    "thickness_um": "80",
+                    "material": "铜版纸",
+                    "color": "白色",
+                    "print_colors": 1,
+                },
+            ),
+            now=date(2026, 7, 15),
+        )
+        assert [item["chunk_sha256"] for item in results] == [label_sha]
+    finally:
+        storage.close()

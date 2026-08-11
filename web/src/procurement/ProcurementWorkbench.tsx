@@ -669,6 +669,7 @@ export function ProcurementWorkbench({
                 <ProcurementConversation
                   request={detail}
                   streamLive={stream.status === "live"}
+                  streamEvents={stream.events}
                   actionError={actionError}
                   onResume={resume}
                   onRecover={analyze}

@@ -10,12 +10,15 @@ import {
   Pencil,
   Play,
   ShieldCheck,
+  Sparkles,
   Upload,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { procurementApi } from "./api";
 import type {
+  AiReviewSuggestion,
   FieldMeta,
   ProcurementMeta,
   ProcurementRequest,
@@ -238,6 +241,11 @@ export function QuoteWorkspace({
   const [selectedId, setSelectedId] = useState<string | null>(request.quotes[0]?.id || null);
   const [localError, setLocalError] = useState<string | null>(null);
   const [onlyReview, setOnlyReview] = useState(false);
+  const [aiSuggestions, setAiSuggestions] = useState<AiReviewSuggestion[]>([]);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiHandled, setAiHandled] = useState<Set<string>>(new Set());
+  const [aiFetched, setAiFetched] = useState(false);
   useEffect(() => {
     if (!request.quotes.some((quote) => quote.id === selectedId)) {
       setSelectedId(request.quotes[0]?.id || null);
@@ -248,10 +256,29 @@ export function QuoteWorkspace({
     if (!selected) return [];
     const shippingIncluded =
       selected.extracted.fields.shipping_included?.value === true;
+    const reviewSet = new Set(selected.review_fields || []);
     return FIELD_ORDER.flatMap((name) => {
-      const field = selected.extracted.fields[name];
       const fieldMeta = meta.field_meta[name];
-      if (!field || !fieldMeta || (onlyReview && field.status !== "needs_review")) return [];
+      if (!fieldMeta) return [];
+      const field = selected.extracted.fields[name];
+      if (!field) {
+        // 报价中完全缺失、但服务端列为待复核的字段（例如需求要求高度的纸箱，
+        // 解析器不会为可选的 height_mm 生成占位条目）：渲染成空值编辑器。
+        if (!reviewSet.has(name)) return [];
+        const missingField: QuoteField = {
+          value: null,
+          confidence: 0,
+          status: "needs_review",
+          source: {
+            document_kind: selected.source_kind,
+            locator: "not found",
+            excerpt: "报价中未找到该字段",
+            method: "missing",
+          },
+        };
+        return [{ name, field: missingField, meta: fieldMeta, hint: undefined }];
+      }
+      if (onlyReview && field.status !== "needs_review") return [];
       const hint =
         name === "shipping_fee" &&
         shippingIncluded &&
@@ -267,6 +294,49 @@ export function QuoteWorkspace({
       .map(([key, field]) => ({ key, field }))
       .sort((a, b) => (a.field.label || a.key).localeCompare(b.field.label || b.key, "zh-CN"));
   }, [selected]);
+  async function loadAiSuggestions() {
+    if (!request.id || aiBusy) return;
+    setAiBusy(true);
+    setAiError(null);
+    try {
+      const result = await procurementApi.aiReviewSuggestions(request.id);
+      setAiSuggestions(result.suggestions);
+      setAiFetched(true);
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  function aiSuggestionKey(suggestion: AiReviewSuggestion) {
+    return `${suggestion.quote_id}:${suggestion.field}`;
+  }
+
+  async function acceptSuggestion(suggestion: AiReviewSuggestion) {
+    const key = aiSuggestionKey(suggestion);
+    if (aiHandled.has(key)) return;
+    setAiHandled((current) => new Set(current).add(key));
+    try {
+      await onCorrect(suggestion.quote_id, suggestion.field, suggestion.suggested_value);
+    } catch {
+      setAiHandled((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+    }
+  }
+
+  function dismissSuggestion(suggestion: AiReviewSuggestion) {
+    setAiHandled((current) => new Set(current).add(aiSuggestionKey(suggestion)));
+  }
+
+  const visibleSuggestions = aiSuggestions.filter(
+    (suggestion) => !aiHandled.has(aiSuggestionKey(suggestion))
+  );
+
+
   const canAnalyze =
     request.quote_count >= 2 &&
     request.unresolved_field_count === 0 &&
@@ -380,6 +450,16 @@ export function QuoteWorkspace({
                   <input type="checkbox" checked={onlyReview} onChange={(event) => setOnlyReview(event.target.checked)} />
                   <span>仅待复核</span>
                 </label>
+                <button
+                  type="button"
+                  className="proc-button secondary compact"
+                  disabled={aiBusy}
+                  title="AI 复核建议（只读，采纳后按人工修正写入）"
+                  onClick={() => void loadAiSuggestions()}
+                >
+                  {aiBusy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}
+                  AI 建议
+                </button>
                 <a
                   className="proc-icon-button"
                   href={`/api/artifacts/${selected.source_artifact_id}/raw`}
@@ -397,6 +477,34 @@ export function QuoteWorkspace({
               <code title={selected.source_sha256}>{selected.source_sha256.slice(0, 20)}</code>
               <span>解析用时 {Math.round(selected.processing_ms)} ms</span>
             </div>
+            {aiError ? <p className="proc-inline-error" role="alert">{aiError}</p> : null}
+            {(aiBusy || aiFetched || visibleSuggestions.length) ? (
+              <section className="proc-ai-suggestions" aria-label="AI 复核建议">
+                <header>
+                  <span><Sparkles size={14} /><strong>AI 复核建议</strong></span>
+                  <small>仅建议，采纳后按人工修正写入并记录审计</small>
+                </header>
+                {aiBusy ? <p className="proc-ai-loading"><LoaderCircle className="spin" size={14} />正在生成建议…</p> : null}
+                {aiFetched && !visibleSuggestions.length ? <p className="proc-ai-empty">本次未生成可安全采纳的建议：证据不足或涉及金额的字段不会被建议，请人工填写。</p> : null}
+                {visibleSuggestions.length ? (
+                  <ul>
+                  {visibleSuggestions.map((suggestion) => (
+                    <li key={`${suggestion.quote_id}:${suggestion.field}`}>
+                      <div>
+                        <strong>{request.quotes.find((quote) => quote.id === suggestion.quote_id)?.supplier_name || "报价"} · {meta.field_meta[suggestion.field]?.label || suggestion.field}</strong>
+                        <span>建议值：<b>{String(suggestion.suggested_value)}</b></span>
+                        {suggestion.reason ? <small>{suggestion.reason}</small> : null}
+                      </div>
+                      <div className="proc-ai-suggestion-actions">
+                        <button type="button" className="proc-button primary compact" onClick={() => void acceptSuggestion(suggestion)}>采纳</button>
+                        <button type="button" className="proc-button secondary compact" onClick={() => dismissSuggestion(suggestion)}>忽略</button>
+                      </div>
+                    </li>
+                  ))}
+                  </ul>
+                ) : null}
+              </section>
+            ) : null}
             <div className="proc-field-table">
               <div className="proc-field-table-head"><span>字段</span><span>抽取值 / 修正值</span><span>来源证据</span></div>
               {entries.map(({ name, field, meta: fieldMeta, hint }) => (

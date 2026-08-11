@@ -14,9 +14,9 @@ import {
   UserRound,
   X,
 } from "lucide-react";
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
-import { api, type ToolInvocationRow } from "../api/client";
+import { api, type EventRow, type ToolInvocationRow } from "../api/client";
 import { friendlyProcurementError, procurementApi } from "./api";
 import type { ProcurementRequest } from "./types";
 
@@ -220,6 +220,7 @@ export function NewProcurementConversation({
 type ConversationProps = {
   request: ProcurementRequest;
   streamLive: boolean;
+  streamEvents?: EventRow[];
   actionError?: string | null;
   onResume: (message: string) => Promise<void>;
   onRecover: () => Promise<void>;
@@ -229,6 +230,7 @@ type ConversationProps = {
 export function ProcurementConversation({
   request,
   streamLive,
+  streamEvents = [],
   actionError,
   onResume,
   onRecover,
@@ -268,12 +270,107 @@ export function ProcurementConversation({
     [messagesQuery.data]
   );
   const tools = toolsQuery.data || [];
+
+  // Live token preview: text_delta SSE events for this run, in sequence.
+  const streamedText = useMemo(() => {
+    if (!runId || !streamEvents.length) return "";
+    return streamEvents
+      .filter((event) => event.run_id === runId && event.type === "text_delta")
+      .sort((a, b) => a.global_seq - b.global_seq)
+      .map((event) => String((event.payload as { text?: unknown } | undefined)?.text ?? ""))
+      .join("");
+  }, [runId, streamEvents]);
+  const showStreaming = streamedText.length > 0
+    && (active || !messages.some((item) => item.role === "assistant"));
+  const modelThinking = active && !showStreaming && streamEvents.some(
+    (event) => event.run_id === runId && event.type === "model_turn_start"
+  );
+  // Typewriter rendering: the backend flushes text_delta in coarse chunks
+  // (~256 chars / 150ms), so reveal the arrival stream character-by-character
+  // with a rate that tracks arrival speed. Already-arrived text renders as-is
+  // on mount (keeps SSR/tests simple and reloads instant).
+  const [displayed, setDisplayed] = useState(streamedText);
+  const displayedRef = useRef(streamedText);
+  const pendingRef = useRef("");
+  const rafRef = useRef<number | null>(null);
+  const arrivalRef = useRef({ at: performance.now(), rate: 60 });
+  const [streamingReady, setStreamingReady] = useState(false);
+  useEffect(() => {
+    setStreamingReady(true);
+    return () => setStreamingReady(false);
+  }, []);
+
+  useEffect(() => {
+    if (!streamingReady) return;
+    const full = streamedText;
+    const shown = displayedRef.current;
+    if (full === shown) return;
+    if (full.startsWith(shown)) {
+      pendingRef.current += full.slice(shown.length);
+      const now = performance.now();
+      const elapsed = Math.max(1, now - arrivalRef.current.at);
+      const added = full.length - shown.length;
+      arrivalRef.current = { at: now, rate: (added / elapsed) * 1000 };
+    } else {
+      // Run changed or the preview was reset: show everything immediately.
+      displayedRef.current = full;
+      pendingRef.current = "";
+      setDisplayed(full);
+      return;
+    }
+    if (rafRef.current === null) {
+      const tick = (now: number) => {
+        rafRef.current = null;
+        const pending = pendingRef.current;
+        if (!pending) return;
+        const elapsedMs = Math.max(1, now - arrivalRef.current.at);
+        // Reveal at ~1.2x the arrival rate, clamped to a pleasant 80-600 chars/s.
+        // Large pending bursts (fast model output) reveal faster so the first
+        // segment does not feel like a stall.
+        let charsPerSecond = Math.min(600, Math.max(80, arrivalRef.current.rate * 1.2));
+        if (pending.length > 300) charsPerSecond = Math.max(charsPerSecond, 480);
+        const take = Math.max(1, Math.round((charsPerSecond * elapsedMs) / 1000));
+        const next = displayedRef.current + pending.slice(0, take);
+        pendingRef.current = pending.slice(take);
+        displayedRef.current = next;
+        arrivalRef.current = { at: now, rate: charsPerSecond };
+        setDisplayed(next);
+        if (pendingRef.current) rafRef.current = requestAnimationFrame(tick);
+      };
+      rafRef.current = requestAnimationFrame(tick);
+    }
+  }, [streamedText, streamingReady]);
+
+  useEffect(() => () => {
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+  }, []);
+
   const status = runQuery.data?.status || "";
   // require_human 在“等待采购员选供应商”阶段也会出现；只有还没有比价快照时
   // 才展示“补充或修正采购规格”澄清框，避免与“查看比价并选择供应商”同时出现。
   const needsClarification = status === "require_human" && !request.comparison;
   const canRecover = status === "failed" || status === "cancelled" || status === "interrupted" || status === "budget_stopped";
   const canStop = status === "pending" || status === "running" || status === "waiting_approval";
+
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const scrollTickRef = useRef({ at: 0, length: 0 });
+  // Follow the agent output while it is active, with speed-adaptive
+  // scrolling: fast bursts jump to the bottom, slow text scrolls smoothly.
+  useEffect(() => {
+    if (!active || !scrollRef.current) return;
+    const container = scrollRef.current;
+    const now = Date.now();
+    const previous = scrollTickRef.current;
+    const deltaChars = displayed.length - previous.length;
+    const elapsedMs = now - previous.at;
+    const fast = elapsedMs > 0 && deltaChars > 0 && (deltaChars / elapsedMs) * 1000 >= 80;
+    scrollTickRef.current = { at: now, length: displayed.length };
+    if (typeof container.scrollTo === "function") {
+      container.scrollTo({ top: container.scrollHeight, behavior: fast ? "auto" : "smooth" });
+    } else {
+      container.scrollTop = container.scrollHeight;
+    }
+  }, [active, messages.length, displayed, tools.length]);
 
   async function submitReply(event: FormEvent) {
     event.preventDefault();
@@ -331,7 +428,7 @@ export function ProcurementConversation({
         <span><small>REQUEST</small><code title={request.id}>{request.id.slice(0, 10)}</code></span>
         <span><small>RUN</small><code title={runId || "-"}>{runId ? runId.slice(0, 10) : "-"}</code></span>
       </div>
-      <div className="proc-conversation-scroll">
+      <div className="proc-conversation-scroll" ref={scrollRef}>
         {messages.map((item, index) => (
           <article className={`proc-chat-message ${item.role}`} key={item.id}>
             <span className="proc-chat-avatar">{item.role === "user" ? <UserRound size={14} /> : <Bot size={14} />}</span>
@@ -348,8 +445,17 @@ export function ProcurementConversation({
             </div>
           </article>
         ))}
-        {active && !messages.some((item) => item.role === "assistant") ? (
-          <div className="proc-agent-working"><LoaderCircle className="spin" size={15} />Agent 正在分析报价</div>
+        {showStreaming ? (
+          <article className="proc-chat-message assistant streaming">
+            <span className="proc-chat-avatar"><Bot size={14} /></span>
+            <div>
+              <small>采购 Agent</small>
+              <p>{displayed}<span className="proc-stream-cursor" aria-hidden="true" /></p>
+            </div>
+          </article>
+        ) : null}
+        {active && !messages.some((item) => item.role === "assistant") && !showStreaming ? (
+          <div className="proc-agent-working"><LoaderCircle className="spin" size={15} />{modelThinking ? "模型正在思考，首次响应可能需要几秒…" : "Agent 正在分析报价"}</div>
         ) : null}
         {tools.length ? (
           <section className="proc-conversation-tools">

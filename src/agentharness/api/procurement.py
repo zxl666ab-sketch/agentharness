@@ -360,6 +360,27 @@ def procurement_router(service: ProcurementService, agent: ProcurementAgent) -> 
         # 与 /report 一致：详情中的报价原文摘录等不可信文本统一脱敏。
         return agent.harness.redactor.redact_public_obj(detail)
 
+    @router.post("/requests/{request_id}/ai-interpretation", status_code=200)
+    async def ai_interpretation(request_id: str) -> dict[str, Any]:
+        """AI 解读确定性比价快照（只读，模型不改结论；每次调用记审计事件）。"""
+        try:
+            return await agent.ai_interpretation(request_id)
+        except KeyError:
+            raise HTTPException(404, "未找到采购需求") from None
+        except (ProcurementError, RuntimeError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/requests/{request_id}/ai-review-suggestions", status_code=200)
+    async def ai_review_suggestions(request_id: str) -> dict[str, Any]:
+        """AI 复核建议（只读；采购员确认后才通过人工修正接口写库）。"""
+        try:
+            return await agent.ai_review_suggestions(request_id)
+        except KeyError:
+            raise HTTPException(404, "未找到采购需求") from None
+        except (ProcurementError, RuntimeError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+
     @router.post("/requests/{request_id}/resume", status_code=202)
     async def resume_conversation(
         request_id: str,

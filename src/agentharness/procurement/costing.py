@@ -10,6 +10,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from agentharness.procurement.parsing import decimal_is_resource_bounded
+from agentharness.rag.chunking import canonical_item
 
 RULESET_VERSION = "landed-cost-v1"
 MONEY = Decimal("0.01")
@@ -30,40 +31,18 @@ class CostingError(ValueError):
     pass
 
 
-def _canonical_item(value: Any) -> str | None:
-    text = str(value or "").casefold()
-    groups = {
-        "mailer": ("快递袋", "快递包装袋", "mailer", "mailing bag", "courier bag"),
-        "trash_bag": ("垃圾袋", "trash bag", "garbage bag", "bin liner"),
-        # 电商包装耗材已支持的其余品类：
-        # 纸箱 / 气泡膜 / 缠绕膜 / 封箱胶带 / 珍珠棉
-        "bubble": ("气泡膜", "气泡袋", "气泡垫", "bubble wrap", "bubble film", "bubble"),
-        "stretch": ("缠绕膜", "拉伸膜", "stretch film", "stretch wrap", "stretch"),
-        "tape": ("封箱胶带", "胶带", "tape"),
-        "foam": ("珍珠棉", "epe", "pe foam", "foam"),
-    }
-    identity = next(
-        (name for name, aliases in groups.items() if any(alias in text for alias in aliases)),
-        None,
-    )
-    if identity is not None:
-        return identity
-    if any(alias in text for alias in ("纸箱", "包装箱", "carton", "corrugated")):
-        return "carton"
-    if re.search(r"\bbox(?:es)?\b", text):
-        return "carton"
-    return None
-
 def _canonical_material(value: Any) -> str | None:
     text = str(value or "").strip().casefold()
     aliases = {
         "PE": ("pe", "聚乙烯", "polyethylene"),
         "PVC": ("pvc", "聚氯乙烯", "polyvinyl chloride"),
         "PP": ("pp", "聚丙烯", "polypropylene"),
+        "bopp": ("bopp", "双向拉伸聚丙烯"),
         "PET": ("pet", "聚对苯二甲酸乙二醇"),
         "PLA": ("pla", "聚乳酸"),
         "corrugated": ("瓦楞", "corrugated", "cardboard"),
         "kraft": ("牛皮", "kraft"),
+        "coated_paper": ("铜版纸", "coated paper", "art paper"),
     }
     for canonical, values in aliases.items():
         if any(re.search(rf"(?<![a-z]){re.escape(alias)}(?![a-z])", text) for alias in values):
@@ -246,8 +225,8 @@ def _normalized_quote(
     spec_checks: list[dict[str, Any]] = []
     description = str(fields.get("item_description") or "")
     requested_item = str(request.get("item_name") or "").strip()
-    expected_item = _canonical_item(requested_item)
-    actual_item = _canonical_item(description)
+    expected_item = canonical_item(requested_item)
+    actual_item = canonical_item(description)
     if requested_item:
         if expected_item is None:
             # 需求物料不在可识别枚举内：不能静默放行，必须按无法复核处理，

@@ -4,17 +4,19 @@ import {
   Calculator,
   CheckCircle2,
   ExternalLink,
+  FileDown,
   Fingerprint,
   LoaderCircle,
   Play,
   ShieldAlert,
   ShieldCheck,
+  Sparkles,
   X,
   XCircle,
-  FileDown,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { procurementApi } from "./api";
 import { KnowledgeReferences } from "./KnowledgeReferences";
 import type {
   ComparisonQuote,
@@ -82,6 +84,9 @@ export function ComparisonView({
   const [confirmed, setConfirmed] = useState(false);
   const [note, setNote] = useState("");
   const [reviewAck, setReviewAck] = useState(false);
+  const [aiText, setAiText] = useState<string | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
   useEffect(() => {
     // After approval the table must highlight the supplier that was actually
     // selected by the buyer, not the rule recommendation.
@@ -91,6 +96,8 @@ export function ComparisonView({
     setConfirmed(false);
     setNote("");
     setReviewAck(false);
+    setAiText(null);
+    setAiError(null);
   }, [request.status, snapshot?.id, result?.recommended_quote_id, decidedQuoteId, terminal]);
   const rows = useMemo(
     () =>
@@ -103,6 +110,20 @@ export function ComparisonView({
   );
   const selected = rows.find((quote) => quote.quote_id === selectedId) || null;
   const noEligibleQuotes = result?.eligible_count === 0;
+
+  async function loadAiInterpretation() {
+    if (!request.id || aiBusy) return;
+    setAiBusy(true);
+    setAiError(null);
+    try {
+      const interpretation = await procurementApi.aiInterpretation(request.id);
+      setAiText(interpretation.text);
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAiBusy(false);
+    }
+  }
 
   if (!snapshot || !result) {
     return (
@@ -137,6 +158,15 @@ export function ComparisonView({
             <span>规则推荐</span>
             <h2>{rows.find((quote) => quote.quote_id === result.recommended_quote_id)?.supplier_name || "无合格报价"}</h2>
             <p>{result.recommendation_explanation.map(businessText).join("；")}</p>
+            <button
+              type="button"
+              className="proc-button secondary compact"
+              disabled={aiBusy}
+              onClick={() => void loadAiInterpretation()}
+            >
+              {aiBusy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}
+              AI 解读
+            </button>
           </div>
         </div>
         <div className="proc-comparison-proof">
@@ -152,6 +182,18 @@ export function ComparisonView({
           <span><strong>{result.ruleset_version}</strong>规则集</span>
         </div>
       </header>
+
+      {aiText || aiBusy || aiError ? (
+        <section className="proc-ai-panel" aria-label="AI 解读">
+          <header>
+            <span><Sparkles size={14} /><strong>AI 解读</strong></span>
+            <small>AI 生成，仅供参考，不影响确定性结论</small>
+          </header>
+          {aiBusy ? <p className="proc-ai-loading"><LoaderCircle className="spin" size={14} />正在生成解读…</p> : null}
+          {aiError ? <p className="proc-inline-error" role="alert">{aiError}</p> : null}
+          {aiText ? <p className="proc-ai-text">{aiText}</p> : null}
+        </section>
+      ) : null}
 
       <KnowledgeReferences
         references={request.knowledge_references || []}

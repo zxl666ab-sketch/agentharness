@@ -1,4 +1,6 @@
 import type {
+  AiInterpretation,
+  AiReviewSuggestions,
   EvaluationResult,
   ProcurementAuditReport,
   ProcurementMeta,
@@ -199,5 +201,13 @@ export const procurementApi = {
     postJson<{ ok: boolean; recorded: boolean; request_id: string; chunk_id: string; action: string }>(
       `/api/procurement/requests/${requestId}/knowledge/feedback`,
       { chunk_id: chunkId, action }
+    ),
+  aiInterpretation: (requestId: string) =>
+    postJson<AiInterpretation>(
+      `/api/procurement/requests/${requestId}/ai-interpretation`
+    ),
+  aiReviewSuggestions: (requestId: string) =>
+    postJson<AiReviewSuggestions>(
+      `/api/procurement/requests/${requestId}/ai-review-suggestions`
     ),
 };

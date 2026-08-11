@@ -1,4 +1,4 @@
-﻿"""Build rag_chunks from approved procurement facts (deterministic, offline).
+"""Build rag_chunks from approved procurement facts (deterministic, offline).
 
 Chunks are built only from formally approved decisions. The chunk_sha256 is
 derived from canonical business facts so any business change (for example a
@@ -24,11 +24,13 @@ _MATERIAL_ALIASES: dict[str, tuple[str, ...]] = {
     "PE": ("pe", "聚乙烯", "polyethylene"),
     "PVC": ("pvc", "聚氯乙烯", "polyvinyl chloride"),
     "PP": ("pp", "聚丙烯", "polypropylene"),
+    "bopp": ("bopp", "双向拉伸聚丙烯"),
     "PET": ("pet", "聚对苯二甲酸乙二醇酯"),
     "PLA": ("pla", "聚乳酸"),
 
     "corrugated": ("瓦楞", "corrugated", "cardboard"),
-    "kraft": ("牛皮", "kraft"),}
+    "kraft": ("牛皮", "kraft"),
+    "coated_paper": ("铜版纸", "coated paper", "art paper"),}
 
 _COLOR_ALIASES: dict[str, tuple[str, ...]] = {
     "white": ("白色", "白", "white"),
@@ -92,6 +94,32 @@ def canonical_color(value: Any) -> str | None:
     if len(set(matched)) > 1:
         return None
     return matched[0] if matched else None
+
+
+def canonical_item(value: Any) -> str | None:
+    text = str(value or "").casefold()
+    groups = {
+        "mailer": ("快递袋", "快递包装袋", "mailer", "mailing bag", "courier bag"),
+        "trash_bag": ("垃圾袋", "trash bag", "garbage bag", "bin liner"),
+        # 电商包装耗材已支持的其余品类：
+        # 纸箱 / 气泡膜 / 缠绕膜 / 封箱胶带 / 珍珠棉 / 不干胶标签
+        "bubble": ("气泡膜", "气泡袋", "气泡垫", "bubble wrap", "bubble film", "bubble"),
+        "stretch": ("缠绕膜", "拉伸膜", "stretch film", "stretch wrap", "stretch"),
+        "tape": ("封箱胶带", "胶带", "tape"),
+        "foam": ("珍珠棉", "epe", "pe foam", "foam"),
+        "label": ("不干胶标签", "热敏标签", "标签", "不干胶", "thermal label", "sticker", "label"),
+    }
+    identity = next(
+        (name for name, aliases in groups.items() if any(alias in text for alias in aliases)),
+        None,
+    )
+    if identity is not None:
+        return identity
+    if any(alias in text for alias in ("纸箱", "包装箱", "carton", "corrugated")):
+        return "carton"
+    if re.search(r"\bbox(?:es)?\b", text):
+        return "carton"
+    return None
 
 
 def canonical_facts(
@@ -311,6 +339,7 @@ __all__ = [
     "build_chunk",
     "canonical_color",
     "canonical_facts",
+    "canonical_item",
     "canonical_material",
     "chunk_sha256",
     "quality_flags_for_quote",

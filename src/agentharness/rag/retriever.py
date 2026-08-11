@@ -15,7 +15,12 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from agentharness.rag.chunking import canonical_color, canonical_material, specification_summary
+from agentharness.rag.chunking import (
+    canonical_color,
+    canonical_item,
+    canonical_material,
+    specification_summary,
+)
 
 WIDTH = "width_mm"
 LENGTH = "length_mm"
@@ -54,6 +59,21 @@ def _decimal(value: Any) -> Decimal | None:
 
 def _norm_text(value: Any) -> str:
     return str(value or "").strip().casefold()
+
+
+def _item_compatible(request_item: Any, chunk_item: Any) -> bool | None:
+    """Item-identity compatibility between a request and a history chunk.
+
+    Returns False only when both sides canonicalize to a different product
+    (a carton chunk must never be a reference for a mailer request); True
+    when both canonicalize to the same product; None when either side is
+    outside the canonical set, letting structured-spec scoring decide.
+    """
+    left = canonical_item(request_item)
+    right = canonical_item(chunk_item)
+    if left is None or right is None:
+        return None
+    return left == right
 
 
 def _structured_hits(
@@ -166,6 +186,7 @@ class Retriever:
         as_of = now or date.today()
         request_id = str(request["id"])
         request_specs = request.get("specifications", {})
+        request_item = request.get("item_name")
         constraints = request.get("constraints", {})
         size_tolerance = _decimal(
             constraints.get("size_tolerance_mm", DEFAULT_SIZE_TOLERANCE_MM)
@@ -188,6 +209,7 @@ class Retriever:
             str(chunk["chunk_sha256"]): chunk
             for chunk in self.rag.fts_search(keyword_query, limit=200)
             if str(chunk.get("request_id")) != request_id
+            and _item_compatible(request_item, chunk.get("item_name")) is not False
         }
 
         structured_hits: dict[str, dict[str, Any]] = {}
@@ -203,6 +225,8 @@ class Retriever:
                 break
             for chunk in page:
                 if str(chunk.get("request_id")) == request_id:
+                    continue
+                if _item_compatible(request_item, chunk.get("item_name")) is False:
                     continue
                 hits, matched, missing = _structured_hits(
                     request_specs,

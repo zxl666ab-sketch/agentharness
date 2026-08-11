@@ -8,6 +8,7 @@ import { ComparisonView } from "./ComparisonView";
 import { buildCsv, DashboardView } from "./DashboardView";
 import { KnowledgeReferences } from "./KnowledgeReferences";
 import { friendlyProcurementError } from "./api";
+import type { EventRow } from "../api/client";
 import {
   NewProcurementConversation,
   ProcurementConversation,
@@ -734,3 +735,155 @@ describe("历史成交参考（stage-6 RAG）", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+it("streams agent text deltas into the conversation while running", () => {
+  const queryClient = new QueryClient();
+  const runningRequest: ProcurementRequest = {
+    ...request,
+    status: "collecting",
+    analysis_run_id: "run-streaming",
+    unresolved_field_count: 0,
+  };
+  queryClient.setQueryData(["procurement-run", "run-streaming"], { id: "run-streaming", status: "running", error: null });
+  queryClient.setQueryData(["procurement-messages", "run-streaming"], []);
+  queryClient.setQueryData(["procurement-tools", "run-streaming"], []);
+  const streamEvents: EventRow[] = [
+    { event_id: "e1", global_seq: 1, run_seq: 1, session_id: "session", run_id: "run-streaming", type: "text_delta", timestamp: "2026-07-27T00:00:00Z", payload: { text: "正在解析" } },
+    { event_id: "e2", global_seq: 2, run_seq: 2, session_id: "session", run_id: "run-streaming", type: "text_delta", timestamp: "2026-07-27T00:00:00Z", payload: { text: "三家报价" } },
+    { event_id: "e3", global_seq: 3, run_seq: 3, session_id: "session", run_id: "other-run", type: "text_delta", timestamp: "2026-07-27T00:00:00Z", payload: { text: "无关运行" } },
+  ];
+  const html = renderToString(
+    <QueryClientProvider client={queryClient}>
+      <ProcurementConversation
+        request={runningRequest}
+        streamLive
+        streamEvents={streamEvents}
+        onResume={async () => undefined}
+        onRecover={async () => undefined}
+        onOpenComparison={() => undefined}
+      />
+    </QueryClientProvider>
+  );
+  expect(html).toContain("正在解析三家报价");
+  expect(html).not.toContain("无关运行");
+  expect(html).not.toContain("Agent 正在分析报价");
+});
+
+it("replaces the streamed preview with the persisted assistant message once complete", () => {
+  const queryClient = new QueryClient();
+  const completedRequest: ProcurementRequest = {
+    ...request,
+    status: "analyzed",
+    analysis_run_id: "run-done",
+    unresolved_field_count: 0,
+  };
+  queryClient.setQueryData(["procurement-run", "run-done"], { id: "run-done", status: "completed", error: null });
+  queryClient.setQueryData(["procurement-messages", "run-done"], [
+    { id: "m1", role: "assistant", content: "最终分析结论", created_at: "2026-07-27T00:00:00Z" },
+  ]);
+  queryClient.setQueryData(["procurement-tools", "run-done"], []);
+  const streamEvents: EventRow[] = [
+    { event_id: "e1", global_seq: 1, run_seq: 1, session_id: "session", run_id: "run-done", type: "text_delta", timestamp: "2026-07-27T00:00:00Z", payload: { text: "流式预览内容" } },
+  ];
+  const html = renderToString(
+    <QueryClientProvider client={queryClient}>
+      <ProcurementConversation
+        request={completedRequest}
+        streamLive
+        streamEvents={streamEvents}
+        onResume={async () => undefined}
+        onRecover={async () => undefined}
+        onOpenComparison={() => undefined}
+      />
+    </QueryClientProvider>
+  );
+  expect(html).toContain("最终分析结论");
+  expect(html).not.toContain("流式预览内容");
+});
+
+it("renders the AI interpretation entry point next to the rule recommendation", () => {
+  const html = renderToString(
+    <ComparisonView request={analyzed()} busy={null} onAnalyze={async () => undefined} onApprove={async () => undefined} onNoAward={async () => undefined} />
+  );
+  expect(html).toContain("AI 解读");
+});
+
+it("renders the AI review suggestion entry point in the quote workspace", () => {
+  const html = renderToString(
+    <QuoteWorkspace
+      request={request}
+      meta={meta}
+      busy={null}
+      onUpload={async () => undefined}
+      onCorrect={async () => undefined}
+      onAnalyze={async () => undefined}
+    />
+  );
+  expect(html).toContain("AI 建议");
+});
+
+it("shows a thinking hint before the first streamed token arrives", () => {
+  const queryClient = new QueryClient();
+  const runningRequest: ProcurementRequest = {
+    ...request,
+    status: "collecting",
+    analysis_run_id: "run-thinking",
+    unresolved_field_count: 0,
+  };
+  queryClient.setQueryData(["procurement-run", "run-thinking"], { id: "run-thinking", status: "running", error: null });
+  queryClient.setQueryData(["procurement-messages", "run-thinking"], []);
+  queryClient.setQueryData(["procurement-tools", "run-thinking"], []);
+  const streamEvents: EventRow[] = [
+    { event_id: "e1", global_seq: 1, run_seq: 1, session_id: "session", run_id: "run-thinking", type: "model_turn_start", timestamp: "2026-07-27T00:00:00Z", payload: { step: 0 } },
+  ];
+  const html = renderToString(
+    <QueryClientProvider client={queryClient}>
+      <ProcurementConversation
+        request={runningRequest}
+        streamLive
+        streamEvents={streamEvents}
+        onResume={async () => undefined}
+        onRecover={async () => undefined}
+        onOpenComparison={() => undefined}
+      />
+    </QueryClientProvider>
+  );
+  expect(html).toContain("模型正在思考");
+});
+
+it("renders an editable row for review fields missing from the parsed quote", () => {
+  const missingHeight = request.quotes[0];
+  const withMissing: ProcurementRequest = {
+    ...request,
+    unresolved_field_count: 1,
+    quotes: [{
+      ...missingHeight,
+      status: "needs_review",
+      review_count: 1,
+      review_fields: ["height_mm"],
+      extracted: {
+        ...missingHeight.extracted,
+        fields: { ...missingHeight.extracted.fields },
+      },
+    }],
+  };
+  const metaWithHeight = {
+    ...meta,
+    field_meta: {
+      ...meta.field_meta,
+      height_mm: { label: "高度（mm）", kind: "decimal", required: false },
+    },
+  };
+  const html = renderToString(
+    <QuoteWorkspace
+      request={withMissing}
+      meta={metaWithHeight}
+      busy={null}
+      onUpload={async () => undefined}
+      onCorrect={async () => undefined}
+      onAnalyze={async () => undefined}
+    />
+  );
+  expect(html).toContain("报价中未找到该字段");
+  expect(html).not.toContain("没有待复核字段");
+});

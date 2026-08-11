@@ -1,4 +1,4 @@
-﻿"""Feature-roadmap regression tests (2026-08-07): near-term items F1-F4.
+"""Feature-roadmap regression tests (2026-08-07): near-term items F1-F4.
 
 F3: prompt / tool-schema / parser / ruleset versions are recorded per run and
     exposed in the run report.
@@ -425,7 +425,9 @@ async def test_procurement_prompt_pins_spec_orientation(data_dir) -> None:  # ty
         assert "第一个数字是宽度" in request.system
         assert "不要把宽度与长度写反" in request.system
         assert request.metadata["procurement_prompt_version"] == PROCUREMENT_PROMPT_VERSION
-        assert request.metadata["procurement_prompt_version"] == "procurement-prompt-v2"
+        assert request.metadata["procurement_prompt_version"] == "procurement-prompt-v3"
+        assert "最终汇报必须按三段式组织" in request.system
+        assert "采购确认单" in request.system
     finally:
         await agent.aclose()
         await harness.aclose()

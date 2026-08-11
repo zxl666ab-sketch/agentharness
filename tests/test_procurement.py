@@ -4911,3 +4911,220 @@ def test_record_no_award_rechecks_eligibility_with_today(data_dir: Path, monkeyp
         )
     finally:
         harness.close()
+
+
+def test_label_quotes_are_recognized_and_compared() -> None:
+    """Regression: thermal-adhesive labels (热敏不干胶标签 / 铜版纸) were
+    outside the canonical taxonomy, so the fail-closed identity checks
+    excluded every quote and no comparison was possible. The same RFQ was
+    previously approved with 2 eligible suppliers (RFQ-20260804-B6AC25)."""
+    request = {
+        "id": "label-request",
+        "item_name": "热敏不干胶标签",
+        "quantity": 20000,
+        "unit": "piece",
+        "specifications": {
+            "width_mm": "100",
+            "length_mm": "150",
+            "thickness_um": "80",
+            "material": "铜版纸",
+            "color": "白色",
+            "print_colors": 1,
+        },
+        "constraints": {
+            "base_currency": "CNY",
+            "fx_rates": {"CNY": "1"},
+            "max_lead_days": 10,
+            "invoice_required": True,
+            "size_tolerance_mm": "1",
+            "thickness_tolerance_um": "5",
+            "max_landed_unit_cost": "0.2",
+        },
+    }
+
+    def quote(quote_id: str, supplier: str, moq: int, price: str) -> dict:
+        values = {
+            "supplier_name": supplier,
+            "item_description": "热敏不干胶标签 100×150 mm，厚度 80 微米，白色",
+            "material": "铜版纸",
+            "color": "白色",
+            "print_colors": 1,
+            "currency": "CNY",
+            "unit_price": price,
+            "price_basis": 1,
+            "tax_rate": "0.13",
+            "tax_included": True,
+            "shipping_fee": "0",
+            "shipping_included": True,
+            "moq": moq,
+            "lead_time_days": 7,
+            "supports_invoice": True,
+            "width_mm": "100",
+            "length_mm": "150",
+            "thickness_um": "80",
+            "valid_until": "2026-12-31",
+        }
+        return {
+            "id": quote_id,
+            "supplier_name": supplier,
+            "source_sha256": quote_id * 8,
+            "extracted": {"fields": {name: {"value": value} for name, value in values.items()}},
+        }
+
+    result = compare_quotes(
+        request,
+        [
+            quote("hn", "华南标签", moq=50000, price="0.15"),
+            quote("nb", "宁波印联", moq=5000, price="0.16"),
+            quote("sz", "苏州标联", moq=5000, price="0.17"),
+        ],
+        analysis_as_of="2026-07-27",
+    )
+    by_id = {item["quote_id"]: item for item in result["quotes"]}
+    assert result["eligible_count"] == 2
+    assert result["excluded_count"] == 1
+    assert by_id["hn"]["eligible"] is False
+    assert {reason["code"] for reason in by_id["hn"]["exclusion_reasons"]} == {"moq"}
+    assert by_id["nb"]["eligible"] is True
+    assert by_id["sz"]["eligible"] is True
+    assert result["recommended_quote_id"] == "nb"
+
+
+def test_bopp_tape_material_is_recognized() -> None:
+    """Regression: BOPP tape (需求材质“BOPP 基材，水性丙烯酸胶”，报价材质
+    “BOPP”) was outside the canonical material taxonomy, so the fail-closed
+    check excluded every quote; only MOQ should eliminate the first one."""
+    request = {
+        "id": "bopp-tape-request",
+        "item_name": "BOPP 封箱胶带",
+        "quantity": 5000,
+        "unit": "piece",
+        "specifications": {
+            "width_mm": "48",
+            "length_mm": "100000",
+            "thickness_um": "50",
+            "material": "BOPP 基材，水性丙烯酸胶",
+            "color": "透明",
+            "print_colors": 0,
+        },
+        "constraints": {
+            "base_currency": "CNY",
+            "fx_rates": {"CNY": "1"},
+            "max_lead_days": 15,
+            "invoice_required": True,
+            "size_tolerance_mm": "1",
+            "thickness_tolerance_um": "3",
+            "max_landed_unit_cost": "6",
+        },
+    }
+
+    def quote(quote_id: str, supplier: str, moq: int, price: str) -> dict:
+        values = {
+            "supplier_name": supplier,
+            "item_description": "BOPP透明封箱胶带 48×100000 mm，厚度 50 微米，透明",
+            "material": "BOPP",
+            "color": "透明",
+            "print_colors": 0,
+            "currency": "CNY",
+            "unit_price": price,
+            "price_basis": 1,
+            "tax_rate": "0.13",
+            "tax_included": True,
+            "shipping_fee": "0",
+            "shipping_included": True,
+            "moq": moq,
+            "lead_time_days": 7,
+            "supports_invoice": True,
+            "width_mm": "48",
+            "length_mm": "100000",
+            "thickness_um": "50",
+            "valid_until": "2026-12-31",
+        }
+        return {
+            "id": quote_id,
+            "supplier_name": supplier,
+            "source_sha256": quote_id * 8,
+            "extracted": {"fields": {name: {"value": value} for name, value in values.items()}},
+        }
+
+    result = compare_quotes(
+        request,
+        [
+            quote("bc", "北辰耗材", moq=10000, price="2.8"),
+            quote("hd", "沪上胶带", moq=1000, price="3.6"),
+            quote("jx", "嘉兴胶粘", moq=1000, price="3.8"),
+        ],
+        analysis_as_of="2026-08-09",
+    )
+    by_id = {item["quote_id"]: item for item in result["quotes"]}
+    assert result["eligible_count"] == 2
+    assert result["excluded_count"] == 1
+    assert by_id["bc"]["eligible"] is False
+    assert {reason["code"] for reason in by_id["bc"]["exclusion_reasons"]} == {"moq"}
+    assert by_id["hd"]["eligible"] is True
+    assert by_id["jx"]["eligible"] is True
+    assert result["recommended_quote_id"] == "hd"
+
+@pytest.mark.asyncio
+async def test_fake_provider_prints_purchase_confirmation_slip() -> None:
+    """After approval the fake provider must output the deterministic
+    purchase-confirmation slip (amounts from the injected facts, not invented)."""
+    from agentharness.contracts import Message, MessageRole, ModelRequest, StreamItemType
+    from agentharness.procurement.agent import ProcurementFakeProvider
+
+    provider = ProcurementFakeProvider()
+    messages = [
+        Message(
+            role=MessageRole.user,
+            content=
+                "[procurement_supplier_selection]\n"
+                + json.dumps(
+                    {
+                        "snapshot_id": "a" * 32,
+                        "input_sha256": "b" * 64,
+                        "quote_id": "c" * 32,
+                        "actor": "采购员",
+                        "note": None,
+                        "purchase_confirmation": {
+                            "request_reference": "RFQ-TEST",
+                            "item_name": "PE白色快递袋",
+                            "quantity": 10000,
+                            "unit": "piece",
+                            "supplier_name": "Alpha Packaging",
+                            "base_currency": "CNY",
+                            "landed_unit_base": "0.6024",
+                            "landed_total_base": "6024.00",
+                            "moq": 3000,
+                            "lead_time_days": 9,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+        ),
+        Message(
+            role=MessageRole.tool,
+            content=json.dumps(
+                {"ok": True, "stage": "supplier_approved", "supplier_name": "Alpha Packaging"}
+            ),
+        ),
+    ]
+    items = [
+        item async for item in provider.stream(
+            ModelRequest(
+                model="procurement-fake-v1",
+                system="purchase_request_id=" + "a" * 32,
+                messages=messages,
+            )
+        )
+    ]
+    texts = "".join(
+        str(item.text or "") for item in items if item.type == StreamItemType.text_delta
+    )
+    assert "采购确认单" in texts
+    assert "Alpha Packaging" in texts
+    assert "0.6024" in texts
+    assert "6024.00" in texts
+    assert "起订量：3000" in texts
+    assert "下一步" in texts
+    assert "【采购决策已验证】" in texts
+

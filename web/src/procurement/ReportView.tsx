@@ -35,6 +35,8 @@ const EVENT_LABELS: Record<string, string> = {
   supplier_selection_requested: "Agent 已请求人工选择供应商",
   supplier_approved: "供应商已人工批准",
   procurement_no_award: "采购员确认无合格报价",
+  ai_interpretation: "AI 解读已生成",
+  ai_review_suggestions: "AI 复核建议已生成",
 };
 
 const FIELD_LABELS: Record<string, string> = {
