@@ -323,6 +323,55 @@ class ComparisonEngineTest {
         return values;
     }
 
+    @Test
+    void acceptsCartonWhenHeightOnlyInDynamicSpecs() {
+        var specs = new LinkedHashMap<String, Object>();
+        specs.put("width_mm", "400");
+        specs.put("length_mm", "300");
+        specs.put("height_mm", "250");
+        specs.put("thickness_um", "5000");
+        specs.put("material", "瓦楞纸");
+        specs.put("color", "牛皮色");
+        specs.put("print_colors", 1);
+        var task = ProcurementTask.structured(
+                1, "苏州工厂出口瓦楞纸箱采购", "ecommerce_packaging", "五层瓦楞纸箱",
+                new BigDecimal("5000"), "piece", specs,
+                Map.of(
+                        "base_currency", "CNY", "fx_rates", Map.of("CNY", "1"),
+                        "max_lead_days", 20, "invoice_required", true,
+                        "size_tolerance_mm", "5", "thickness_tolerance_um", "500"));
+        var values = new LinkedHashMap<String, Object>();
+        values.put("supplier_name", "浙江箱业");
+        values.put("item_description", "五层瓦楞纸箱 400x300x250 mm");
+        values.put("currency", "CNY");
+        values.put("unit_price", "3.2");
+        values.put("price_basis", "1");
+        values.put("tax_rate", "0.13");
+        values.put("tax_included", true);
+        values.put("shipping_fee", "0");
+        values.put("shipping_included", true);
+        values.put("moq", "3000");
+        values.put("lead_time_days", "18");
+        values.put("supports_invoice", true);
+        values.put("width_mm", "400");
+        values.put("length_mm", "300");
+        values.put("thickness_um", "5000");
+        values.put("material", "瓦楞纸");
+        values.put("color", "牛皮色");
+        values.put("print_colors", 1);
+        // 高度只存在于动态规格（label=高度（mm）），无顶层 height_mm
+        var specsMap = new LinkedHashMap<String, Object>();
+        specsMap.put("高度mm", Map.of("label", "高度（mm）", "value", "250", "unit", "mm"));
+        var quote = createQuote("浙江箱业", values, specsMap);
+        var other = cartonV1Quote("沪宁纸品", "3.45");
+
+        var result = engine.compare(task, List.of(quote, other));
+        @SuppressWarnings("unchecked")
+        var rows = (List<Map<String, Object>>) result.result().get("quotes");
+
+        assertThat(rows).allSatisfy(item -> assertThat(item.get("eligible")).isEqualTo(true));
+    }
+
     private ProcurementTask packagingTask() {
         return ProcurementTask.structured(
                 1,
