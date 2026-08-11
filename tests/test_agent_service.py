@@ -226,3 +226,34 @@ def test_llm_requirement_fake_provider_does_not_call_model():
     req = svc._llm_requirement("采购快递袋 3000 个", dict(CONFIG))
     assert req["quantity"] == 3000
 
+
+def test_execute_exception_publishes_failed_result(monkeypatch, fake_db):
+    service = make_service(monkeypatch, fake_db)
+    published = []
+    service._publish_result = lambda *a, **k: published.append(a)
+    service._execute = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    service.handle_command(envelope(operation_type="import_quote"))
+    assert len(published) == 1
+    assert published[0][2] == "failed"
+    assert "boom" in published[0][4]
+
+
+def test_accepted_without_result_is_reexecuted(monkeypatch, fake_db):
+    service = make_service(monkeypatch, fake_db)
+    published = []
+    service._publish_result = lambda *a, **k: published.append(a)
+    existing = {
+        "operation_id": envelope()["operation_id"],
+        "payload_sha256": svc._sha256({"task_id": "t" * 32}),
+        "status": "accepted",
+        "result": None,
+        "error": None,
+        "result_published_at": None,
+    }
+    service._load_operation = lambda operation_id: existing
+    executed = []
+    service._execute = lambda *a, **k: executed.append(a) or ({"run_id": "r" * 32}, "completed", None)
+    service.handle_command(envelope())
+    assert len(executed) == 1
+    assert published[0][2] == "completed"
+

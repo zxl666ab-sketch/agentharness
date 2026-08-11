@@ -5,12 +5,16 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import java.time.Instant;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.transaction.annotation.Transactional;
 
 @Component
 @ConditionalOnProperty(prefix = "app.outbox", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class AgentOutboxWorker {
+    private static final Logger log = LoggerFactory.getLogger(AgentOutboxWorker.class);
     private final AgentCommandRepository commands;
     private final ProcurementTaskRepository tasks;
     private final AgentDispatcher client;
@@ -63,6 +67,13 @@ public class AgentOutboxWorker {
                 command.retry("数据库锁冲突，命令将自动重试");
             } catch (com.caijiatai.procurement.api.ApiException error) {
                 terminalFailure(command, error.code() + ": " + error.getMessage());
+            }
+        }
+        for (var command : commands.lockPublishedStale(Instant.now().minusSeconds(120), PageRequest.of(0, 10))) {
+            try {
+                client.dispatch(command); // 结果丢失自愈：重新发布，等待结果幂等回传
+            } catch (RuntimeException error) {
+                log.warn("重发 published 命令失败：{}", command.getOperationId(), error);
             }
         }
     }
