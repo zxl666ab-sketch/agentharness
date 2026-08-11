@@ -19,6 +19,13 @@ public interface AgentCommandRepository extends JpaRepository<AgentCommand, Stri
             + "and command.nextAttemptAt <= current_timestamp order by command.acceptedAt")
     List<AgentCommand> lockDispatchable(Pageable pageable);
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @QueryHints(@QueryHint(name = "jakarta.persistence.lock.timeout", value = "-2"))
+    @Query("select command from AgentCommand command where command.status = 'published' "
+            + "and command.publishedAt < :cutoff order by command.acceptedAt")
+    List<AgentCommand> lockPublishedStale(@org.springframework.data.repository.query.Param("cutoff") java.time.Instant cutoff,
+            Pageable pageable);
+
     @Modifying
     @Query("update AgentCommand command "
             + "set command.nextAttemptAt = current_timestamp, command.acceptedAt = current_timestamp "

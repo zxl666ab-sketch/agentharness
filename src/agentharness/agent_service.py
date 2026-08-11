@@ -617,13 +617,21 @@ class AgentService:
                 return
             if existing["result_published_at"] is not None:
                 return  # 已发布，幂等跳过
-            result = json.loads(existing["result"]) if existing["result"] else None
-            status = existing["status"]
-            error = existing["error"]
-            self._publish_result(operation_id, envelope, status, result, error)
-            self._persist_result(existing, status, result, error, published=True)
-            return
-        result, status, error = self._execute(operation_id, operation_type, envelope, payload, actual_sha)
+            if existing["status"] == "accepted" and not existing["result"]:
+                # 上次处理中断：以幂等方式重跑
+                pass
+            else:
+                result = json.loads(existing["result"]) if existing["result"] else None
+                status = existing["status"]
+                error = existing["error"]
+                self._publish_result(operation_id, envelope, status, result, error)
+                self._persist_result(existing, status, result, error, published=True)
+                return
+        try:
+            result, status, error = self._execute(operation_id, operation_type, envelope, payload, actual_sha)
+        except Exception as exc:  # noqa: BLE001 - processing failures must surface, never leave a stuck command
+            logger.exception("命令处理失败：%s", operation_id)
+            result, status, error = None, "failed", f"{type(exc).__name__}: {exc}"
         self._publish_result(operation_id, envelope, status, result, error)
         self._persist_result(
             {
@@ -644,7 +652,8 @@ class AgentService:
                     "INSERT INTO internal_operations "
                     "(operation_id, operation_type, aggregate_id, generation, expected_task_version, "
                     "payload_sha256, status, result, error, result_published_at, created_at, updated_at) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, 'accepted', NULL, NULL, NULL, %s, %s)",
+                    "VALUES (%s, %s, %s, %s, %s, %s, 'accepted', NULL, NULL, NULL, %s, %s) "
+                    "ON DUPLICATE KEY UPDATE updated_at = VALUES(updated_at)",
                     (
                         operation_id,
                         operation_type,
