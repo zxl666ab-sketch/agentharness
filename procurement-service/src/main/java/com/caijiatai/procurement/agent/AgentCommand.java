@@ -28,7 +28,7 @@ public class AgentCommand {
     @Column(name = "payload_sha256", nullable = false, length = 64)
     private String payloadSha256;
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(nullable = false, columnDefinition = "jsonb")
+    @Column(nullable = false, columnDefinition = "json")
     private Map<String, Object> payload = new LinkedHashMap<>();
     @Column(nullable = false, length = 30)
     private String status;
@@ -43,7 +43,7 @@ public class AgentCommand {
     @Column(name = "last_error", length = 1000)
     private String lastError;
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(columnDefinition = "jsonb")
+    @Column(columnDefinition = "json")
     private Map<String, Object> result;
 
     protected AgentCommand() {}

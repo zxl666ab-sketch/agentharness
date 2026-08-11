@@ -51,7 +51,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.testcontainers.mysql.MySQLContainer;
 
 @Testcontainers
 @SpringBootTest(properties = {
@@ -59,21 +59,21 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
         "app.artifact-root=target/test-artifacts",
         "app.outbox.enabled=false"
 })
-class PostgreSqlIntegrationTest {
+class MySqlIntegrationTest {
     private static final String SESSION_ID = "a".repeat(32);
     private static final String RUN_ID = "b".repeat(32);
 
     @Container
-    static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine")
+    static final MySQLContainer MYSQL = new MySQLContainer("mysql:8.0")
             .withDatabaseName("caijiatai_test")
             .withUsername("test")
             .withPassword("test");
 
     @DynamicPropertySource
     static void database(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
-        registry.add("spring.datasource.username", POSTGRES::getUsername);
-        registry.add("spring.datasource.password", POSTGRES::getPassword);
+        registry.add("spring.datasource.url", MYSQL::getJdbcUrl);
+        registry.add("spring.datasource.username", MYSQL::getUsername);
+        registry.add("spring.datasource.password", MYSQL::getPassword);
     }
 
     @Autowired JdbcTemplate jdbc;
@@ -99,27 +99,32 @@ class PostgreSqlIntegrationTest {
     void cleanDatabase() {
         transactions = new TransactionTemplate(transactionManager);
         var tables = jdbc.queryForList(
-                "select tablename from pg_tables where schemaname = 'public' and tablename <> 'flyway_schema_history'",
+                "select table_name from information_schema.tables "
+                        + "where table_schema = database() and table_name <> 'flyway_schema_history'",
                 String.class);
         if (!tables.isEmpty()) {
-            jdbc.execute("truncate table " + String.join(", ", tables) + " cascade");
+            jdbc.execute("set foreign_key_checks = 0");
+            for (var table : tables) {
+                jdbc.execute("truncate table " + table);
+            }
+            jdbc.execute("set foreign_key_checks = 1");
         }
     }
 
     @Test
-    void flywayCreatesPostgresTypesAndJpaPersistsOptimisticTask() {
+    void flywayCreatesMysqlTypesAndJpaPersistsOptimisticTask() {
         var columns = jdbc.queryForList(
                 """
                 select column_name, data_type from information_schema.columns
-                where table_schema = 'public' and table_name = 'procurement_task'
+                where table_schema = database() and table_name = 'procurement_task'
                 """);
         assertThat(columns).anySatisfy(row -> {
             assertThat(row.get("column_name")).isEqualTo("specifications");
-            assertThat(row.get("data_type")).isEqualTo("jsonb");
+            assertThat(row.get("data_type")).isEqualTo("json");
         });
         assertThat(columns).anySatisfy(row -> {
             assertThat(row.get("column_name")).isEqualTo("quantity");
-            assertThat(row.get("data_type")).isEqualTo("numeric");
+            assertThat(row.get("data_type")).isEqualTo("decimal");
         });
 
         var saved = tasks.saveAndFlush(newTask());
@@ -224,7 +229,7 @@ class PostgreSqlIntegrationTest {
                 new AgentOutboxWorker(commands, tasks, client, resultApplication).dispatch());
         assertThat(commands.findById(operationId).orElseThrow().getStatus()).isEqualTo("accepted");
         jdbc.update(
-                "update agent_command set next_attempt_at = now() - interval '1 second' where operation_id = ?",
+                "update agent_command set next_attempt_at = date_sub(now(), interval 1 second) where operation_id = ?",
                 operationId);
 
         transactions.executeWithoutResult(ignored ->

@@ -30,7 +30,7 @@ public class ProcurementQuote {
     @Column(name = "source_sha256", nullable = false, length = 64)
     private String sourceSha256;
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(nullable = false, columnDefinition = "jsonb")
+    @Column(nullable = false, columnDefinition = "json")
     private Map<String, Object> extracted = new LinkedHashMap<>();
     @Column(nullable = false, length = 40)
     private String status;

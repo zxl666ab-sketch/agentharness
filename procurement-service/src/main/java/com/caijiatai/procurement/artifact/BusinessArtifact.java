@@ -33,7 +33,7 @@ public class BusinessArtifact {
     @Column(name = "size_bytes", nullable = false)
     private long sizeBytes;
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(nullable = false, columnDefinition = "jsonb")
+    @Column(nullable = false, columnDefinition = "json")
     private Map<String, Object> metadata = new LinkedHashMap<>();
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;

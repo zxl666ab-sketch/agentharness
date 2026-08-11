@@ -24,7 +24,7 @@ public class IdempotencyRecord {
     @Column(name = "http_status")
     private Integer httpStatus;
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(columnDefinition = "jsonb")
+    @Column(columnDefinition = "json")
     private Map<String, Object> response;
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;

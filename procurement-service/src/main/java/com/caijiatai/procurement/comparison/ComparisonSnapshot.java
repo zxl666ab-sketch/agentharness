@@ -27,7 +27,7 @@ public class ComparisonSnapshot {
     @Column(name = "input_sha256", nullable = false, length = 64)
     private String inputSha256;
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(nullable = false, columnDefinition = "jsonb")
+    @Column(nullable = false, columnDefinition = "json")
     private Map<String, Object> result = new LinkedHashMap<>();
     @Column(name = "artifact_id", nullable = false, length = 34)
     private String artifactId;
