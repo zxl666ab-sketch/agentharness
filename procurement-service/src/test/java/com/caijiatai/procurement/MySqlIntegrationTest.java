@@ -318,6 +318,48 @@ class MySqlIntegrationTest {
         }
     }
 
+    @Test
+    void rejectsRequirementOutsideDomainBounds() {
+        var overThicknessTolerance = new ProcurementDtos.Requirement(
+                1, "测试采购", "ecommerce_packaging", "快递袋",
+                new BigDecimal("10000"), "piece",
+                Map.of("width_mm", "250", "length_mm", "350", "thickness_um", "60",
+                        "material", "PE", "color", "白色", "print_colors", 1),
+                new ProcurementDtos.Constraints(
+                        "CNY", Map.of("CNY", BigDecimal.ONE), 15, true,
+                        new BigDecimal("2"), new BigDecimal("6000"),
+                        new BigDecimal("0.70"), "华东仓", null));
+        assertThatThrownBy(() -> taskService.createStructured(overThicknessTolerance, "cap-thickness"))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.code()).isEqualTo("invalid_constraints"));
+
+        var overSizeTolerance = new ProcurementDtos.Requirement(
+                1, "测试采购", "ecommerce_packaging", "快递袋",
+                new BigDecimal("10000"), "piece",
+                Map.of("width_mm", "250", "length_mm", "350", "thickness_um", "60",
+                        "material", "PE", "color", "白色", "print_colors", 1),
+                new ProcurementDtos.Constraints(
+                        "CNY", Map.of("CNY", BigDecimal.ONE), 15, true,
+                        new BigDecimal("101"), new BigDecimal("3"),
+                        new BigDecimal("0.70"), "华东仓", null));
+        assertThatThrownBy(() -> taskService.createStructured(overSizeTolerance, "cap-size"))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.code()).isEqualTo("invalid_constraints"));
+
+        var cartonWithoutHeight = new ProcurementDtos.Requirement(
+                1, "苏州工厂出口瓦楞纸箱采购", "ecommerce_packaging", "五层瓦楞纸箱",
+                new BigDecimal("5000"), "piece",
+                Map.of("width_mm", "400", "length_mm", "300", "thickness_um", "5000",
+                        "material", "瓦楞纸", "color", "牛皮色", "print_colors", 1),
+                new ProcurementDtos.Constraints(
+                        "CNY", Map.of("CNY", BigDecimal.ONE), 20, true,
+                        new BigDecimal("5"), new BigDecimal("500"),
+                        new BigDecimal("3.5"), "华东仓", null));
+        assertThatThrownBy(() -> taskService.createStructured(cartonWithoutHeight, "carton-height"))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.code()).isEqualTo("invalid_specifications"));
+    }
+
     private PendingFixture pendingApproval() {
         var taskId = preparedAnalyzableTask();
         transactions.executeWithoutResult(ignored -> {

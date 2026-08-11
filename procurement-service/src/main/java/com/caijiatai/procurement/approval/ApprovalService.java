@@ -152,6 +152,7 @@ public class ApprovalService {
                 task.getGeneration(),
                 expectedVersion,
                 payload));
+        commands.alignTimestampsToDbClock(command.getOperationId());
         idempotency.save(IdempotencyRecord.reserve("decision", key, payloadSha, operationId));
         audit.save(AuditEvent.create(
                 taskId, body.quoteId(), task.getAnalysisRunId(), "supplier_approval_requested", operator,

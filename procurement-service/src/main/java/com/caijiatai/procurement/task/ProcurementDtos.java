@@ -27,7 +27,7 @@ public final class ProcurementDtos {
     public record Constraints(
             @NotBlank @Pattern(regexp = "[A-Za-z]{3}") String baseCurrency,
             @NotNull @Size(min = 1, max = 20) Map<String, BigDecimal> fxRates,
-            @Min(1) @Max(3650) int maxLeadDays,
+            @Min(1) @Max(365) int maxLeadDays,
             boolean invoiceRequired,
             BigDecimal sizeToleranceMm,
             BigDecimal thicknessToleranceUm,
