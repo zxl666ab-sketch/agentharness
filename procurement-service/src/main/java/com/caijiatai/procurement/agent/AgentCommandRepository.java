@@ -8,10 +8,13 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.jpa.repository.QueryHints;
+import jakarta.persistence.QueryHint;
 import org.springframework.data.repository.query.Param;
 
 public interface AgentCommandRepository extends JpaRepository<AgentCommand, String> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @QueryHints(@QueryHint(name = "jakarta.persistence.lock.timeout", value = "-2"))
     @Query("select command from AgentCommand command where command.status in ('pending', 'accepted') "
             + "and command.nextAttemptAt <= current_timestamp order by command.acceptedAt")
     List<AgentCommand> lockDispatchable(Pageable pageable);

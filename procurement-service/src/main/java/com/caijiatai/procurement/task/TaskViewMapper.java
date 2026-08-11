@@ -48,7 +48,7 @@ public final class TaskViewMapper {
         value.put("source_kind", quote.getSourceKind());
         value.put("source_artifact_id", quote.getSourceArtifactId());
         value.put("source_sha256", quote.getSourceSha256());
-        value.put("extracted", quote.getExtracted());
+        value.put("extracted", extractedView(quote.getExtracted()));
         value.put("status", quote.getStatus());
         value.put("review_count", quote.getReviewCount());
         value.put("review_fields", quote.reviewFields());
@@ -57,6 +57,31 @@ public final class TaskViewMapper {
         value.put("created_at", quote.getCreatedAt());
         value.put("updated_at", quote.getUpdatedAt());
         return value;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> extractedView(Map<String, Object> extracted) {
+        var view = new LinkedHashMap<String, Object>(extracted);
+        var fields = new LinkedHashMap<String, Object>();
+        var rawFields = extracted.get("fields");
+        if (rawFields instanceof Map<?, ?> raw) {
+            ((Map<String, Object>) raw).forEach((name, rawValue) -> {
+                var entry = new LinkedHashMap<String, Object>();
+                if (rawValue instanceof Map<?, ?> rawEntry) {
+                    entry.putAll((Map<String, Object>) rawEntry);
+                } else {
+                    entry.put("value", rawValue);
+                }
+                entry.putIfAbsent("confidence", 1);
+                entry.putIfAbsent("status", "accepted");
+                entry.putIfAbsent("source", Map.of(
+                        "document_kind", "", "locator", "", "excerpt", "", "method", ""));
+                fields.put(name, entry);
+            });
+        }
+        view.put("fields", fields);
+        view.putIfAbsent("review_fields", List.of());
+        return view;
     }
 
     public Map<String, Object> snapshot(ComparisonSnapshot snapshot) {

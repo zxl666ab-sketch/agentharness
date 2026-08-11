@@ -25,6 +25,7 @@ import java.util.Objects;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
@@ -163,7 +164,7 @@ public class ApprovalService {
         return new RequestResult(command, pending, null);
     }
 
-    @Transactional
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public ProcurementDecision finalizeFromAgent(AgentCommand command, Map<String, Object> result) {
         var pending = pendingDecisions.findByOperationId(command.getOperationId())
                 .orElseThrow(() -> invalidApproval("待决审批不存在"));

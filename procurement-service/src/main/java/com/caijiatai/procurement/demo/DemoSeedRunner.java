@@ -40,7 +40,7 @@ import tools.jackson.databind.ObjectMapper;
  */
 @Component
 @ConditionalOnProperty(prefix = "app.demo-seed", name = "enabled", havingValue = "true")
-public final class DemoSeedRunner implements ApplicationRunner {
+public class DemoSeedRunner implements ApplicationRunner {
     private static final Logger log = LoggerFactory.getLogger(DemoSeedRunner.class);
 
     private final AppProperties properties;
@@ -90,6 +90,11 @@ public final class DemoSeedRunner implements ApplicationRunner {
             throw new IllegalStateException("演示场景目录为空：" + root);
         }
         for (var scenarioDir : scenarios) {
+            if (!Files.isRegularFile(scenarioDir.resolve("request.json"))
+                    || !Files.isRegularFile(scenarioDir.resolve("quotes.json"))) {
+                log.warn("跳过非演示场景目录（缺少 request.json 或 quotes.json）：{}", scenarioDir.getFileName());
+                continue;
+            }
             seedScenario(scenarioDir);
         }
         log.info("演示数据预置完成：{} 套场景（{}）", scenarios.size(), root);

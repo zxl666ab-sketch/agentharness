@@ -31,3 +31,7 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Local runtime data ###
+data/
+demo-run*.log

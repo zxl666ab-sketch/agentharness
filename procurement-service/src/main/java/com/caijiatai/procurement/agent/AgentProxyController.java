@@ -1,8 +1,12 @@
 package com.caijiatai.procurement.agent;
 
+import com.caijiatai.procurement.config.AppProperties;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -13,20 +17,55 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 public final class AgentProxyController {
     private final RuntimeProxyService proxy;
+    private final AppProperties properties;
+    private final tools.jackson.databind.ObjectMapper mapper;
 
-    public AgentProxyController(RuntimeProxyService proxy) {
+    public AgentProxyController(RuntimeProxyService proxy, AppProperties properties,
+            tools.jackson.databind.ObjectMapper mapper) {
         this.proxy = proxy;
+        this.properties = properties;
+        this.mapper = mapper;
     }
 
     @GetMapping("/api/runtime")
     ResponseEntity<byte[]> runtime() { return proxy.get("/api/runtime"); }
 
     @GetMapping("/api/procurement/config")
-    ResponseEntity<byte[]> procurementConfig() { return proxy.get("/internal/v1/config"); }
+    ResponseEntity<byte[]> procurementConfig() {
+        if ("demo".equals(properties.agentMode())) {
+            return json(defaultDemoConfig());
+        }
+        return proxy.get("/internal/v1/config");
+    }
 
     @PostMapping("/api/procurement/config")
     ResponseEntity<byte[]> updateProcurementConfig(@RequestBody byte[] body) {
+        if ("demo".equals(properties.agentMode())) {
+            return json(defaultDemoConfig());
+        }
         return proxy.post("/internal/v1/config", body);
+    }
+
+    private Map<String, Object> defaultDemoConfig() {
+        var config = new LinkedHashMap<String, Object>();
+        config.put("provider", "procurement_fake");
+        config.put("model", "procurement-fake-v1");
+        config.put("base_url", null);
+        config.put("api_mode", "auto");
+        config.put("reasoning_effort", "none");
+        config.put("api_key_configured", false);
+        config.put("api_key_preview", null);
+        config.put("input_price_per_million_usd", null);
+        config.put("output_price_per_million_usd", null);
+        config.put("cached_input_price_per_million_usd", null);
+        config.put("max_cost_usd", null);
+        return config;
+    }
+
+    private ResponseEntity<byte[]> json(Object value) {
+        return ResponseEntity.ok()
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .body(mapper.writeValueAsBytes(value));
     }
 
     @GetMapping("/api/procurement/evaluation")

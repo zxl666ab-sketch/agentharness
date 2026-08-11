@@ -238,7 +238,7 @@ RPC 请求/响应：请求含 `correlation_id`、`kind`、`payload`、`reply_to`
 
 | 环境变量 | 默认/示例 |
 |---|---|
-| `DATABASE_URL` | `jdbc:mysql://127.0.0.1:3306/caijiatai_business?useSSL=false&serverTimezone=UTC&characterEncoding=utf8mb4` |
+| `DATABASE_URL` | `jdbc:mysql://127.0.0.1:3306/caijiatai_business?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=UTF-8` |
 | `DATABASE_USER` / `DATABASE_PASSWORD` | `caijiatai` / 本地或 Compose 注入 |
 | `AGENTHARNESS_DATABASE_URL` | `mysql+pymysql://caijiatai:...@127.0.0.1:3306/caijiatai_runtime` |
 | `KAFKA_BOOTSTRAP_SERVERS` | `127.0.0.1:9092` |

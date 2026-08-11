@@ -48,7 +48,7 @@ public final class SyntheticAgentClient extends AgentClient {
         binding.put("pending_decision_id", text(payload.get("pending_decision_id")));
         binding.put("run_id", text(payload.get("run_id")));
         binding.put("tool_name", "procurement_approve_supplier");
-        binding.put("task_version", String.valueOf(payload.getOrDefault("task_version", "")));
+        binding.put("task_version", payload.get("task_version"));
         binding.put("snapshot_id", text(payload.get("snapshot_id")));
         binding.put("input_sha256", text(payload.get("input_sha256")));
         binding.put("business_decision", text(payload.get("business_decision")));
