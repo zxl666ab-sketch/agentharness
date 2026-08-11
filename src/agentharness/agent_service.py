@@ -10,14 +10,17 @@ This is the 2a minimal slice: analyze commands are processed deterministically
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
+from concurrent.futures import Future
 from datetime import datetime, timezone
 from typing import Any
 
@@ -34,8 +37,13 @@ logger = logging.getLogger("agentharness.agent_service")
 COMMANDS_TOPIC = "caijiatai.commands"
 RESULTS_TOPIC = "caijiatai.results"
 EVENTS_TOPIC = "caijiatai.events"
+RPC_REQUESTS_TOPIC = "caijiatai.rpc.requests"
+RPC_RESPONSES_TOPIC = "caijiatai.rpc.responses"
 
-SUPPORTED_OPERATIONS = frozenset({"analyze", "create_structured", "approve_decision", "reopen_task", "resume_run"})
+SUPPORTED_OPERATIONS = frozenset({
+    "analyze", "create_structured", "approve_decision", "reopen_task", "resume_run",
+    "import_quote", "start_conversation",
+})
 
 RUNTIME_SCHEMA_SQL = [
     """
@@ -65,6 +73,12 @@ RUNTIME_SCHEMA_SQL = [
         occurred_at datetime(6) NOT NULL,
         PRIMARY KEY (id),
         UNIQUE KEY uq_runtime_event_global_seq (global_seq)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS agent_sequence (
+        id int NOT NULL PRIMARY KEY,
+        global_seq bigint NOT NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
     """,
 ]
@@ -99,6 +113,65 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _fake_requirement(message: str) -> dict[str, Any]:
+    """Deterministic NL-to-structure extraction for the offline demo provider."""
+    quantity = 10000
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*(万|千)?", message)
+    if match:
+        number = float(match.group(1).replace(",", ""))
+        factor = {"万": 10000, "千": 1000}.get(match.group(2) or "", 1)
+        quantity = int(number * factor)
+    width = _first_number(message, "宽", "width")
+    length = _first_number(message, "长", "length")
+    thickness = _first_number(message, "厚", "thickness")
+    material = "瓦楞纸" if "瓦楞" in message else "PE" if re.search(r"(?<![A-Za-z0-9])PE(?![A-Za-z0-9])", message, re.IGNORECASE) else "未说明"
+    color = "牛皮色" if "牛皮" in message else "白色" if "白色" in message else "未说明"
+    max_lead = 15
+    match = re.search(r"(\d+)\s*天.*?(?:交期|交货)", message) or re.search(r"交期(?:不超过|≤|<=|不高于)?\s*(\d+)\s*天", message)
+    if match:
+        max_lead = int(match.group(1))
+    specifications = {
+        "width_mm": str(width or 250),
+        "length_mm": str(length or 350),
+        "thickness_um": str(thickness or 60),
+        "material": material,
+        "color": color,
+        "print_colors": 1 if "单色" in message else 0,
+    }
+    if "纸箱" in message or "箱" in message:
+        specifications["height_mm"] = str(_first_number(message, "高", "height") or 250)
+    constraints = {
+        "base_currency": "CNY",
+        "fx_rates": {"CNY": "1"},
+        "max_lead_days": max(1, max_lead),
+        "invoice_required": True,
+        "size_tolerance_mm": "2",
+        "thickness_tolerance_um": "3",
+    }
+    match = re.search(r"预算(?:不超过|≤|<=|不高于)?\s*([0-9.]+)", message)
+    if match:
+        constraints["max_landed_unit_cost"] = match.group(1)
+    return {
+        "schema_version": 1,
+        "title": "采购询价",
+        "category": "ecommerce_packaging",
+        "item_name": "五层瓦楞纸箱" if "纸箱" in message else "快递袋" if "快递袋" in message else "包装耗材",
+        "quantity": quantity,
+        "unit": "piece",
+        "specifications": specifications,
+        "constraints": constraints,
+    }
+
+
+def _first_number(message: str, *keywords: str) -> float | int | None:
+    for keyword in keywords:
+        match = re.search(keyword + r"(?:\s*[为:：]?)\s*(\d+(?:\.\d+)?)", message)
+        if match:
+            value = float(match.group(1))
+            return int(value) if value.is_integer() else value
+    return None
+
+
 def _parse_database_url(url: str) -> dict[str, Any]:
     # mysql+pymysql://user:pass@host:port/db
     rest = url.split("://", 1)[1]
@@ -118,6 +191,106 @@ def _parse_database_url(url: str) -> dict[str, Any]:
     }
 
 
+class RpcClient:
+    """Synchronous request/reply RPC over Kafka (10s timeout, one retry)."""
+
+    def __init__(self, config: dict[str, str], hmac_key: str) -> None:
+        self.config = config
+        self.hmac_key = hmac_key
+        self._futures: dict[str, Future] = {}
+        self._lock = threading.Lock()
+        self.producer = None
+        self.consumer = None
+        self._closed = False
+
+    def _bootstrap(self) -> str:
+        return self.config.get("AGENT_KAFKA_BOOTSTRAP_SERVERS") or "127.0.0.1:9092"
+
+    def _sasl(self) -> dict[str, Any]:
+        if not self.config.get("AGENT_KAFKA_SASL_USERNAME"):
+            return {}
+        return {
+            "security_protocol": "SASL_PLAINTEXT",
+            "sasl_mechanism": "SCRAM-SHA-256",
+            "sasl_plain_username": self.config["AGENT_KAFKA_SASL_USERNAME"],
+            "sasl_plain_password": self.config["AGENT_KAFKA_SASL_PASSWORD"],
+        }
+
+    def start(self) -> None:
+        if KafkaConsumer is None or KafkaProducer is None:
+            raise RuntimeError("kafka-python 未安装")
+        self.producer = KafkaProducer(
+            bootstrap_servers=self._bootstrap(),
+            key_serializer=lambda value: value.encode("utf-8") if isinstance(value, str) else value,
+            value_serializer=lambda value: value if isinstance(value, bytes) else _canonical_json(value),
+            acks="all",
+            enable_idempotence=True,
+            **self._sasl(),
+        )
+        self.consumer = KafkaConsumer(
+            RPC_RESPONSES_TOPIC,
+            group_id="python-agent-rpc",
+            bootstrap_servers=self._bootstrap(),
+            auto_offset_reset="latest",
+            enable_auto_commit=True,
+            key_deserializer=lambda value: value.decode("utf-8") if value else "",
+            value_deserializer=lambda value: json.loads(value.decode("utf-8")),
+            **self._sasl(),
+        )
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self) -> None:
+        assert self.consumer is not None
+        for record in self.consumer:
+            if self._closed:
+                break
+            value = record.value
+            correlation_id = str(value.get("correlation_id") or "")
+            with self._lock:
+                future = self._futures.pop(correlation_id, None)
+            if future is not None and not future.done():
+                future.set_result(value)
+
+    def call(self, kind: str, payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
+        for attempt in range(2):
+            correlation_id = uuid.uuid4().hex
+            request_sha = _sha256(payload)
+            future: Future = Future()
+            with self._lock:
+                self._futures[correlation_id] = future
+            request = {
+                "correlation_id": correlation_id,
+                "kind": kind,
+                "payload": payload,
+                "reply_to": RPC_RESPONSES_TOPIC,
+                "request_sha256": request_sha,
+                "signature": _hmac_sign(self.hmac_key, "rpc", correlation_id, request_sha),
+            }
+            assert self.producer is not None
+            self.producer.send(RPC_REQUESTS_TOPIC, key=correlation_id, value=request)
+            self.producer.flush()
+            try:
+                response = future.result(timeout=timeout)
+                if response.get("status") != "ok":
+                    raise RuntimeError(str(response.get("error") or "rpc_error"))
+                return response.get("result") or {}
+            except Exception:
+                with self._lock:
+                    self._futures.pop(correlation_id, None)
+                if attempt == 0:
+                    logger.warning("RPC %s 超时/失败，重试一次", kind)
+                    continue
+                raise
+
+    def close(self) -> None:
+        self._closed = True
+        if self.consumer is not None:
+            self.consumer.close()
+        if self.producer is not None:
+            self.producer.close()
+        self.rpc.close()
+
+
 class AgentService:
     def __init__(self, config: dict[str, str] | None = None) -> None:
         self.config = config or {
@@ -134,11 +307,19 @@ class AgentService:
             raise ValueError("AGENT_INTERNAL_HMAC_KEY 必须配置")
         self._db_kwargs = _parse_database_url(self.config["AGENTHARNESS_DATABASE_URL"])
         self._ensure_schema()
-        self._global_seq = self._max_global_seq()
         self._seq_lock = threading.Lock()
+        self._global_seq = max(self._max_global_seq(), self._topic_max_global_seq())
+        conn = self._connect()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("UPDATE agent_sequence SET global_seq = %s WHERE id = 1", (self._global_seq,))
+            conn.commit()
+        finally:
+            conn.close()
         self.producer = None
         self.consumer = None
         self._closed = False
+        self.rpc = RpcClient(self.config, self.hmac_key)
 
     # ---- MySQL runtime ----
     def _connect(self) -> pymysql.connections.Connection:
@@ -150,6 +331,8 @@ class AgentService:
             with conn.cursor() as cursor:
                 for statement in RUNTIME_SCHEMA_SQL:
                     cursor.execute(statement)
+                cursor.execute(
+                    "INSERT IGNORE INTO agent_sequence (id, global_seq) VALUES (1, 0)")
             conn.commit()
         finally:
             conn.close()
@@ -158,15 +341,67 @@ class AgentService:
         conn = self._connect()
         try:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT COALESCE(MAX(global_seq), 0) FROM runtime_event")
+                cursor.execute(
+                    "SELECT COALESCE(MAX(global_seq), 0) FROM ("
+                    "SELECT global_seq FROM runtime_event "
+                    "UNION ALL SELECT global_seq FROM agent_sequence) AS seqs")
                 row = cursor.fetchone()
                 return int(row[0]) if row else 0
         finally:
             conn.close()
 
+    def _topic_max_global_seq(self) -> int:
+        """Recover the highest global_seq ever published from the events topic."""
+        if KafkaConsumer is None:
+            return 0
+        consumer = KafkaConsumer(
+            EVENTS_TOPIC,
+            group_id="python-agent-seq-boot",
+            bootstrap_servers=self._bootstrap(),
+            auto_offset_reset="earliest",
+            enable_auto_commit=False,
+            consumer_timeout_ms=4000,
+            key_deserializer=lambda value: value.decode("utf-8") if value else "",
+            value_deserializer=lambda value: json.loads(value.decode("utf-8")),
+            **self._producer_sasl_only(),
+        )
+        maximum = 0
+        try:
+            for record in consumer:
+                value = record.value
+                if isinstance(value, dict):
+                    try:
+                        maximum = max(maximum, int(value.get("global_seq") or 0))
+                    except (TypeError, ValueError):
+                        pass
+        finally:
+            consumer.close()
+        return maximum
+
+    def _producer_sasl_only(self) -> dict[str, Any]:
+        if not self.config.get("AGENT_KAFKA_SASL_USERNAME"):
+            return {}
+        return {
+            "security_protocol": "SASL_PLAINTEXT",
+            "sasl_mechanism": "SCRAM-SHA-256",
+            "sasl_plain_username": self.config["AGENT_KAFKA_SASL_USERNAME"],
+            "sasl_plain_password": self.config["AGENT_KAFKA_SASL_PASSWORD"],
+        }
+
     def _next_global_seq(self) -> int:
         with self._seq_lock:
-            self._global_seq += 1
+            conn = self._connect()
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "UPDATE agent_sequence SET global_seq = LAST_INSERT_ID(global_seq + 1) WHERE id = 1")
+                    cursor.execute("SELECT LAST_INSERT_ID()")
+                    row = cursor.fetchone()
+                    value = int(row[0]) if row else self._global_seq + 1
+                conn.commit()
+            finally:
+                conn.close()
+            self._global_seq = max(self._global_seq, value)
             return self._global_seq
 
     def _load_operation(self, operation_id: str) -> dict[str, Any] | None:
@@ -319,6 +554,18 @@ class AgentService:
         if operation_type == "create_structured":
             session_id = hashlib.sha256((operation_id + ":session").encode("utf-8")).hexdigest()[:32]
             return {"session_id": session_id, "run_id": run_id}, "completed", None
+        if operation_type == "start_conversation":
+            session_id = hashlib.sha256((operation_id + ":session").encode("utf-8")).hexdigest()[:32]
+            requirement = _fake_requirement(str(payload.get("message") or ""))
+            return {
+                "requirement": requirement,
+                "session_id": session_id,
+                "run_id": run_id,
+                "quotes": [],
+            }, "completed", None
+        if operation_type == "import_quote":
+            quote = self._import_quote(payload, task_id)
+            return {"quote": quote}, "completed", None
         if operation_type in ("reopen_task", "resume_run"):
             return {"run_id": run_id}, "completed", None
         if operation_type == "analyze":
@@ -326,6 +573,34 @@ class AgentService:
             self._emit("run_completed", task_id, run_id, {"operation_id": operation_id})
             return {"run_id": run_id}, "completed", None
         return {}, "completed", None
+
+    def _import_quote(self, payload: dict[str, Any], task_id: str) -> dict[str, Any]:
+        artifact_id = str(payload.get("artifact_id") or "")
+        filename = str(payload.get("filename") or "")
+        artifact = self.rpc.call("get_artifact", {"artifact_id": artifact_id})
+        data = base64.b64decode(artifact.get("base64") or "")
+        from agentharness.procurement.parsing import (
+            PARSER_VERSION,
+            fields_requiring_review,
+            parse_quote,
+        )
+        extracted = parse_quote(filename, data)
+        extracted["review_fields"] = fields_requiring_review(extracted)
+        status = "needs_review" if extracted["review_fields"] else "ready"
+        supplier = None
+        fields = extracted.get("fields") or {}
+        supplier_entry = fields.get("supplier_name") if isinstance(fields, dict) else None
+        if isinstance(supplier_entry, dict):
+            supplier = supplier_entry.get("value")
+        return {
+            "artifact_id": artifact_id,
+            "task_id": task_id,
+            "supplier_name": supplier,
+            "extracted": extracted,
+            "status": status,
+            "parser_version": PARSER_VERSION,
+            "processing_ms": "0",
+        }
 
     def _publish_result(self, operation_id: str, envelope: dict[str, Any], status: str,
                         result: dict[str, Any] | None, error: str | None) -> None:
@@ -436,6 +711,7 @@ class AgentService:
             raise RuntimeError("kafka-python 未安装")
         self.producer = KafkaProducer(**self._producer_config())
         self.consumer = KafkaConsumer(COMMANDS_TOPIC, **self._consumer_config())
+        self.rpc.start()
         logger.info("Python Agent 服务已启动（Kafka=%s, db=%s）", self._bootstrap(), self._db_kwargs["database"])
         heartbeat = threading.Thread(target=self._heartbeat_loop, daemon=True)
         heartbeat.start()

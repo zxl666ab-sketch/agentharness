@@ -1,5 +1,7 @@
 package com.caijiatai.procurement.task;
 
+import tools.jackson.databind.annotation.JsonNaming;
+import tools.jackson.databind.PropertyNamingStrategies;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Max;
@@ -14,6 +16,7 @@ import java.util.Map;
 public final class ProcurementDtos {
     private ProcurementDtos() {}
 
+    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
     public record Requirement(
             @Min(1) @Max(2) int schemaVersion,
             @NotBlank @Size(max = 200) String title,
@@ -24,6 +27,7 @@ public final class ProcurementDtos {
             @NotNull @Size(max = 100) Map<String, Object> specifications,
             @NotNull @Valid Constraints constraints) {}
 
+    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
     public record Constraints(
             @NotBlank @Pattern(regexp = "[A-Za-z]{3}") String baseCurrency,
             @NotNull @Size(min = 1, max = 20) Map<String, BigDecimal> fxRates,
