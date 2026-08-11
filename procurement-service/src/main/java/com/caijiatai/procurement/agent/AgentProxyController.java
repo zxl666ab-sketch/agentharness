@@ -39,7 +39,7 @@ public final class AgentProxyController {
     @GetMapping("/api/procurement/config")
     ResponseEntity<byte[]> procurementConfig() {
         if ("demo".equals(properties.agentMode()) || "kafka".equals(properties.agentMode())) {
-            return json(defaultDemoConfig());
+            return json(envConfig());
         }
         return proxy.get("/internal/v1/config");
     }
@@ -47,20 +47,28 @@ public final class AgentProxyController {
     @PostMapping("/api/procurement/config")
     ResponseEntity<byte[]> updateProcurementConfig(@RequestBody byte[] body) {
         if ("demo".equals(properties.agentMode()) || "kafka".equals(properties.agentMode())) {
-            return json(defaultDemoConfig());
+            // 0.5.0：模型配置以 .env / 环境变量为唯一真源（AGENTHARNESS_PROCUREMENT_PROVIDER、
+            // OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL），修改后重启 agent/procurement 生效。
+            return json(envConfig());
         }
         return proxy.post("/internal/v1/config", body);
     }
 
-    private Map<String, Object> defaultDemoConfig() {
+    private Map<String, Object> envConfig() {
+        var env = System.getenv();
+        var provider = env.getOrDefault("AGENTHARNESS_PROCUREMENT_PROVIDER", "procurement_fake");
+        var apiKey = env.getOrDefault("OPENAI_API_KEY", "");
         var config = new LinkedHashMap<String, Object>();
-        config.put("provider", "procurement_fake");
-        config.put("model", "procurement-fake-v1");
-        config.put("base_url", null);
+        config.put("provider", provider);
+        config.put("model", provider.equals("openai")
+                ? env.getOrDefault("OPENAI_MODEL", "gpt-4o-mini") : "procurement-fake-v1");
+        config.put("base_url", env.getOrDefault("OPENAI_BASE_URL", null));
         config.put("api_mode", "auto");
-        config.put("reasoning_effort", "none");
-        config.put("api_key_configured", false);
-        config.put("api_key_preview", null);
+        config.put("reasoning_effort", env.getOrDefault(
+                "AGENTHARNESS_PROCUREMENT_REASONING_EFFORT", "none"));
+        config.put("api_key_configured", provider.equals("openai") && !apiKey.isBlank());
+        config.put("api_key_preview", apiKey.isBlank() ? null
+                : apiKey.substring(0, Math.min(4, apiKey.length())) + "…");
         config.put("input_price_per_million_usd", null);
         config.put("output_price_per_million_usd", null);
         config.put("cached_input_price_per_million_usd", null);

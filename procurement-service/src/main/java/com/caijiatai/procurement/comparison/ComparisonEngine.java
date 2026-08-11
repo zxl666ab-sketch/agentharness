@@ -163,7 +163,7 @@ public final class ComparisonEngine {
         }
         var specChecks = task.getSchemaVersion() == 2
                 ? dynamicChecks(task, quote, exclusions, warnings)
-                : legacyChecks(task, fields, exclusions);
+                : legacyChecks(task, quote, fields, exclusions);
         itemIdentityCheck(task, fields, exclusions, specChecks);
         var budget = constraints.get("max_landed_unit_cost");
         if (budget != null && landedUnit.compareTo(number(budget, "到货单价上限")) > 0) {
@@ -199,6 +199,7 @@ public final class ComparisonEngine {
 
     private List<Map<String, Object>> legacyChecks(
             ProcurementTask task,
+            ProcurementQuote quote,
             Map<String, Object> fields,
             List<Map<String, String>> exclusions) {
         var checks = new ArrayList<Map<String, Object>>();
@@ -241,7 +242,11 @@ public final class ComparisonEngine {
         }
         if (specs.containsKey("height_mm")) {
             var expectedHeight = number(specs.get("height_mm"), "需求高度");
-            var actualHeight = number(fields.get("height_mm"), "报价高度");
+            var heightRaw = fields.get("height_mm");
+            if (heightRaw == null) {
+                heightRaw = dynamicSpecValue(quote, "高度", "height");
+            }
+            var actualHeight = number(heightRaw, "报价高度");
             boolean height = within(actualHeight, expectedHeight, tolerance);
             checks.add(Map.of(
                     "field", "height_mm", "expected", decimal(expectedHeight),
@@ -303,6 +308,19 @@ public final class ComparisonEngine {
             }
         });
         return checks;
+    }
+
+    private Object dynamicSpecValue(ProcurementQuote quote, String zhLabel, String key) {
+        var actualSpecs = map(quote.getExtracted().get("specifications"));
+        for (var entry : actualSpecs.entrySet()) {
+            var candidate = map(entry.getValue());
+            var label = text(candidate.getOrDefault("label", entry.getKey()));
+            var identity = normalized(String.valueOf(entry.getKey())) + " " + normalized(label);
+            if (identity.contains(normalized(zhLabel)) || identity.contains(key)) {
+                return candidate.get("value");
+            }
+        }
+        return null;
     }
 
     private DynamicActual dynamicActual(

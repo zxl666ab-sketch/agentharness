@@ -677,11 +677,14 @@ class AgentService:
         if operation_type == "start_conversation":
             session_id = hashlib.sha256((operation_id + ":session").encode("utf-8")).hexdigest()[:32]
             requirement = _llm_requirement(str(payload.get("message") or ""), self.config)
+            quotes = []
+            for attachment in payload.get("attachments") or []:
+                quotes.append(self._import_quote(attachment, task_id, run_id))
             return {
                 "requirement": requirement,
                 "session_id": session_id,
                 "run_id": run_id,
-                "quotes": [],
+                "quotes": quotes,
             }, "completed", None
         if operation_type == "import_quote":
             quote = self._import_quote(payload, task_id, run_id)
