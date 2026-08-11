@@ -302,7 +302,6 @@ def test_next_global_seq_uses_persisted_counter(monkeypatch):
 
 def test_persist_result_updates_row(monkeypatch):
     service = svc.AgentService(dict(CONFIG))
-    calls = []
     class CaptureConn:
         def cursor(self, *a, **k):
             return FakeCursor()
