@@ -360,6 +360,36 @@ class MySqlIntegrationTest {
                         assertThat(error.code()).isEqualTo("invalid_specifications"));
     }
 
+    @Test
+    void approvalFallsBackToSnapshotRunIdWhenTaskHasNoBoundRun() {
+        var taskId = transactions.execute(ignored -> {
+            var task = newTask();
+            task.setStatus(TaskStatus.READY);
+            task = tasks.saveAndFlush(task);
+            addQuote(task.getId(), "Alpha Packaging", "520", "alpha");
+            addQuote(task.getId(), "Beta Packaging", "600", "beta");
+            return task.getId();
+        });
+        transactions.executeWithoutResult(ignored -> {
+            var task = tasks.lockById(taskId).orElseThrow();
+            comparisonService.analyze(task, RUN_ID);
+        });
+        var snapshot = snapshots.findFirstByTaskIdOrderBySnapshotVersionDesc(taskId).orElseThrow();
+        assertThat(tasks.findById(taskId).orElseThrow().getAnalysisRunId()).isNull();
+        var quoteId = String.valueOf(((List<?>) snapshot.getResult().get("quotes")).stream()
+                .map(item -> (Map<?, ?>) item)
+                .filter(item -> Boolean.TRUE.equals(item.get("eligible")))
+                .findFirst().orElseThrow().get("quote_id"));
+
+        var requested = approvalService.request(
+                taskId,
+                new ProcurementDtos.Decision(
+                        "approved", snapshot.getId(), snapshot.getInputSha256(), quoteId, true, "已核对"),
+                "approval-fallback");
+
+        assertThat(requested.pending().getRunId()).isEqualTo(RUN_ID);
+    }
+
     private PendingFixture pendingApproval() {
         var taskId = preparedAnalyzableTask();
         transactions.executeWithoutResult(ignored -> {

@@ -122,6 +122,7 @@ public class ApprovalService {
             throw stale();
         }
         validateSelection(snapshot.getResult(), body.decision(), body.quoteId());
+        var runId = task.getAnalysisRunId() != null ? task.getAnalysisRunId() : snapshot.getRunId();
         var pendingId = UUID.randomUUID().toString().replace("-", "");
         var operationId = UUID.randomUUID().toString();
         var note = body.note() == null ? "" : body.note().strip();
@@ -130,7 +131,7 @@ public class ApprovalService {
         var expectedVersion = task.getVersion() + 1;
         var binding = binding(
                 pendingId,
-                task.getAnalysisRunId(),
+                runId,
                 expectedVersion,
                 snapshot.getId(),
                 snapshot.getInputSha256(),
@@ -141,7 +142,7 @@ public class ApprovalService {
                 pendingId,
                 operationId,
                 taskId,
-                task.getAnalysisRunId(),
+                runId,
                 expectedVersion,
                 snapshot.getId(),
                 snapshot.getInputSha256(),
@@ -161,7 +162,7 @@ public class ApprovalService {
         commands.alignTimestampsToDbClock(command.getOperationId());
         idempotency.save(IdempotencyRecord.reserve("decision", key, payloadSha, operationId));
         audit.save(AuditEvent.create(
-                taskId, body.quoteId(), task.getAnalysisRunId(), "supplier_approval_requested", operator,
+                taskId, body.quoteId(), runId, "supplier_approval_requested", operator,
                 Map.of(
                         "pending_decision_id", pending.getId(),
                         "operation_id", operationId,

@@ -174,6 +174,11 @@ public class ProcurementTask {
         updatedAt = Instant.now();
     }
 
+    public void bindAnalysisRun(String runId) {
+        this.analysisRunId = runId;
+        updatedAt = Instant.now();
+    }
+
     public void setStatus(TaskStatus status) {
         this.status = status.wireValue();
         updatedAt = Instant.now();

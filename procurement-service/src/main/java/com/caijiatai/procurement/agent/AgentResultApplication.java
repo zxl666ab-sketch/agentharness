@@ -132,6 +132,7 @@ public final class AgentResultApplication {
         if (!runId.matches("[0-9a-f]{32}")) {
             throw invalidResult("Agent 分析结果缺少 run_id");
         }
+        task.bindAnalysisRun(runId);
         comparison.analyze(task, runId);
     }
 
