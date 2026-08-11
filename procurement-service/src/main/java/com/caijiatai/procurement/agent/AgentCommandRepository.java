@@ -11,6 +11,6 @@ import org.springframework.data.jpa.repository.Query;
 public interface AgentCommandRepository extends JpaRepository<AgentCommand, String> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select command from AgentCommand command where command.status in ('pending', 'accepted') "
-            + "and command.nextAttemptAt <= :now order by command.acceptedAt")
-    List<AgentCommand> lockDispatchable(Instant now, Pageable pageable);
+            + "and command.nextAttemptAt <= current_timestamp order by command.acceptedAt")
+    List<AgentCommand> lockDispatchable(Pageable pageable);
 }
