@@ -1,3 +1,3 @@
 
 # Java 托管的 Web 构建产物与 web/dist 逐字节一致，禁止行尾转换
-procurement-service/src/main/resources/static/** -text
+procurement-service/src/main/resources/static/** eol=lf
