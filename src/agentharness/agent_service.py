@@ -826,6 +826,32 @@ class AgentService:
             time.sleep(5)
 
     # ---- lifecycle ----
+    def start_health_server(self) -> None:
+        """Minimal internal HTTP health endpoint (AGENT_PORT, default 8742)."""
+        import http.server
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                if self.path.startswith("/api/health"):
+                    body = b'{"status":"ok","service":"procurement_agent","kafka":true}'
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, *args) -> None:
+                return
+
+        port = int(self.config.get("AGENT_PORT") or os.environ.get("AGENT_PORT", "8742"))
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        logger.info("Agent 健康端点已启动：127.0.0.1:%s/api/health", port)
+
+    # ---- lifecycle ----
 
     def start(self) -> None:
         if KafkaConsumer is None or KafkaProducer is None:
@@ -834,6 +860,7 @@ class AgentService:
         self.consumer = KafkaConsumer(COMMANDS_TOPIC, **self._consumer_config())
         self.rpc.start()
         logger.info("Python Agent 服务已启动（Kafka=%s, db=%s）", self._bootstrap(), self._db_kwargs["database"])
+        self.start_health_server()
         heartbeat = threading.Thread(target=self._heartbeat_loop, daemon=True)
         heartbeat.start()
         try:

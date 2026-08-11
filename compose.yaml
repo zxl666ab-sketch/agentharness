@@ -87,6 +87,12 @@ services:
       AGENTHARNESS_DATABASE_URL: mysql+pymysql://caijiatai:${DATABASE_PASSWORD:-caijiatai-local}@mysql:3306/caijiatai_runtime
       AGENT_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       AGENT_INTERNAL_HMAC_KEY: ${AGENT_INTERNAL_HMAC_KEY:-local-hmac-key-change-me}
+      AGENT_PORT: 8742
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8742/api/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
     restart: unless-stopped
 
   procurement:
