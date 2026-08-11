@@ -302,6 +302,7 @@ def _remove_previous_generation(target: Path) -> None:
 
 def _request_payload(scenario: dict[str, Any]) -> dict[str, Any]:
     return {
+        "schema_version": 1,
         "title": scenario["title"],
         "category": "ecommerce_packaging",
         "item_name": scenario["item_name"],

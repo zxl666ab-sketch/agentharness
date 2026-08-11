@@ -45,10 +45,6 @@ public final class ArtifactController {
         return rawResponse(load(artifactId));
     }
 
-    @GetMapping("/internal/v1/artifacts/{artifactId}/raw")
-    public ResponseEntity<FileSystemResource> internalRaw(@PathVariable String artifactId) {
-        return rawResponse(load(artifactId));
-    }
 
     private BusinessArtifact load(String artifactId) {
         if (!artifactId.matches("jb[0-9a-f]{32}")) {

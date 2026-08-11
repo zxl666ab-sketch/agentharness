@@ -33,16 +33,6 @@ public final class RequestBoundaryFilter extends OncePerRequestFilter {
         request.setAttribute(ApiExceptionHandler.REQUEST_ID_ATTRIBUTE, requestId);
         response.setHeader("X-Request-Id", requestId);
 
-        if (request.getRequestURI().startsWith("/internal/v1/")) {
-            if (!constantTimeEquals(
-                    properties.agentInternalToken(), request.getHeader("X-Agent-Internal-Token"))) {
-                response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
-                return;
-            }
-            filterChain.doFilter(request, response);
-            return;
-        }
-
         var host = request.getServerName().toLowerCase(Locale.ROOT);
         if (!LOCAL_HOSTS.contains(host)) {
             response.sendError(HttpServletResponse.SC_BAD_REQUEST, "invalid_host");
