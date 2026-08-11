@@ -399,7 +399,6 @@ class RpcClient:
             self.consumer.close()
         if self.producer is not None:
             self.producer.close()
-        self.rpc.close()
 
 
 class AgentService:
