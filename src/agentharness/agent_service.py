@@ -40,6 +40,38 @@ EVENTS_TOPIC = "caijiatai.events"
 RPC_REQUESTS_TOPIC = "caijiatai.rpc.requests"
 RPC_RESPONSES_TOPIC = "caijiatai.rpc.responses"
 
+class AgentContextCache:
+    """Optional Redis run-context cache; degrades to no-op when unavailable."""
+
+    def __init__(self, config: dict[str, str]) -> None:
+        url = (config.get("REDIS_URL") or "").strip()
+        self.client = None
+        if url:
+            try:
+                import redis  # type: ignore[import-not-found]
+                self.client = redis.Redis.from_url(url, decode_responses=True)
+                self.client.ping()
+            except Exception:  # noqa: BLE001 - Redis unavailable: degrade
+                self.client = None
+
+    def put_run(self, run_id: str, value: dict[str, Any]) -> None:
+        if self.client is None:
+            return
+        try:
+            self.client.setex(f"ctx:run:{run_id}", 60, _canonical_json(value).decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        if self.client is None:
+            return None
+        try:
+            raw = self.client.get(f"ctx:run:{run_id}")
+            return json.loads(raw) if raw else None
+        except Exception:  # noqa: BLE001
+            return None
+
+
 SUPPORTED_OPERATIONS = frozenset({
     "analyze", "create_structured", "approve_decision", "reopen_task", "resume_run",
     "import_quote", "start_conversation",
@@ -320,6 +352,7 @@ class AgentService:
         self.consumer = None
         self._closed = False
         self.rpc = RpcClient(self.config, self.hmac_key)
+        self.cache = AgentContextCache(self.config)
 
     # ---- MySQL runtime ----
     def _connect(self) -> pymysql.connections.Connection:
@@ -569,8 +602,10 @@ class AgentService:
         if operation_type in ("reopen_task", "resume_run"):
             return {"run_id": run_id}, "completed", None
         if operation_type == "analyze":
+            self.cache.put_run(run_id, {"task_id": task_id, "operation_id": operation_id, "status": "running"})
             self._emit("run_started", task_id, run_id, {"operation_id": operation_id})
             self._emit("run_completed", task_id, run_id, {"operation_id": operation_id})
+            self.cache.put_run(run_id, {"task_id": task_id, "operation_id": operation_id, "status": "completed"})
             return {"run_id": run_id}, "completed", None
         return {}, "completed", None
 
