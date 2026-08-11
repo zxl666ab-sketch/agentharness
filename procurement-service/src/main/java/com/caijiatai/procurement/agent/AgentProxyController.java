@@ -115,7 +115,7 @@ public final class AgentProxyController {
     Object messages(@PathVariable String runId) {
         var safe = id(runId);
         if ("kafka".equals(properties.agentMode())) {
-            return json(java.util.List.of());
+            return json(runtimeQuery.messages(safe));
         }
         return proxy.get("/api/runs/" + safe + "/messages");
     }
@@ -142,7 +142,7 @@ public final class AgentProxyController {
     Object invocations(@PathVariable String runId) {
         var safe = id(runId);
         if ("kafka".equals(properties.agentMode())) {
-            return json(java.util.List.of());
+            return json(runtimeQuery.toolInvocations(safe));
         }
         return proxy.get("/api/runs/" + safe + "/tool-invocations");
     }

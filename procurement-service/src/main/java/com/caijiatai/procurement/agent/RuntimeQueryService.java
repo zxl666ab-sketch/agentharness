@@ -53,6 +53,44 @@ public final class RuntimeQueryService {
         return result;
     }
 
+    public List<Map<String, Object>> messages(String runId) {
+        var rows = events.findByRunId(runId, PageRequest.of(0, 1000, Sort.by("globalSeq").ascending()));
+        var result = new ArrayList<Map<String, Object>>();
+        for (var row : rows) {
+            if (!"tool_result".equals(row.getType())) {
+                continue;
+            }
+            var value = new LinkedHashMap<String, Object>();
+            value.put("id", String.valueOf(row.getId()));
+            value.put("role", "tool");
+            value.put("content", String.valueOf(row.getPayload().getOrDefault("tool", row.getType())));
+            value.put("tool_call_id", String.valueOf(row.getId()));
+            value.put("created_at", row.getOccurredAt());
+            result.add(value);
+        }
+        return result;
+    }
+
+    public List<Map<String, Object>> toolInvocations(String runId) {
+        var rows = events.findByRunId(runId, PageRequest.of(0, 1000, Sort.by("globalSeq").ascending()));
+        var result = new ArrayList<Map<String, Object>>();
+        for (var row : rows) {
+            if (!"tool_call_start".equals(row.getType())) {
+                continue;
+            }
+            var value = new LinkedHashMap<String, Object>();
+            value.put("id", String.valueOf(row.getId()));
+            value.put("run_id", row.getRunId());
+            value.put("tool_name", row.getPayload().getOrDefault("tool", ""));
+            value.put("status", "completed");
+            value.put("created_at", row.getOccurredAt());
+            value.put("arguments", Map.of());
+            value.put("result", Map.of());
+            result.add(value);
+        }
+        return result;
+    }
+
     public Map<String, Object> checkpoint(String runId) {
         var value = new LinkedHashMap<String, Object>();
         value.put("run_id", runId);

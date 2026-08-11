@@ -145,6 +145,85 @@ def _utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
+_REQUIREMENT_PROMPT = """你是采购需求结构化助手。把用户的采购目标转成 JSON，字段：
+schema_version(1), title, category(ecommerce_packaging), item_name, quantity(整数), unit(piece),
+specifications(width_mm,length_mm,thickness_um,height_mm(纸箱必填),material,color,print_colors 均为字符串/数字),
+constraints(base_currency(CNY),fx_rates({"CNY":"1"}),max_lead_days,invoice_required(true),
+size_tolerance_mm,thickness_tolerance_um,max_landed_unit_cost(可选),destination(可选))。
+只输出 JSON，不要解释。"""
+
+
+def _extract_json(text: str) -> str:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("模型未返回 JSON")
+    return text[start:end + 1]
+
+
+def _coerce_requirement(data: dict[str, Any], message: str) -> dict[str, Any]:
+    if not isinstance(data, dict) or not data.get("item_name"):
+        raise ValueError("模型返回缺少 item_name")
+    specs = {str(k): v for k, v in (data.get("specifications") or {}).items() if v not in (None, "")}
+    raw_constraints = data.get("constraints") or {}
+    constraints: dict[str, Any] = {
+        "base_currency": str(raw_constraints.get("base_currency") or "CNY").upper(),
+        "fx_rates": {"CNY": "1"},
+        "max_lead_days": max(1, int(float(raw_constraints.get("max_lead_days") or 15))),
+        "invoice_required": bool(raw_constraints.get("invoice_required", True)),
+        "size_tolerance_mm": str(raw_constraints.get("size_tolerance_mm") or "2"),
+        "thickness_tolerance_um": str(raw_constraints.get("thickness_tolerance_um") or "3"),
+    }
+    if raw_constraints.get("max_landed_unit_cost") not in (None, ""):
+        constraints["max_landed_unit_cost"] = str(raw_constraints["max_landed_unit_cost"])
+    if raw_constraints.get("destination"):
+        constraints["destination"] = str(raw_constraints["destination"])
+    quantity = int(float(data.get("quantity") or 0))
+    if quantity <= 0:
+        raise ValueError("模型返回数量无效")
+    return {
+        "schema_version": int(data.get("schema_version") or 1),
+        "title": str(data.get("title") or "采购询价"),
+        "category": str(data.get("category") or "ecommerce_packaging"),
+        "item_name": str(data["item_name"]),
+        "quantity": quantity,
+        "unit": str(data.get("unit") or "piece"),
+        "specifications": specs,
+        "constraints": constraints,
+    }
+
+
+def _llm_requirement(message: str, config: dict[str, str]) -> dict[str, Any]:
+    """Call the configured OpenAI-compatible provider; fall back to offline rules on failure."""
+    provider = config.get("AGENTHARNESS_PROCUREMENT_PROVIDER") or os.environ.get("AGENTHARNESS_PROCUREMENT_PROVIDER", "procurement_fake")
+    if provider != "openai":
+        return _fake_requirement(message)
+    api_key = config.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        logger.warning("AGENTHARNESS_PROCUREMENT_PROVIDER=openai 但未配置 OPENAI_API_KEY，回退离线规则")
+        return _fake_requirement(message)
+    try:
+        from openai import OpenAI
+        client = OpenAI(
+            api_key=api_key,
+            base_url=config.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or None,
+        )
+        model = config.get("OPENAI_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _REQUIREMENT_PROMPT},
+                {"role": "user", "content": message},
+            ],
+            temperature=0,
+        )
+        text = response.choices[0].message.content or ""
+        return _coerce_requirement(json.loads(_extract_json(text)), message)
+    except Exception:  # noqa: BLE001 - provider failure must not break the flow
+        logger.warning("LLM 需求抽取失败，回退离线规则", exc_info=True)
+        return _fake_requirement(message)
+
+
 def _fake_requirement(message: str) -> dict[str, Any]:
     """Deterministic NL-to-structure extraction for the offline demo provider."""
     quantity = 10000
@@ -589,7 +668,7 @@ class AgentService:
             return {"session_id": session_id, "run_id": run_id}, "completed", None
         if operation_type == "start_conversation":
             session_id = hashlib.sha256((operation_id + ":session").encode("utf-8")).hexdigest()[:32]
-            requirement = _fake_requirement(str(payload.get("message") or ""))
+            requirement = _llm_requirement(str(payload.get("message") or ""), self.config)
             return {
                 "requirement": requirement,
                 "session_id": session_id,
@@ -597,19 +676,21 @@ class AgentService:
                 "quotes": [],
             }, "completed", None
         if operation_type == "import_quote":
-            quote = self._import_quote(payload, task_id)
+            quote = self._import_quote(payload, task_id, run_id)
             return {"quote": quote}, "completed", None
         if operation_type in ("reopen_task", "resume_run"):
             return {"run_id": run_id}, "completed", None
         if operation_type == "analyze":
             self.cache.put_run(run_id, {"task_id": task_id, "operation_id": operation_id, "status": "running"})
             self._emit("run_started", task_id, run_id, {"operation_id": operation_id})
+            self._emit("tool_call_start", task_id, run_id, {"tool": "deterministic_analysis"})
+            self._emit("tool_result", task_id, run_id, {"tool": "deterministic_analysis", "status": "ok"})
             self._emit("run_completed", task_id, run_id, {"operation_id": operation_id})
             self.cache.put_run(run_id, {"task_id": task_id, "operation_id": operation_id, "status": "completed"})
             return {"run_id": run_id}, "completed", None
         return {}, "completed", None
 
-    def _import_quote(self, payload: dict[str, Any], task_id: str) -> dict[str, Any]:
+    def _import_quote(self, payload: dict[str, Any], task_id: str, run_id: str) -> dict[str, Any]:
         artifact_id = str(payload.get("artifact_id") or "")
         filename = str(payload.get("filename") or "")
         artifact = self.rpc.call("get_artifact", {"artifact_id": artifact_id})
@@ -619,9 +700,14 @@ class AgentService:
             fields_requiring_review,
             parse_quote,
         )
+        self._emit("tool_call_start", task_id, run_id,
+                   {"tool": "parse_quote", "filename": filename, "artifact_id": artifact_id})
         extracted = parse_quote(filename, data)
         extracted["review_fields"] = fields_requiring_review(extracted)
         status = "needs_review" if extracted["review_fields"] else "ready"
+        self._emit("tool_result", task_id, run_id,
+                   {"tool": "parse_quote", "filename": filename, "artifact_id": artifact_id,
+                    "status": "ok", "review_fields": len(extracted["review_fields"])})
         supplier = None
         fields = extracted.get("fields") or {}
         supplier_entry = fields.get("supplier_name") if isinstance(fields, dict) else None
