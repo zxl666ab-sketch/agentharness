@@ -294,3 +294,16 @@ RPC 请求/响应：请求含 `correlation_id`、`kind`、`payload`、`reply_to`
 - `contracts/`：两个 HTTP OpenAPI 替换为 Kafka 消息 JSON Schema + 黄金契约（保持 canonical JSON/SHA-256 不变）；topic 与消费者组见 §5.1
 - Web `/api/stream`：数据源从“Java 反向代理 Python”改为“Java 读 `runtime_event` 投影表”
 - Web `/api/runs/**` 读接口：同样改为 Java 投影，不再代理 Python
+
+
+## 17. 实施状态盘点（2026-08-11）
+
+- Step 0/1/决策门 1/Step 2a/决策门 2：已完成并有浏览器与测试证据。
+- Step 2b：RPC（get_task_context/get_artifact/list_events）、全命令（analyze/import_quote/start_conversation/approve_decision/create_structured/reopen_task/resume_run）、事件/SSE 投影（runs/events/messages/tool-invocations/report/checkpoint/approvals）、Redis 上下文缓存（Java Redis+Noop 降级；Python ctx:run 降级）、DLQ、HMAC/幂等/409、内部 HTTP 删除均已落地。
+- Step 4：Compose 五服务（MySQL/Redis/Kafka/agent/procurement）构建并 healthy，仅 127.0.0.1:8741 暴露；杀 agent 命令滞留、重启续跑验证通过；跨语言黄金契约（同一 contracts/golden/frozen-comparison-v3.json）Java 31/31 + Python 31 用例断言通过；冻结评测 run+verify 通过；版本 0.5.0；master 已提升、legacy/python-monolith 归档。
+- 已知未完成/未验证：
+  1) SASL/SCRAM + ACL E2E（“无 MQ 凭据访问失败”）——KRaft 下 apache/kafka wrapper 未将 KAFKA_SUPER_USERS 写入控制器配置（含 User:ANONYMOUS）；覆盖编排 compose.kafka-sasl.yml 已标注 WIP 与所需修复。
+  2) GitHub Actions CI 实跑——配置已就绪，本地已跑等价命令；无远端推送权限。
+  3) Step 3 RAG（Milvus+BM25+rerank）为二期可选，v1 不交付。
+  4) /api/runs/{id}/checkpoint 为最小 exists=false 投影（Python 断点续跑能力在 v1 走命令重放，不依赖 checkpoint 文件）。
+- 验收门槛对照：黄金契约哈希跨语言一致（通过）；Step 1/2 决策门（通过）；全量测试绿（Java 35/35，Python 207+1）；文档与实现一致（README/architecture/threat-model/release-checklist 已同步；SASL 段标注 WIP）。
