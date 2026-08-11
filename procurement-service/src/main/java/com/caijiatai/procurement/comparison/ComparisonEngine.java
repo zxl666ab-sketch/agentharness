@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.regex.Pattern;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 
@@ -163,12 +164,7 @@ public final class ComparisonEngine {
         var specChecks = task.getSchemaVersion() == 2
                 ? dynamicChecks(task, quote, exclusions, warnings)
                 : legacyChecks(task, fields, exclusions);
-        if (!matchesItem(task.getItemName(), text(fields.get("item_description")))) {
-            exclude(exclusions, "item_identity", "报价物料与采购需求不一致");
-            specChecks.add(Map.of(
-                    "field", "item_identity", "expected", task.getItemName(),
-                    "actual", text(fields.get("item_description")), "tolerance", "exact", "passed", false));
-        }
+        itemIdentityCheck(task, fields, exclusions, specChecks);
         var budget = constraints.get("max_landed_unit_cost");
         if (budget != null && landedUnit.compareTo(number(budget, "到货单价上限")) > 0) {
             exclude(exclusions, "budget", "到货单价 " + unitMoney(landedUnit) + " 超过上限 " + budget);
@@ -207,8 +203,8 @@ public final class ComparisonEngine {
             List<Map<String, String>> exclusions) {
         var checks = new ArrayList<Map<String, Object>>();
         var specs = task.getSpecifications();
-        exactCheck(checks, exclusions, "material", specs.get("material"), fields.get("material"));
-        exactCheck(checks, exclusions, "color", normalizeColor(specs.get("color")), normalizeColor(fields.get("color")));
+        exactCanonicalCheck(checks, exclusions, "material", "材质", specs.get("material"), fields.get("material"));
+        exactCanonicalCheck(checks, exclusions, "color", "颜色", specs.get("color"), fields.get("color"));
         exactCheck(checks, exclusions, "print_colors", specs.get("print_colors"), fields.get("print_colors"));
         var tolerance = number(task.getConstraints().getOrDefault("size_tolerance_mm", "0"), "尺寸公差");
         var expectedWidth = number(specs.get("width_mm"), "需求宽度");
@@ -242,6 +238,17 @@ public final class ComparisonEngine {
                 "actual", decimal(actualThickness), "tolerance", decimal(thicknessTolerance), "passed", thickness));
         if (!thickness) {
             exclude(exclusions, "spec_thickness_um", "报价厚度超出需求公差");
+        }
+        if (specs.containsKey("height_mm")) {
+            var expectedHeight = number(specs.get("height_mm"), "需求高度");
+            var actualHeight = number(fields.get("height_mm"), "报价高度");
+            boolean height = within(actualHeight, expectedHeight, tolerance);
+            checks.add(Map.of(
+                    "field", "height_mm", "expected", decimal(expectedHeight),
+                    "actual", decimal(actualHeight), "tolerance", decimal(tolerance), "passed", height));
+            if (!height) {
+                exclude(exclusions, "spec_height_mm", "报价高度超出需求公差");
+            }
         }
         return checks;
     }
@@ -416,11 +423,110 @@ public final class ComparisonEngine {
 
     private boolean matchesItem(String expected, String description) {
         var expectedIdentity = canonicalItem(expected);
-        return expectedIdentity == null || expectedIdentity.equals(canonicalItem(description));
+        return expectedIdentity != null && expectedIdentity.equals(canonicalItem(description));
+    }
+
+    private void itemIdentityCheck(
+            ProcurementTask task,
+            Map<String, Object> fields,
+            List<Map<String, String>> exclusions,
+            List<Map<String, Object>> specChecks) {
+        var requested = task.getItemName();
+        if (requested.isBlank()) {
+            return;
+        }
+        var description = text(fields.get("item_description"));
+        var expected = canonicalItem(requested);
+        if (expected == null) {
+            specChecks.add(Map.of(
+                    "field", "item_identity", "expected", requested,
+                    "actual", description, "tolerance", "exact", "passed", false));
+            exclude(exclusions, "item_identity",
+                    "无法复核物料一致性（需求物料“" + requested + "”不在可识别范围内）");
+            return;
+        }
+        boolean passed = expected.equals(canonicalItem(description));
+        specChecks.add(Map.of(
+                "field", "item_identity", "expected", requested,
+                "actual", description, "tolerance", "exact", "passed", passed));
+        if (!passed) {
+            exclude(exclusions, "item_identity",
+                    "报价物料“" + (description.isBlank() ? "未识别" : description) + "”与需求“" + requested + "”不一致");
+        }
+    }
+
+    private void exactCanonicalCheck(
+            List<Map<String, Object>> checks,
+            List<Map<String, String>> exclusions,
+            String field,
+            String label,
+            Object expectedRaw,
+            Object actualRaw) {
+        String expected = "material".equals(field) ? canonicalMaterial(expectedRaw) : canonicalColor(expectedRaw);
+        String actual = "material".equals(field) ? canonicalMaterial(actualRaw) : canonicalColor(actualRaw);
+        if (expected == null) {
+            if (!text(expectedRaw).isBlank()) {
+                checks.add(Map.of(
+                        "field", field, "expected", text(expectedRaw),
+                        "actual", actual == null ? "未识别" : actual,
+                        "tolerance", "exact", "passed", false));
+                exclude(exclusions, "spec_" + field,
+                        "无法复核" + label + "一致性（需求值“" + text(expectedRaw) + "”不在可识别范围内）");
+            }
+            return;
+        }
+        boolean passed = actual != null && actual.equals(expected);
+        checks.add(Map.of(
+                "field", field, "expected", expected,
+                "actual", actual == null ? "未识别" : actual,
+                "tolerance", "exact", "passed", passed));
+        if (!passed) {
+            exclude(exclusions, "spec_" + field,
+                    label + " " + (actual == null ? "未识别" : actual) + " 不符合需求 " + expected);
+        }
+    }
+
+    private String canonicalMaterial(Object value) {
+        return canonicalAlias(value, Map.of(
+                "PE", List.of("pe", "聚乙烯", "polyethylene"),
+                "PVC", List.of("pvc", "聚氯乙烯", "polyvinylchloride"),
+                "PP", List.of("pp", "聚丙烯", "polypropylene"),
+                "bopp", List.of("bopp", "双向拉伸聚丙烯"),
+                "PET", List.of("pet", "聚对苯二甲酸乙二醇"),
+                "PLA", List.of("pla", "聚乳酸"),
+                "corrugated", List.of("瓦楞", "corrugated", "cardboard"),
+                "kraft", List.of("牛皮", "kraft"),
+                "coated_paper", List.of("铜版纸", "coatedpaper", "artpaper")));
+    }
+
+    private String canonicalColor(Object value) {
+        return canonicalAlias(value, Map.of(
+                "white", List.of("白色", "白", "white"),
+                "black", List.of("黑色", "黑", "black"),
+                "transparent", List.of("透明", "transparent", "clear"),
+                "red", List.of("红色", "红", "red"),
+                "blue", List.of("蓝色", "蓝", "blue"),
+                "kraft", List.of("牛皮色", "牛皮", "牛卡", "kraft")));
+    }
+
+    private String canonicalAlias(Object value, Map<String, List<String>> aliases) {
+        var raw = text(value).strip().toLowerCase(Locale.ROOT);
+        if (raw.isBlank()) {
+            return null;
+        }
+        for (var entry : aliases.entrySet()) {
+            for (var alias : entry.getValue()) {
+                if (Pattern.compile("(?<![a-z])" + Pattern.quote(alias) + "(?![a-z])").matcher(raw).find()) {
+                    return entry.getKey();
+                }
+            }
+        }
+        return null;
     }
 
     private String canonicalItem(Object value) {
-        var item = normalized(value);
+        var raw = text(value).strip().toLowerCase(Locale.ROOT);
+        var item = raw.replaceAll("\\s+", "");
         if (List.of("快递袋", "快递包装袋", "mailer", "mailingbag", "courierbag").stream()
                 .anyMatch(item::contains)) {
             return "mailer";
@@ -428,6 +534,33 @@ public final class ComparisonEngine {
         if (List.of("垃圾袋", "trashbag", "garbagebag", "binliner").stream()
                 .anyMatch(item::contains)) {
             return "trash_bag";
+        }
+        if (List.of("气泡膜", "气泡袋", "气泡垫", "bubblewrap", "bubblefilm", "bubble").stream()
+                .anyMatch(item::contains)) {
+            return "bubble";
+        }
+        if (List.of("缠绕膜", "拉伸膜", "stretchfilm", "stretchwrap", "stretch").stream()
+                .anyMatch(item::contains)) {
+            return "stretch";
+        }
+        if (List.of("封箱胶带", "胶带", "tape").stream()
+                .anyMatch(item::contains)) {
+            return "tape";
+        }
+        if (List.of("珍珠棉", "epe", "pefoam", "foam").stream()
+                .anyMatch(item::contains)) {
+            return "foam";
+        }
+        if (List.of("不干胶标签", "热敏标签", "标签", "不干胶", "thermallabel", "sticker", "label").stream()
+                .anyMatch(item::contains)) {
+            return "label";
+        }
+        if (List.of("纸箱", "包装箱", "carton", "corrugated").stream()
+                .anyMatch(item::contains)) {
+            return "carton";
+        }
+        if (Pattern.compile("\\bbox(?:es)?\\b").matcher(raw).find()) {
+            return "carton";
         }
         return null;
     }

@@ -128,10 +128,10 @@ class ComparisonEngineTest {
                         "max_lead_days", 30, "invoice_required", true));
         var quote = quote(
                 "A", "10", "1", "0", true, "0", true,
-                "1", "5", true, "250", "350", "60", "PE", "white");
+                "1", "5", true, "250", "350", "60", "PE", "white", "热敏标签 25cm 60um");
         var other = quote(
                 "B", "11", "1", "0", true, "0", true,
-                "1", "5", true, "250", "350", "60", "PE", "white");
+                "1", "5", true, "250", "350", "60", "PE", "white", "热敏标签 25cm 60um");
 
         var result = engine.compare(task, List.of(quote, other));
         @SuppressWarnings("unchecked")
@@ -160,6 +160,167 @@ class ComparisonEngineTest {
         var rows = (List<Map<String, Object>>) result.result().get("quotes");
 
         assertThat(rows).allSatisfy(item -> assertThat(item.get("eligible")).isEqualTo(true));
+    }
+
+    @Test
+    void acceptsCartonWithCanonicalMaterialColorAndHeight() {
+        var specs = new LinkedHashMap<String, Object>();
+        specs.put("width_mm", "400");
+        specs.put("length_mm", "300");
+        specs.put("height_mm", "250");
+        specs.put("thickness_um", "5000");
+        specs.put("material", "瓦楞纸");
+        specs.put("color", "牛皮色");
+        specs.put("print_colors", 1);
+        var task = ProcurementTask.structured(
+                1, "苏州工厂出口瓦楞纸箱采购", "ecommerce_packaging", "五层瓦楞纸箱",
+                new BigDecimal("5000"), "piece", specs,
+                Map.of(
+                        "base_currency", "CNY", "fx_rates", Map.of("CNY", "1"),
+                        "max_lead_days", 20, "invoice_required", true,
+                        "size_tolerance_mm", "5", "thickness_tolerance_um", "500"));
+
+        var result = engine.compare(task,
+                List.of(cartonV1Quote("浙江箱业", "3.2"), cartonV1Quote("华南纸业", "3.3")));
+        @SuppressWarnings("unchecked")
+        var rows = (List<Map<String, Object>>) result.result().get("quotes");
+
+        assertThat(rows).allSatisfy(item -> assertThat(item.get("eligible")).isEqualTo(true));
+    }
+
+    @Test
+    void rejectsCartonWhenHeightIsOutOfTolerance() {
+        var specs = new LinkedHashMap<String, Object>();
+        specs.put("width_mm", "400");
+        specs.put("length_mm", "300");
+        specs.put("height_mm", "250");
+        specs.put("thickness_um", "5000");
+        specs.put("material", "瓦楞纸");
+        specs.put("color", "牛皮色");
+        specs.put("print_colors", 1);
+        var task = ProcurementTask.structured(
+                1, "苏州工厂出口瓦楞纸箱采购", "ecommerce_packaging", "五层瓦楞纸箱",
+                new BigDecimal("5000"), "piece", specs,
+                Map.of(
+                        "base_currency", "CNY", "fx_rates", Map.of("CNY", "1"),
+                        "max_lead_days", 20, "invoice_required", true,
+                        "size_tolerance_mm", "5", "thickness_tolerance_um", "500"));
+        var wrong = cartonV1Quote("浙江箱业", "3.2");
+        var fields = new LinkedHashMap<String, Object>();
+        mapFieldValues(wrong).forEach(fields::put);
+        fields.put("height_mm", "260");
+        var wrongQuote = createQuote("浙江箱业", fields, Map.of());
+
+        var result = engine.compare(task, List.of(wrongQuote, cartonV1Quote("华南纸业", "3.3")));
+        @SuppressWarnings("unchecked")
+        var rows = (List<Map<String, Object>>) result.result().get("quotes");
+        var rejected = rows.stream().filter(item -> item.get("supplier_name").equals("浙江箱业"))
+                .findFirst().orElseThrow();
+        @SuppressWarnings("unchecked")
+        var reasons = (List<Map<String, String>>) rejected.get("exclusion_reasons");
+
+        assertThat(rejected.get("eligible")).isEqualTo(false);
+        assertThat(reasons).extracting(item -> item.get("code")).contains("spec_height_mm");
+    }
+
+    @Test
+    void failsClosedWhenRequirementMaterialIsNotRecognized() {
+        var specs = new LinkedHashMap<String, Object>();
+        specs.put("width_mm", "250");
+        specs.put("length_mm", "350");
+        specs.put("thickness_um", "60");
+        specs.put("material", "HDPE");
+        specs.put("color", "白色");
+        specs.put("print_colors", 1);
+        var task = ProcurementTask.structured(
+                1, "测试采购", "ecommerce_packaging", "快递袋",
+                new BigDecimal("10000"), "piece", specs,
+                Map.of(
+                        "base_currency", "CNY", "fx_rates", Map.of("CNY", "1"),
+                        "max_lead_days", 15, "invoice_required", true,
+                        "size_tolerance_mm", "2", "thickness_tolerance_um", "3"));
+        var quote = quote(
+                "华东优包", "520", "1000", "0.13", true, "0", true,
+                "5000", "7", true, "250", "350", "60", "PE", "white");
+
+        var result = engine.compare(task, List.of(quote, quote(
+                "沪上包装", "0.48", "1", "0.13", false, "600", false,
+                "3000", "9", true, "250", "350", "60", "PE", "白色")));
+        @SuppressWarnings("unchecked")
+        var rows = (List<Map<String, Object>>) result.result().get("quotes");
+
+        assertThat(rows).allSatisfy(item -> {
+            @SuppressWarnings("unchecked")
+            var reasons = (List<Map<String, String>>) item.get("exclusion_reasons");
+            assertThat(reasons).extracting(map -> map.get("code")).contains("spec_material");
+            assertThat(reasons).anySatisfy(map -> assertThat(map.get("message")).contains("无法复核材质一致性"));
+        });
+    }
+
+    @Test
+    void failsClosedWhenRequirementItemIsNotRecognized() {
+        var task = ProcurementTask.structured(
+                1, "测试采购", "ecommerce_packaging", "定制包装",
+                new BigDecimal("10000"), "piece",
+                Map.of(
+                        "width_mm", "250", "length_mm", "350", "thickness_um", "60",
+                        "material", "PE", "color", "白色", "print_colors", 1),
+                Map.of(
+                        "base_currency", "CNY", "fx_rates", Map.of("CNY", "1"),
+                        "max_lead_days", 15, "invoice_required", true,
+                        "size_tolerance_mm", "2", "thickness_tolerance_um", "3"));
+        var quote = quote(
+                "华东优包", "520", "1000", "0.13", true, "0", true,
+                "5000", "7", true, "250", "350", "60", "PE", "white");
+
+        var result = engine.compare(task, List.of(quote, quote(
+                "沪上包装", "0.48", "1", "0.13", false, "600", false,
+                "3000", "9", true, "250", "350", "60", "PE", "白色")));
+        @SuppressWarnings("unchecked")
+        var rows = (List<Map<String, Object>>) result.result().get("quotes");
+
+        assertThat(rows).allSatisfy(item -> {
+            @SuppressWarnings("unchecked")
+            var reasons = (List<Map<String, String>>) item.get("exclusion_reasons");
+            assertThat(reasons).extracting(map -> map.get("code")).contains("item_identity");
+            assertThat(reasons).anySatisfy(map -> assertThat(map.get("message")).contains("无法复核物料一致性"));
+        });
+    }
+
+    private ProcurementQuote cartonV1Quote(String supplier, String price) {
+        var values = new LinkedHashMap<String, Object>();
+        values.put("supplier_name", supplier);
+        values.put("item_description", "五层瓦楞纸箱 400x300x250 mm");
+        values.put("currency", "CNY");
+        values.put("unit_price", price);
+        values.put("price_basis", "1");
+        values.put("tax_rate", "0");
+        values.put("tax_included", true);
+        values.put("shipping_fee", "0");
+        values.put("shipping_included", true);
+        values.put("moq", "1");
+        values.put("lead_time_days", "10");
+        values.put("supports_invoice", true);
+        values.put("width_mm", "400");
+        values.put("length_mm", "300");
+        values.put("height_mm", "250");
+        values.put("thickness_um", "5000");
+        values.put("material", "瓦楞纸");
+        values.put("color", "牛皮色");
+        values.put("print_colors", 1);
+        return createQuote(supplier, values, Map.of());
+    }
+
+    private Map<String, Object> mapFieldValues(ProcurementQuote quote) {
+        var values = new LinkedHashMap<String, Object>();
+        @SuppressWarnings("unchecked")
+        var fields = (Map<String, Object>) quote.getExtracted().get("fields");
+        fields.forEach((key, raw) -> {
+            @SuppressWarnings("unchecked")
+            var entry = (Map<String, Object>) raw;
+            values.put(key, entry.get("value"));
+        });
+        return values;
     }
 
     private ProcurementTask packagingTask() {
@@ -196,9 +357,30 @@ class ComparisonEngineTest {
             String thickness,
             String material,
             String color) {
+        return quote(supplier, price, basis, taxRate, taxIncluded, shipping, shippingIncluded,
+                moq, lead, invoice, width, length, thickness, material, color, "PE mailer 250x350mm 60um");
+    }
+
+    private ProcurementQuote quote(
+            String supplier,
+            String price,
+            String basis,
+            String taxRate,
+            boolean taxIncluded,
+            String shipping,
+            boolean shippingIncluded,
+            String moq,
+            String lead,
+            boolean invoice,
+            String width,
+            String length,
+            String thickness,
+            String material,
+            String color,
+            String description) {
         var values = new LinkedHashMap<String, Object>();
         values.put("supplier_name", supplier);
-        values.put("item_description", "PE mailer 250x350mm 60um");
+        values.put("item_description", description);
         values.put("currency", "CNY");
         values.put("unit_price", price);
         values.put("price_basis", basis);

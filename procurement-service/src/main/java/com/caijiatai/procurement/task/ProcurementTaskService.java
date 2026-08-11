@@ -136,6 +136,7 @@ public class ProcurementTaskService {
         payload.put("attachments", artifactPayload);
         var command = commands.save(AgentCommand.accept(
                 "start_conversation", task.getId(), task.getGeneration(), task.getVersion(), payload));
+            commands.alignTimestampsToDbClock(command.getOperationId());
         idempotency.save(IdempotencyRecord.reserve(scope, key, payloadSha, command.getOperationId()));
         audit.save(AuditEvent.create(
                 task.getId(), null, null, "procurement_conversation_accepted", operator,
@@ -172,6 +173,7 @@ public class ProcurementTaskService {
         var command = commands.save(AgentCommand.accept(
                 "create_structured", task.getId(), task.getGeneration(), task.getVersion(),
                 Map.of("task_id", task.getId(), "requirement", fingerprint)));
+            commands.alignTimestampsToDbClock(command.getOperationId());
         idempotency.save(IdempotencyRecord.reserve("structured_request", key, payloadSha, command.getOperationId()));
         audit.save(AuditEvent.create(
                 task.getId(), null, null, "structured_request_created", operator,
@@ -208,6 +210,7 @@ public class ProcurementTaskService {
                 "size_bytes", artifact.getSizeBytes());
         var command = commands.save(AgentCommand.accept(
                 "import_quote", taskId, task.getGeneration(), task.getVersion(), payload));
+            commands.alignTimestampsToDbClock(command.getOperationId());
         idempotency.save(IdempotencyRecord.reserve("quote_import", key, payloadSha, command.getOperationId()));
         audit.save(AuditEvent.create(
                 taskId, null, task.getAnalysisRunId(), "quote_import_accepted", operator,
@@ -281,6 +284,7 @@ public class ProcurementTaskService {
         task.setStatus(TaskStatus.ANALYZING);
         var command = commands.save(AgentCommand.accept(
                 "analyze", taskId, task.getGeneration(), task.getVersion(), payload));
+            commands.alignTimestampsToDbClock(command.getOperationId());
         idempotency.save(IdempotencyRecord.reserve("analyze", key, requestSha, command.getOperationId()));
         audit.save(AuditEvent.create(
                 taskId, null, task.getAnalysisRunId(), "analysis_accepted", operator,
@@ -307,6 +311,7 @@ public class ProcurementTaskService {
         }
         var command = commands.save(AgentCommand.accept(
                 "resume_run", taskId, task.getGeneration(), task.getVersion(), payload));
+            commands.alignTimestampsToDbClock(command.getOperationId());
         idempotency.save(IdempotencyRecord.reserve("resume_run", key, payloadSha, command.getOperationId()));
         audit.save(AuditEvent.create(
                 taskId, null, task.getAnalysisRunId(), "agent_resume_accepted", operator,
@@ -360,6 +365,7 @@ public class ProcurementTaskService {
         var command = commands.save(AgentCommand.accept(
                 "reopen_task", reopened.getId(), reopened.getGeneration(), reopened.getVersion(),
                 Map.of("source_task_id", taskId, "copy_quotes", body.copyQuotes())));
+            commands.alignTimestampsToDbClock(command.getOperationId());
         idempotency.save(IdempotencyRecord.reserve("reopen", key, payloadSha, command.getOperationId()));
         audit.save(AuditEvent.create(
                 reopened.getId(), null, null, "task_reopened", operator,
@@ -511,6 +517,82 @@ public class ProcurementTaskService {
                 }
             });
         }
+        if (!"ecommerce_packaging".equals(value.category())) {
+            throw bad("invalid_category", "当前采购域仅支持 ecommerce_packaging");
+        }
+        if (!"piece".equals(value.unit())) {
+            throw bad("invalid_unit", "当前采购域仅支持 piece 计价单位");
+        }
+        if (value.quantity().compareTo(new BigDecimal("100000000")) > 0) {
+            throw bad("invalid_quantity", "采购数量不得超过 1 亿");
+        }
+        var specs = value.specifications();
+        positiveDecimal(specs.get("width_mm"), "宽度", new BigDecimal("10000"));
+        positiveDecimal(specs.get("length_mm"), "长度", new BigDecimal("10000000"));
+        positiveDecimal(specs.get("thickness_um"), "厚度", new BigDecimal("5000"));
+        if (specs.get("print_colors") != null) {
+            int printColors = integerValue(specs.get("print_colors"), "印刷色数");
+            if (printColors < 0 || printColors > 12) {
+                throw bad("invalid_print_colors", "印刷色数必须在 0 到 12 之间");
+            }
+        }
+        if (specs.containsKey("height_mm")) {
+            positiveDecimal(specs.get("height_mm"), "高度", new BigDecimal("10000"));
+        } else if (requiresHeight(value.itemName())) {
+            throw bad("invalid_specifications", "纸箱采购规格必须提供高度 height_mm");
+        }
+        var constraints = value.constraints();
+        if (constraints.sizeToleranceMm() != null) {
+            rangeDecimal(constraints.sizeToleranceMm(), "尺寸公差", BigDecimal.ZERO, new BigDecimal("100"));
+        }
+        if (constraints.thicknessToleranceUm() != null) {
+            rangeDecimal(constraints.thicknessToleranceUm(), "厚度公差", BigDecimal.ZERO, new BigDecimal("5000"));
+        }
+        if (constraints.maxLandedUnitCost() != null && constraints.maxLandedUnitCost().signum() <= 0) {
+            throw bad("invalid_constraints", "到货单价上限必须大于 0");
+        }
+    }
+
+    private void positiveDecimal(Object value, String label, BigDecimal max) {
+        if (value == null || String.valueOf(value).isBlank()) {
+            throw bad("invalid_specifications", "缺少规格字段：" + label);
+        }
+        try {
+            var number = new BigDecimal(String.valueOf(value));
+            if (number.signum() <= 0) {
+                throw bad("invalid_specifications", label + "必须大于 0");
+            }
+            if (number.compareTo(max) > 0) {
+                throw bad("invalid_specifications", label + "超过上限 " + max.toPlainString());
+            }
+        } catch (NumberFormatException error) {
+            throw bad("invalid_specifications", label + "不是有效数值");
+        }
+    }
+
+    private void rangeDecimal(BigDecimal value, String label, BigDecimal min, BigDecimal max) {
+        if (value.compareTo(min) < 0 || value.compareTo(max) > 0) {
+            throw bad("invalid_constraints", label + "必须在 " + min.toPlainString() + " 到 " + max.toPlainString() + " 之间");
+        }
+    }
+
+    private int integerValue(Object value, String label) {
+        try {
+            return new BigDecimal(String.valueOf(value)).intValueExact();
+        } catch (RuntimeException error) {
+            throw bad("invalid_" + label, label + "必须是整数");
+        }
+    }
+
+    private boolean requiresHeight(String itemName) {
+        var text = itemName == null ? "" : itemName.toLowerCase(Locale.ROOT);
+        if (text.contains("胶带") || text.matches(".*\\btape\\b.*")) {
+            return false;
+        }
+        if (List.of("纸箱", "包装箱", "carton", "corrugated").stream().anyMatch(text::contains)) {
+            return true;
+        }
+        return text.matches(".*\\bbox(?:es)?\\b.*") && !text.contains("tape");
     }
 
     private void putDecimal(Map<String, Object> result, String key, BigDecimal value) {
