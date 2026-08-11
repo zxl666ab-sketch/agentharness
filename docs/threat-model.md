@@ -60,3 +60,11 @@ PostgreSQL 与 Java Artifact 卷保存当前采购业务；Python Runtime 卷只
 - 本地单用户边界不提供登录、RBAC、多租户或恶意本机用户隔离。
 
 可重复的路径/审批逃逸、重复采购决定、Java/Python 双业务真值或未授权远程入口均阻断发布。
+
+## 0.5.0 变更（Java/Python 分栈 + Kafka）
+
+- 内部 HTTP + `X-Agent-Internal-Token` 已删除；Java 与 Python 之间只经 Kafka，消息带 HMAC-SHA256 签名与 `payload_sha256` 校验，防伪造/篡改/重放（幂等键防重放）。
+- Kafka 凭据与 vhost/ACL 最小权限：正式 Compose 使用 SASL/SCRAM（`compose.kafka-sasl.yml` 覆盖）；本地 PLAINTEXT 仅限开发。
+- 业务与运行时 MySQL 双 schema：Flyway（Java）与 Python 迁移脚本各自管理，禁止交叉建表；`.env`、密钥、数据卷不得提交。
+- Web→Java 仅 `127.0.0.1:8741`；Host 校验 + 非安全方法同源校验保留；SSE 只从 Java 投影读取，不暴露 Python。
+- 事件流丢失不影响业务真值：Python 持久化 + `list_events` RPC 重放；`global_seq` 唯一索引防重复投影。

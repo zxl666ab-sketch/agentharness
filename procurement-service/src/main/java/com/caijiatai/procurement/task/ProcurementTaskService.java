@@ -11,6 +11,7 @@ import com.caijiatai.procurement.approval.PendingDecisionRepository;
 import com.caijiatai.procurement.approval.ProcurementDecisionRepository;
 import com.caijiatai.procurement.artifact.ArtifactStore;
 import com.caijiatai.procurement.artifact.BusinessArtifactRepository;
+import com.caijiatai.procurement.cache.TaskContextCache;
 import com.caijiatai.procurement.artifact.ProcurementAttachment;
 import com.caijiatai.procurement.artifact.ProcurementAttachmentRepository;
 import com.caijiatai.procurement.comparison.ComparisonSnapshotRepository;
@@ -58,6 +59,7 @@ public class ProcurementTaskService {
     private final ArtifactStore artifactStore;
     private final BusinessArtifactRepository businessArtifacts;
     private final TaskViewMapper views;
+    private final TaskContextCache contextCache;
     private final String operator;
 
     public ProcurementTaskService(
@@ -74,6 +76,7 @@ public class ProcurementTaskService {
             ArtifactStore artifactStore,
             BusinessArtifactRepository businessArtifacts,
             TaskViewMapper views,
+            TaskContextCache contextCache,
             AppProperties properties) {
         this.tasks = tasks;
         this.attachments = attachments;
@@ -88,6 +91,7 @@ public class ProcurementTaskService {
         this.artifactStore = artifactStore;
         this.businessArtifacts = businessArtifacts;
         this.views = views;
+        this.contextCache = contextCache;
         this.operator = properties.localOperator();
     }
 
@@ -178,6 +182,7 @@ public class ProcurementTaskService {
         audit.save(AuditEvent.create(
                 task.getId(), null, null, "structured_request_created", operator,
                 Map.of("operation_id", command.getOperationId())));
+        contextCache.evict(task.getId());
         return detail(task.getId());
     }
 
@@ -204,6 +209,7 @@ public class ProcurementTaskService {
                 "procurement_original", taskId, loaded.filename(), loaded.contentType(),
                 new ByteArrayInputStream(loaded.bytes()), Map.of("source", "quote_import"));
         attachments.save(ProcurementAttachment.from(taskId, artifact));
+        contextCache.evict(taskId);
         var payload = Map.<String, Object>of(
                 "artifact_id", artifact.getId(), "filename", artifact.getFilename(),
                 "sha256", artifact.getSha256(), "content_type", artifact.getContentType(),
@@ -222,6 +228,7 @@ public class ProcurementTaskService {
     public Map<String, Object> correctQuote(
             String taskId, String quoteId, ProcurementDtos.QuoteCorrection body) {
         var task = lockTask(taskId);
+        contextCache.evict(taskId);
         var quote = quotes.findByIdAndTaskId(quoteId, taskId)
                 .orElseThrow(() -> notFound("quote_not_found", "未找到报价"));
         var fields = map(quote.getExtracted().get("fields"));
@@ -243,6 +250,7 @@ public class ProcurementTaskService {
     @Transactional
     public Map<String, Object> correctRequirement(String taskId, ProcurementDtos.Requirement body) {
         var task = lockTask(taskId);
+        contextCache.evict(taskId);
         validateRequirement(body);
         task.applyRequirement(
                 body.schemaVersion(), body.title().strip(), body.category().strip(), body.itemName().strip(),
@@ -259,6 +267,7 @@ public class ProcurementTaskService {
     @Transactional
     public ProcurementDtos.OperationAccepted analyze(String taskId, String idempotencyKey) {
         var task = lockTask(taskId);
+        contextCache.evict(taskId);
         if (!task.isRequirementConfirmed()) {
             throw conflict("requirement_review_required", "采购需求必须先由采购员保存确认");
         }
@@ -388,19 +397,26 @@ public class ProcurementTaskService {
     @Transactional(readOnly = true)
     public Map<String, Object> detail(String taskId) {
         var task = tasks.findById(taskId).orElseThrow(() -> notFound("task_not_found", "未找到采购任务"));
+        var cached = contextCache.get(taskId, task.getGeneration());
+        if (cached.isPresent()) {
+            return cached.get();
+        }
         var current = task.getCurrentSnapshotId() == null ? null
                 : snapshots.findByIdAndTaskId(task.getCurrentSnapshotId(), taskId).orElse(null);
-        return views.detail(
+        var value = views.detail(
                 task,
                 attachments.findByTaskIdOrderByCreatedAtAsc(taskId),
                 quotes.findByTaskIdOrderByCreatedAtAsc(taskId),
                 current,
                 decisions.findByTaskId(taskId).orElse(null));
+        contextCache.put(taskId, task.getGeneration(), value);
+        return value;
     }
 
     @Transactional
     public void delete(String taskId) {
         var task = lockTask(taskId);
+        contextCache.evict(taskId);
         var reference = task.getReference();
         tasks.delete(task);
     }

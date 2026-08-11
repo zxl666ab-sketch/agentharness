@@ -1,0 +1,63 @@
+# Kafka SASL/SCRAM 加固覆盖（正式环境启用；默认 compose.yaml 使用 PLAINTEXT 便于本地开发）
+# 用法：docker compose -f compose.yaml -f compose.kafka-sasl.yml up -d --build
+services:
+  kafka:
+    environment:
+      KAFKA_LISTENERS: SASL_PLAINTEXT://0.0.0.0:9092,CONTROLLER://127.0.0.1:9093
+      KAFKA_ADVERTISED_LISTENERS: SASL_PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT
+      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-256
+      KAFKA_INTER_BROKER_LISTENER_NAME: SASL_PLAINTEXT
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: SCRAM-SHA-256
+      KAFKA_SUPER_USERS: User:admin
+      KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/secrets/kafka_jaas.conf
+    volumes:
+      - ./deploy/kafka-secrets/kafka_jaas.conf:/etc/kafka/secrets/kafka_jaas.conf:ro
+  kafka-init:
+    environment:
+      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-256
+      KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/secrets/kafka_jaas.conf
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_ADMIN_USER: admin
+      KAFKA_ADMIN_PASSWORD: admin-secret
+    volumes:
+      - ./deploy/kafka-secrets/kafka_jaas.conf:/etc/kafka/secrets/kafka_jaas.conf:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        # 创建 SCRAM 用户（java-svc / python-agent）与最小权限 ACL
+        for user in java-svc:java-secret python-agent:python-secret; do
+          u=$${user%%:*}; p=$${user#*:}
+          /opt/kafka/bin/kafka-configs.sh --bootstrap-server $${KAFKA_BOOTSTRAP} --alter             --add-config "SCRAM-SHA-256=[password=$$p]" --entity-type users --entity-name $$u
+        done
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server $${KAFKA_BOOTSTRAP} --create --if-not-exists --topic caijiatai.commands --partitions 3 --replication-factor 1
+        for t in caijiatai.results caijiatai.rpc.requests caijiatai.rpc.responses caijiatai.events caijiatai.commands.dlq caijiatai.results.dlq caijiatai.events.dlq; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server $${KAFKA_BOOTSTRAP} --create --if-not-exists --topic $$t --partitions 1 --replication-factor 1
+        done
+        # ACL：java-svc 写 commands/rpc.responses，读 results/rpc.requests/events；python-agent 相反
+        for topic in caijiatai.commands caijiatai.rpc.responses caijiatai.commands.dlq caijiatai.rpc.responses.dlq; do
+          /opt/kafka/bin/kafka-acls.sh --bootstrap-server $${KAFKA_BOOTSTRAP} --add --allow-principal User:java-svc --operation Write --topic $$topic
+        done
+        for topic in caijiatai.results caijiatai.rpc.requests caijiatai.events caijiatai.results.dlq caijiatai.events.dlq; do
+          /opt/kafka/bin/kafka-acls.sh --bootstrap-server $${KAFKA_BOOTSTRAP} --add --allow-principal User:java-svc --operation Read --topic $$topic
+          /opt/kafka/bin/kafka-acls.sh --bootstrap-server $${KAFKA_BOOTSTRAP} --add --allow-principal User:java-svc --operation Read --group java-svc
+          /opt/kafka/bin/kafka-acls.sh --bootstrap-server $${KAFKA_BOOTSTRAP} --add --allow-principal User:java-svc --operation Read --group java-svc-events
+          /opt/kafka/bin/kafka-acls.sh --bootstrap-server $${KAFKA_BOOTSTRAP} --add --allow-principal User:java-svc --operation Read --group java-svc-rpc
+        done
+        for topic in caijiatai.results caijiatai.rpc.requests caijiatai.events caijiatai.results.dlq caijiatai.events.dlq; do
+          /opt/kafka/bin/kafka-acls.sh --bootstrap-server $${KAFKA_BOOTSTRAP} --add --allow-principal User:python-agent --operation Write --topic $$topic
+        done
+        for topic in caijiatai.commands caijiatai.rpc.responses caijiatai.commands.dlq; do
+          /opt/kafka/bin/kafka-acls.sh --bootstrap-server $${KAFKA_BOOTSTRAP} --add --allow-principal User:python-agent --operation Read --topic $$topic
+          /opt/kafka/bin/kafka-acls.sh --bootstrap-server $${KAFKA_BOOTSTRAP} --add --allow-principal User:python-agent --operation Read --group python-agent
+          /opt/kafka/bin/kafka-acls.sh --bootstrap-server $${KAFKA_BOOTSTRAP} --add --allow-principal User:python-agent --operation Read --group python-agent-rpc
+        done
+  agent:
+    environment:
+      AGENT_KAFKA_SASL_USERNAME: python-agent
+      AGENT_KAFKA_SASL_PASSWORD: ${AGENT_KAFKA_SASL_PASSWORD:-python-secret}
+  procurement:
+    environment:
+      KAFKA_SASL_USERNAME: java-svc
+      KAFKA_SASL_PASSWORD: ${KAFKA_SASL_PASSWORD:-java-secret}

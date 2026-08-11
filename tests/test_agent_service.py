@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import threading
-from concurrent.futures import Future
 from unittest.mock import MagicMock
 
 import pytest
