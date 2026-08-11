@@ -13,13 +13,13 @@ import org.springframework.transaction.annotation.Transactional;
 public class AgentOutboxWorker {
     private final AgentCommandRepository commands;
     private final ProcurementTaskRepository tasks;
-    private final AgentClient client;
+    private final AgentDispatcher client;
     private final AgentResultApplication resultApplication;
 
     public AgentOutboxWorker(
             AgentCommandRepository commands,
             ProcurementTaskRepository tasks,
-            AgentClient client,
+            AgentDispatcher client,
             AgentResultApplication resultApplication) {
         this.commands = commands;
         this.tasks = tasks;
@@ -33,6 +33,11 @@ public class AgentOutboxWorker {
         for (var command : commands.lockDispatchable(PageRequest.of(0, 10))) {
             command.dispatching();
             try {
+                if (client.isAsync()) {
+                    client.dispatch(command);
+                    command.published();
+                    continue;
+                }
                 var response = client.dispatch(command);
                 if (response.status() == 200) {
                     if ("failed".equals(response.body().get("status"))) {

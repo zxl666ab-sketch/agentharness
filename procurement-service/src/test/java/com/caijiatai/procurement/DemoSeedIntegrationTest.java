@@ -177,7 +177,7 @@ class DemoSeedIntegrationTest {
         var demoProperties = new AppProperties(
                 properties.localOperator(), properties.artifactRoot(), properties.agentBaseUrl(),
                 properties.agentInternalToken(), properties.allowedViteOrigin(), properties.developmentMode(),
-                properties.outbox(), properties.agentMode(), new AppProperties.DemoSeed(true, root));
+                properties.outbox(), properties.agentMode(), new AppProperties.DemoSeed(true, root), properties.internalHmacKey());
         var runner = new DemoSeedRunner(
                 demoProperties, taskService, tasks, quotes, artifactStore, audit, jdbc, mapper);
         runner.run(null);

@@ -1,6 +1,7 @@
 package com.caijiatai.procurement.agent;
 
 import com.caijiatai.procurement.config.AppProperties;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.springframework.http.MediaType;
@@ -10,7 +11,8 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
 @Component
-public class AgentClient {
+@ConditionalOnProperty(prefix = "app.agent", name = "mode", havingValue = "http", matchIfMissing = true)
+public class AgentClient implements AgentDispatcher {
     private final RestClient client;
     private final String token;
 

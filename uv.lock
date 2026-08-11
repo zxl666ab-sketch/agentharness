@@ -17,9 +17,11 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "jsonschema" },
+    { name = "kafka-python" },
     { name = "openai" },
     { name = "openpyxl" },
     { name = "pydantic" },
+    { name = "pymysql" },
     { name = "pypdf" },
     { name = "reportlab" },
     { name = "uvicorn", extra = ["standard"] },
@@ -49,9 +51,11 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "jsonschema", specifier = ">=4.23" },
+    { name = "kafka-python", specifier = ">=2.0.2" },
     { name = "openai", specifier = ">=1.40" },
     { name = "openpyxl", specifier = ">=3.1" },
     { name = "pydantic", specifier = ">=2.7" },
+    { name = "pymysql", specifier = ">=1.1" },
     { name = "pypdf", specifier = ">=5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
@@ -558,6 +562,15 @@ wheels = [
 ]
 
 [[package]]
+name = "kafka-python"
+version = "3.0.10"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2b/1a/828be30211d0c78d02a7b3bd6dd36d6cc39539693600960315d41192bd5e/kafka_python-3.0.10.tar.gz", hash = "sha256:06950fed5e705ec5207458ca6ae43b6c0ae1de4146ddbf7877f42a893830100c", size = 513160, upload-time = "2026-08-04T23:44:15.106Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/87/e1/23a30f129281533f14c09616f3182dee952eaf70d62c2342387b888d9047/kafka_python-3.0.10-py3-none-any.whl", hash = "sha256:9b2597f194009dcab8f7207ce9a15d59cb5d30bf5aa742fea69dffbd2866b2d1", size = 614240, upload-time = "2026-08-04T23:44:12.336Z" },
+]
+
+[[package]]
 name = "openai"
 version = "2.46.0"
 source = { registry = "https://pypi.org/simple" }
@@ -815,6 +828,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c3/b2/bc9c9196916376152d655522fdcebac55e66de6603a76a02bca1b6414f6c/pygments-2.20.0.tar.gz", hash = "sha256:6757cd03768053ff99f3039c1a36d6c0aa0b263438fcab17520b30a303a82b5f", size = 4955991, upload-time = "2026-03-29T13:29:33.898Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f4/7e/a72dd26f3b0f4f2bf1dd8923c85f7ceb43172af56d63c7383eb62b332364/pygments-2.20.0-py3-none-any.whl", hash = "sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176", size = 1231151, upload-time = "2026-03-29T13:29:30.038Z" },
+]
+
+[[package]]
+name = "pymysql"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c9/bc/1c6a92f385940f727daeecf3bacaf186e03875dff57197801046c583bcf0/pymysql-1.2.0.tar.gz", hash = "sha256:6c7b17ca686988104d7426c27895b455cdeea3e9d3ceb1270f0c3704fead8c33", size = 49021, upload-time = "2026-05-19T08:26:22.302Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c4/bd/2534e130295c8cfd4f0a2e31623baab7502278f1e97bcfe61db75656a77f/pymysql-1.2.0-py3-none-any.whl", hash = "sha256:62169ce6d5510f08e140c5e7990ee884a9764024e4a9a27b2cc11f1099322ae0", size = 45716, upload-time = "2026-05-19T08:26:20.974Z" },
 ]
 
 [[package]]

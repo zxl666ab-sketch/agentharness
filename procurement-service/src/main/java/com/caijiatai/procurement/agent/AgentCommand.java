@@ -40,6 +40,8 @@ public class AgentCommand {
     private Instant acceptedAt;
     @Column(name = "completed_at")
     private Instant completedAt;
+    @Column(name = "published_at")
+    private Instant publishedAt;
     @Column(name = "last_error", length = 1000)
     private String lastError;
     @JdbcTypeCode(SqlTypes.JSON)
@@ -90,6 +92,7 @@ public class AgentCommand {
     public Instant getNextAttemptAt() { return nextAttemptAt; }
     public Instant getAcceptedAt() { return acceptedAt; }
     public Instant getCompletedAt() { return completedAt; }
+    public Instant getPublishedAt() { return publishedAt; }
     public String getLastError() { return lastError; }
     public Map<String, Object> getResult() { return result; }
 
@@ -103,6 +106,13 @@ public class AgentCommand {
         this.result = result == null ? null : new LinkedHashMap<>(result);
         lastError = null;
         nextAttemptAt = Instant.now().plusSeconds(1);
+    }
+
+    public void published() {
+        status = "published";
+        publishedAt = Instant.now();
+        lastError = null;
+        nextAttemptAt = Instant.now();
     }
 
     public void complete(Map<String, Object> result) {

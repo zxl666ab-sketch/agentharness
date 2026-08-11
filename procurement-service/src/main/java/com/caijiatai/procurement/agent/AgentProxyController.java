@@ -19,12 +19,15 @@ public final class AgentProxyController {
     private final RuntimeProxyService proxy;
     private final AppProperties properties;
     private final tools.jackson.databind.ObjectMapper mapper;
+    private final com.caijiatai.procurement.api.EventStreamService eventStream;
 
     public AgentProxyController(RuntimeProxyService proxy, AppProperties properties,
-            tools.jackson.databind.ObjectMapper mapper) {
+            tools.jackson.databind.ObjectMapper mapper,
+            com.caijiatai.procurement.api.EventStreamService eventStream) {
         this.proxy = proxy;
         this.properties = properties;
         this.mapper = mapper;
+        this.eventStream = eventStream;
     }
 
     @GetMapping("/api/runtime")
@@ -32,7 +35,7 @@ public final class AgentProxyController {
 
     @GetMapping("/api/procurement/config")
     ResponseEntity<byte[]> procurementConfig() {
-        if ("demo".equals(properties.agentMode())) {
+        if ("demo".equals(properties.agentMode()) || "kafka".equals(properties.agentMode())) {
             return json(defaultDemoConfig());
         }
         return proxy.get("/internal/v1/config");
@@ -40,7 +43,7 @@ public final class AgentProxyController {
 
     @PostMapping("/api/procurement/config")
     ResponseEntity<byte[]> updateProcurementConfig(@RequestBody byte[] body) {
-        if ("demo".equals(properties.agentMode())) {
+        if ("demo".equals(properties.agentMode()) || "kafka".equals(properties.agentMode())) {
             return json(defaultDemoConfig());
         }
         return proxy.post("/internal/v1/config", body);
@@ -115,8 +118,16 @@ public final class AgentProxyController {
     }
 
     @GetMapping("/api/stream")
-    void stream(HttpServletRequest request, HttpServletResponse response) {
+    Object stream(HttpServletRequest request, HttpServletResponse response) {
+        if ("kafka".equals(properties.agentMode())) {
+            var after = 0L;
+            if (request.getParameter("after") != null) {
+                after = Long.parseLong(request.getParameter("after"));
+            }
+            return eventStream.stream(after);
+        }
         proxy.stream(request.getQueryString(), request.getHeader("Last-Event-ID"), response);
+        return null;
     }
 
     private String id(String value) {
