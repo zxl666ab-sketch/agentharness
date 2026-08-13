@@ -40,11 +40,13 @@ public final class KafkaRpcServer {
     private final ArtifactStore artifactStore;
     private final RuntimeEventRepository events;
     private final TaskViewMapper views;
+    private final ReferencePriceService referencePrices;
 
     public KafkaRpcServer(KafkaTemplate<String, byte[]> kafka, AppProperties properties,
             ProcurementTaskRepository tasks, ProcurementQuoteRepository quotes,
             BusinessArtifactRepository artifacts, ArtifactStore artifactStore,
-            RuntimeEventRepository events, TaskViewMapper views) {
+            RuntimeEventRepository events, TaskViewMapper views,
+            ReferencePriceService referencePrices) {
         this.kafka = kafka;
         this.hmacKey = properties.internalHmacKey();
         this.tasks = tasks;
@@ -53,6 +55,7 @@ public final class KafkaRpcServer {
         this.artifactStore = artifactStore;
         this.events = events;
         this.views = views;
+        this.referencePrices = referencePrices;
     }
 
     @KafkaListener(topics = REQUESTS_TOPIC, groupId = "java-svc-rpc")
@@ -73,6 +76,7 @@ public final class KafkaRpcServer {
                 case "get_task_context" -> taskContext(envelope);
                 case "get_artifact" -> artifact(envelope);
                 case "list_events" -> listEvents(envelope);
+                case "get_reference_prices" -> referencePrices(envelope);
                 default -> throw new ApiException(HttpStatus.BAD_REQUEST, "unknown_rpc_kind", "未知 RPC 类型");
             };
         } catch (ApiException apiError) {
@@ -126,6 +130,14 @@ public final class KafkaRpcServer {
         value.put("size_bytes", artifact.getSizeBytes());
         value.put("base64", Base64.getEncoder().encodeToString(bytes));
         return value;
+    }
+
+    private Map<String, Object> referencePrices(Map<String, Object> envelope) {
+        var payload = map(envelope.get("payload"));
+        return referencePrices.referencePrices(
+                text(payload.get("task_id")),
+                text(payload.get("item_name")),
+                text(payload.get("category")));
     }
 
     private Map<String, Object> listEvents(Map<String, Object> envelope) {

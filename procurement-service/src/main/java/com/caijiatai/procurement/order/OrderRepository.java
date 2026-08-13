@@ -24,4 +24,6 @@ public interface OrderRepository extends JpaRepository<PurchaseOrder, String> {
     List<PurchaseOrder> findByStatusAndUpdatedAtBefore(String status, java.time.Instant before);
 
     long countByStatus(String status);
+
+    java.util.List<PurchaseOrder> findAllByLandedTotalNotNullOrderByCreatedAtDesc();
 }

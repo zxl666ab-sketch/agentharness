@@ -837,6 +837,7 @@ class AgentService:
         })
         sequence = 1
         context: dict[str, Any] = {}
+        reference_interval: dict[str, Any] | None = None
         for step, started_progress, finished_progress, summary in steps:
             self._emit_ai_step(
                 envelope, task_id, run_id, step, "RUNNING", started_progress, sequence, summary
@@ -845,11 +846,26 @@ class AgentService:
             if step == "ARTIFACT_FETCH":
                 fetched = self.rpc.call("get_task_context", {"task_id": task_id})
                 context = fetched if isinstance(fetched, dict) else {}
+                # K5 历史报价 RAG：参考区间为软提示（冻结设计 4.10）——
+                # RPC 失败/样本不足时静默降级，不参与排序、不排除报价、不影响评测。
+                try:
+                    reference = self.rpc.call(
+                        "get_reference_prices",
+                        {
+                            "task_id": task_id,
+                            "item_name": str(context.get("item_name") or ""),
+                            "category": str(context.get("category") or ""),
+                        },
+                    )
+                    interval = reference.get("interval") if isinstance(reference, dict) else None
+                    reference_interval = interval if isinstance(interval, dict) else None
+                except Exception:
+                    reference_interval = None
             self._emit_ai_step(
                 envelope, task_id, run_id, step, "SUCCEEDED", finished_progress, sequence, summary
             )
             sequence += 1
-        result = self._explanation_result(envelope, payload, context, run_id)
+        result = self._explanation_result(envelope, payload, context, run_id, reference_interval)
         self._emit("run_completed", task_id, run_id, {
             "operation_id": operation_id,
             "ai_task_id": envelope.get("ai_task_id"),
@@ -863,8 +879,10 @@ class AgentService:
         payload: dict[str, Any],
         context: dict[str, Any],
         run_id: str,
+        reference_interval: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         from agentharness.procurement.parsing import PARSER_VERSION
+        from agentharness.procurement.reference_prices import apply_reference_interval
 
         quotes = context.get("quotes") if isinstance(context.get("quotes"), list) else []
         unresolved = sum(
@@ -901,16 +919,20 @@ class AgentService:
                 "source_count": len(sources),
                 "unresolved_field_count": unresolved,
             },
-            "structured_result": {
-                "schema_version": 1,
-                "summary": (
-                    f"已核对 {len(quotes)} 份报价的结构化输入与来源；"
-                    "金额、资格与排序由 Java 确定性规则计算。"
-                ),
-                "risk_flags": risk_flags,
-                "quote_count": len(quotes),
-                "unresolved_field_count": unresolved,
-            },
+            "structured_result": apply_reference_interval(
+                {
+                    "schema_version": 1,
+                    "summary": (
+                        f"已核对 {len(quotes)} 份报价的结构化输入与来源；"
+                        "金额、资格与排序由 Java 确定性规则计算。"
+                    ),
+                    "risk_flags": risk_flags,
+                    "quote_count": len(quotes),
+                    "unresolved_field_count": unresolved,
+                },
+                reference_interval,
+                quotes,
+            ),
             "sources": sources,
             "provider": provider,
             "model": model,

@@ -1,11 +1,13 @@
 package com.caijiatai.procurement.agent;
 
 import jakarta.servlet.http.HttpServletRequest;
+import com.caijiatai.procurement.api.ApiException;
 import com.caijiatai.procurement.config.AppProperties;
 import org.springframework.core.io.ClassPathResource;
 import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -89,6 +91,19 @@ public final class AgentProxyController {
         return ResponseEntity.ok()
                 .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
                 .body(frozenEvaluation);
+    }
+
+    @GetMapping("/api/procurement/evaluation-ext")
+    ResponseEntity<byte[]> procurementEvaluationExt() {
+        // K5 扩展评测：独立文件，冻结资源一个字节不动
+        try (var input = new ClassPathResource("frozen/frozen-evaluation-ext.json").getInputStream()) {
+            return ResponseEntity.ok()
+                    .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                    .body(input.readAllBytes());
+        } catch (IOException error) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "evaluation_ext_missing",
+                    "扩展评测资源不存在");
+        }
     }
 
     @GetMapping("/api/runs")

@@ -3,6 +3,75 @@ info:
   title: Caijiatai Java Procurement Internal API
   version: 0.4.0
   description: Narrow callback and artifact API used only by the Python Agent service.
+x-rpc-kinds:
+  get_reference_prices:
+    description: "K5 历史报价 RAG 数据真源：聚合历史已批准订单成交价，按物料名归一化匹配 + 品类兜底。"
+    request:
+      type: object
+      required: [task_id, item_name, category]
+      properties:
+        task_id: {type: string, pattern: '^[0-9a-f]{32}$'}
+        item_name: {type: string}
+        category: {type: string}
+    response:
+      type: object
+      required: [task_id, item_name, category, records, interval]
+      properties:
+        task_id: {type: string, pattern: '^[0-9a-f]{32}$'}
+        item_name: {type: string}
+        category: {type: string}
+        records:
+          type: array
+          items:
+            type: object
+            required: [task_id, reference, supplier_name, item_name, category, quantity, landed_total, landed_unit, created_at]
+            properties:
+              task_id: {type: string, pattern: '^[0-9a-f]{32}$'}
+              reference: {type: string}
+              supplier_name: {type: string}
+              item_name: {type: string}
+              category: {type: string}
+              quantity: {type: string}
+              landed_total: {type: string}
+              landed_unit: {type: string}
+              created_at: {type: string, format: date-time}
+        interval:
+          oneOf:
+            - type: object
+              required: [p25, p75, p25_unit, p75_unit, count, basis]
+              properties:
+                p25: {type: string}
+                p75: {type: string}
+                p25_unit: {type: string}
+                p75_unit: {type: string}
+                count: {type: integer, minimum: 3}
+                basis: {type: string, const: landed_total_base}
+            - {type: 'null'}
+  get_task_context:
+    description: Current authoritative task context for the Python Agent.
+    request:
+      type: object
+      required: [task_id]
+      properties:
+        task_id: {type: string, pattern: '^[0-9a-f]{32}$'}
+    response: {type: object}
+  get_artifact:
+    description: Original business artifact bytes (base64, up to 2MB).
+    request:
+      type: object
+      required: [artifact_id]
+      properties:
+        artifact_id: {type: string, pattern: '^jb[0-9a-f]{32}$'}
+    response: {type: object}
+  list_events:
+    description: Runtime events after a global sequence.
+    request:
+      type: object
+      required: [after_seq]
+      properties:
+        after_seq: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1, maximum: 100}
+    response: {type: object}
 servers:
   - url: http://procurement:8741
 security:

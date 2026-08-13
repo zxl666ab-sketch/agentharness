@@ -195,14 +195,14 @@ class DemoSeedIntegrationTest {
                 settlementRepository, jdbc, mapper);
         runner.run(null);
 
-        assertThat(tasks.count()).isEqualTo(4);
+        assertThat(tasks.count()).isEqualTo(6);
         var task = tasks.findAll().stream()
                 .filter(item -> item.getStatus().equals(TaskStatus.READY.wireValue()))
                 .findFirst().orElseThrow();
         assertThat(task.getStatus()).isEqualTo(TaskStatus.READY.wireValue());
         assertThat(task.getSessionId()).matches("[0-9a-f]{32}");
         assertThat(task.getAnalysisRunId()).matches("[0-9a-f]{32}");
-        assertThat(quotes.count()).isEqualTo(11);
+        assertThat(quotes.count()).isEqualTo(17);
         assertThat(quotes.findAll()).allSatisfy(quote -> {
             assertThat(quote.getStatus()).isEqualTo("ready");
             assertThat(quote.reviewFields()).isEmpty();
@@ -215,13 +215,13 @@ class DemoSeedIntegrationTest {
         });
         var artifactRows = jdbc.queryForList(
                 "select metadata from business_artifact where kind = 'procurement_original'");
-        assertThat(artifactRows).hasSize(11);
+        assertThat(artifactRows).hasSize(17);
         assertThat(artifactRows).allSatisfy(row ->
                 assertThat(String.valueOf(row.get("metadata"))).contains("\"synthetic\": true"));
 
         runner.run(null);
-        assertThat(tasks.count()).isEqualTo(4);
-        assertThat(quotes.count()).isEqualTo(11);
+        assertThat(tasks.count()).isEqualTo(6);
+        assertThat(quotes.count()).isEqualTo(17);
     }
 
     @Test
@@ -271,7 +271,7 @@ class DemoSeedIntegrationTest {
         var approved = tasks.findAll().stream()
                 .filter(item -> item.getStatus().equals(TaskStatus.APPROVED.wireValue()))
                 .toList();
-        assertThat(approved).hasSize(3);
+        assertThat(approved).hasSize(5);
         assertThat(approved).allSatisfy(task -> {
             assertThat(task.getCurrentSnapshotId()).isNotBlank();
             assertThat(task.getApprovedQuoteId()).isNotBlank();
@@ -280,8 +280,8 @@ class DemoSeedIntegrationTest {
             assertThat(decision.getActor()).isEqualTo("demo-seed");
             assertThat(decision.getQuoteId()).isEqualTo(task.getApprovedQuoteId());
         });
-        assertThat(decisions.count()).isEqualTo(3);
-        assertThat(pendingDecisions.count()).isEqualTo(3);
+        assertThat(decisions.count()).isEqualTo(5);
+        assertThat(pendingDecisions.count()).isEqualTo(5);
         assertThat(audit.findAll()).anySatisfy(event -> {
             assertThat(event.getEventType()).isEqualTo("demo_seed_approved");
             assertThat(event.getActor()).isEqualTo("demo-seed");
@@ -292,25 +292,25 @@ class DemoSeedIntegrationTest {
         var orderArtifacts = jdbc.queryForList(
                 "select kind, metadata from business_artifact "
                         + "where kind in ('purchase_order_draft', 'supplier_confirmation_email')");
-        assertThat(orderArtifacts).hasSize(6);
+        assertThat(orderArtifacts).hasSize(10);
         assertThat(orderArtifacts).allSatisfy(row ->
                 assertThat(String.valueOf(row.get("metadata"))).contains("\"synthetic\": true"));
-        // 订单与对账付款：3 张订单（SHIPPED/RECEIVED/RECEIVED）+ 2 张对账单（SETTLED/PAID）
-        assertThat(orderRepository.count()).isEqualTo(3);
+        // 订单与对账付款：5 张订单（4 RECEIVED + 1 SHIPPED）+ 4 张对账单（2 SETTLED + 2 PAID）
+        assertThat(orderRepository.count()).isEqualTo(5);
         var orderStatuses = jdbc.queryForList("select status from purchase_order").stream()
                 .map(row -> String.valueOf(row.get("status"))).sorted().toList();
-        assertThat(orderStatuses).containsExactly("RECEIVED", "RECEIVED", "SHIPPED");
-        assertThat(settlementRepository.count()).isEqualTo(2);
+        assertThat(orderStatuses).containsExactly("RECEIVED", "RECEIVED", "RECEIVED", "RECEIVED", "SHIPPED");
+        assertThat(settlementRepository.count()).isEqualTo(4);
         var settlementStatuses = jdbc.queryForList("select status from purchase_settlement").stream()
                 .map(row -> String.valueOf(row.get("status"))).sorted().toList();
-        assertThat(settlementStatuses).containsExactly("PAID", "SETTLED");
+        assertThat(settlementStatuses).containsExactly("PAID", "PAID", "SETTLED", "SETTLED");
         assertThat(audit.findAll()).anySatisfy(event ->
                 assertThat(event.getEventType()).isEqualTo("settlement_paid"));
         // 幂等：重复运行不产生重复的历史业务
         runner.run(null);
-        assertThat(tasks.count()).isEqualTo(4);
-        assertThat(decisions.count()).isEqualTo(3);
-        assertThat(orderRepository.count()).isEqualTo(3);
-        assertThat(settlementRepository.count()).isEqualTo(2);
+        assertThat(tasks.count()).isEqualTo(6);
+        assertThat(decisions.count()).isEqualTo(5);
+        assertThat(orderRepository.count()).isEqualTo(5);
+        assertThat(settlementRepository.count()).isEqualTo(4);
     }
 }

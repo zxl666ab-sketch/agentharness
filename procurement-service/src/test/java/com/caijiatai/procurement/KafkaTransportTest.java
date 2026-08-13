@@ -11,6 +11,7 @@ import com.caijiatai.procurement.agent.CanonicalJson;
 import com.caijiatai.procurement.agent.KafkaCommandPublisher;
 import com.caijiatai.procurement.agent.KafkaRpcServer;
 import com.caijiatai.procurement.agent.MessageCodec;
+import com.caijiatai.procurement.agent.ReferencePriceService;
 import com.caijiatai.procurement.agent.RuntimeEvent;
 import com.caijiatai.procurement.agent.RuntimeEventRepository;
 import com.caijiatai.procurement.artifact.ArtifactStore;
@@ -126,7 +127,8 @@ class KafkaTransportTest {
                 mock(BusinessArtifactRepository.class),
                 mock(ArtifactStore.class),
                 events,
-                mock(TaskViewMapper.class));
+                mock(TaskViewMapper.class),
+                mock(ReferencePriceService.class));
 
         var correlationId = UUID.randomUUID().toString().replace("-", "");
         var payload = Map.<String, Object>of("after_seq", 0L, "limit", 10);

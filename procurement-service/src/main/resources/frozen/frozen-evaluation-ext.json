@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "extension": "reference-price-interval",
+  "description": "K5 历史报价 RAG 参考区间提示格式（v1 扩展）。仅覆盖参考区间提示格式；参考区间是软提示，只进入比价解释文本与风险 flag，不参与确定性比价排序、不排除报价、不影响冻结评测指标（冻结资源 frozen-evaluation.json 一个字节不动）。",
+  "frozen_truth_sha256": "63647f520bff1ab20e9215cc65e1b246a6f27fcf88cdb226fe7eae72fd6c1ffb",
+  "cases": [
+    {
+      "id": "ref-interval-001",
+      "description": "样本充足（>=3）时给出 p25/p75 参考区间",
+      "input_landed_totals": ["7500.00", "9400.00", "9540.00"],
+      "expect": {
+        "interval": {"p25": "7500.00", "p75": "9400.00", "count": 3, "basis": "landed_total_base"}
+      }
+    },
+    {
+      "id": "ref-interval-002",
+      "description": "样本不足（<3）时区间为 null（不下结论）",
+      "input_landed_totals": ["7500.00", "9600.00"],
+      "expect": {"interval": null}
+    },
+    {
+      "id": "ref-interval-003",
+      "description": "区间作为新增可选字段注入 AI 结构化结果，软提示风险 flag",
+      "structured_result_hint": {
+        "reference_price_interval": {
+          "p25": "7500.00",
+          "p75": "9400.00",
+          "count": 3,
+          "basis": "landed_total_base"
+        },
+        "risk_flags": ["PRICE_BELOW_REFERENCE"]
+      }
+    }
+  ]
+}
