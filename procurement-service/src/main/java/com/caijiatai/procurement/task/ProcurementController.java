@@ -1,10 +1,14 @@
 package com.caijiatai.procurement.task;
 
 import jakarta.validation.Valid;
+import com.caijiatai.procurement.api.ApiException;
 import com.caijiatai.procurement.approval.ApprovalService;
+import com.caijiatai.procurement.cache.DecisionLock;
+import com.caijiatai.procurement.cache.InsightsCache;
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -24,10 +28,18 @@ import org.springframework.web.multipart.MultipartFile;
 public class ProcurementController {
     private final ProcurementTaskService service;
     private final ApprovalService approvals;
+    private final DecisionLock decisionLock;
+    private final InsightsCache insightsCache;
 
-    public ProcurementController(ProcurementTaskService service, ApprovalService approvals) {
+    public ProcurementController(
+            ProcurementTaskService service,
+            ApprovalService approvals,
+            DecisionLock decisionLock,
+            InsightsCache insightsCache) {
         this.service = service;
         this.approvals = approvals;
+        this.decisionLock = decisionLock;
+        this.insightsCache = insightsCache;
     }
 
     @PostMapping(path = "/conversations", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
@@ -66,7 +78,9 @@ public class ProcurementController {
             @PathVariable String taskId,
             @RequestPart("file") MultipartFile file,
             @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey) {
-        return accepted(service.uploadQuote(taskId, file, idempotencyKey));
+        var accepted = service.uploadQuote(taskId, file, idempotencyKey);
+        insightsCache.evictAll();
+        return accepted(accepted);
     }
 
     @PostMapping("/requests/{taskId}/quotes/{quoteId}/corrections")
@@ -74,14 +88,18 @@ public class ProcurementController {
             @PathVariable String taskId,
             @PathVariable String quoteId,
             @Valid @RequestBody ProcurementDtos.QuoteCorrection body) {
-        return service.correctQuote(taskId, quoteId, body);
+        var value = service.correctQuote(taskId, quoteId, body);
+        insightsCache.evictAll();
+        return value;
     }
 
     @PutMapping("/requests/{taskId}/requirement")
     public Map<String, Object> correctRequirement(
             @PathVariable String taskId,
             @Valid @RequestBody ProcurementDtos.Requirement body) {
-        return service.correctRequirement(taskId, body);
+        var value = service.correctRequirement(taskId, body);
+        insightsCache.evictAll();
+        return value;
     }
 
     @PostMapping("/requests/{taskId}/analyze")
@@ -112,18 +130,28 @@ public class ProcurementController {
             @PathVariable String taskId,
             @Valid @RequestBody ProcurementDtos.Decision body,
             @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey) {
-        var result = approvals.request(taskId, body, idempotencyKey);
-        if (result.decision() != null) {
-            return ResponseEntity.ok(Map.of(
-                    "request_id", taskId,
-                    "decision_id", result.decision().getId(),
-                    "status", result.decision().getDecision()));
+        // K4 三层防护之分布式锁（冻结设计 4.9）：只加在 Controller 层，不碰冻结的 ApprovalService。
+        // 幂等表防重放；乐观锁防版本覆盖；本锁防并发双写（两个不同请求同时发起 pending_decision）。
+        var lock = decisionLock.acquire(taskId);
+        if (lock.isEmpty()) {
+            throw new ApiException(HttpStatus.CONFLICT, "decision_lock_held",
+                    "同一任务的审批正在处理中，请勿重复提交");
         }
-        var command = result.command();
-        var value = new ProcurementDtos.OperationAccepted(
-                command.getOperationId(), taskId, null, result.pending().getRunId(), "accepted",
-                "/api/procurement/operations/" + command.getOperationId());
-        return accepted(value);
+        try (var handle = lock.get()) {
+            var result = approvals.request(taskId, body, idempotencyKey);
+            insightsCache.evictAll();
+            if (result.decision() != null) {
+                return ResponseEntity.ok(Map.of(
+                        "request_id", taskId,
+                        "decision_id", result.decision().getId(),
+                        "status", result.decision().getDecision()));
+            }
+            var command = result.command();
+            var value = new ProcurementDtos.OperationAccepted(
+                    command.getOperationId(), taskId, null, result.pending().getRunId(), "accepted",
+                    "/api/procurement/operations/" + command.getOperationId());
+            return accepted(value);
+        }
     }
 
     private ResponseEntity<ProcurementDtos.OperationAccepted> accepted(

@@ -1,5 +1,6 @@
 package com.caijiatai.procurement.supplier;
 
+import com.caijiatai.procurement.cache.InsightsCache;
 import java.util.Map;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -16,9 +17,11 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/procurement/suppliers")
 public final class SupplierController {
     private final SupplierService suppliers;
+    private final InsightsCache insightsCache;
 
-    public SupplierController(SupplierService suppliers) {
+    public SupplierController(SupplierService suppliers, InsightsCache insightsCache) {
         this.suppliers = suppliers;
+        this.insightsCache = insightsCache;
     }
 
     @GetMapping
@@ -32,18 +35,23 @@ public final class SupplierController {
 
     @PostMapping
     public Map<String, Object> create(@RequestBody SupplierDtos.SaveRequest body) {
-        return suppliers.create(body);
+        var value = suppliers.create(body);
+        insightsCache.evictAll();
+        return value;
     }
 
     @PutMapping("/{id}")
     public Map<String, Object> update(
             @PathVariable String id, @RequestBody SupplierDtos.SaveRequest body) {
-        return suppliers.update(id, body);
+        var value = suppliers.update(id, body);
+        insightsCache.evictAll();
+        return value;
     }
 
     @DeleteMapping("/{id}")
     public void delete(@PathVariable String id) {
         suppliers.delete(id);
+        insightsCache.evictAll();
     }
 
     @GetMapping("/{id}/profile")

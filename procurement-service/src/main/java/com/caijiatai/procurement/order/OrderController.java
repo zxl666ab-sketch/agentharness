@@ -1,5 +1,6 @@
 package com.caijiatai.procurement.order;
 
+import com.caijiatai.procurement.cache.InsightsCache;
 import com.caijiatai.procurement.config.AppProperties;
 import com.caijiatai.procurement.settlement.SettlementService;
 import java.math.BigDecimal;
@@ -19,14 +20,17 @@ import org.springframework.web.bind.annotation.RestController;
 public final class OrderController {
     private final OrderService orders;
     private final SettlementService settlements;
+    private final InsightsCache insightsCache;
     private final String operator;
 
     public OrderController(
             OrderService orders,
             SettlementService settlements,
+            InsightsCache insightsCache,
             AppProperties properties) {
         this.orders = orders;
         this.settlements = settlements;
+        this.insightsCache = insightsCache;
         this.operator = properties.localOperator();
     }
 
@@ -54,13 +58,15 @@ public final class OrderController {
     @PostMapping("/orders/{id}/transition")
     public Map<String, Object> transitionOrder(
             @PathVariable String id, @RequestBody OrderTransitionRequest body) {
-        return orders.transition(
+        var value = orders.transition(
                 id,
                 body.action(),
                 body.received_quantity(),
                 body.arrival_date(),
                 body.notes(),
                 operator);
+        insightsCache.evictAll();
+        return value;
     }
 
     @GetMapping("/settlements")
@@ -79,6 +85,8 @@ public final class OrderController {
     @PostMapping("/settlements/{id}/transition")
     public Map<String, Object> transitionSettlement(
             @PathVariable String id, @RequestBody SettlementTransitionRequest body) {
-        return settlements.transition(id, body.action(), body.paid_at(), body.notes(), operator);
+        var value = settlements.transition(id, body.action(), body.paid_at(), body.notes(), operator);
+        insightsCache.evictAll();
+        return value;
     }
 }
