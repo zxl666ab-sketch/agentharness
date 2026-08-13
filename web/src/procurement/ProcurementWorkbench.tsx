@@ -38,6 +38,7 @@ import { ReportView } from "./ReportView";
 import { ReviewCenter } from "./ReviewCenter";
 import { RequirementReview } from "./RequirementReview";
 import { readRole, ROLE_LABELS, type DemoRole, writeRole } from "./roles";
+import { OrderCenter } from "./OrderCenter";
 import { SupplierCenter } from "./SupplierCenter";
 import { WorkbenchHome } from "./WorkbenchHome";
 import { WorkbenchNavigation } from "./WorkbenchNavigation";
@@ -782,6 +783,8 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
             />
           ) : view === "suppliers" ? (
             <SupplierCenter onOpenTask={openTask} />
+          ) : view === "orders" ? (
+            <OrderCenter />
           ) : showCreate || (!selectedId && !detail) ? (
             <NewProcurementConversation
               busy={busy === "conversation"}

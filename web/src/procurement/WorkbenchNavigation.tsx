@@ -3,6 +3,7 @@ import {
   ClipboardCheck,
   LayoutDashboard,
   ListTodo,
+  ShoppingCart,
   Users,
 } from "lucide-react";
 
@@ -21,6 +22,7 @@ const PROCUREMENT_ITEMS = [
   { id: "workbench" as const, label: "工作台", icon: LayoutDashboard },
   { id: "tasks" as const, label: "采购任务", icon: ListTodo },
   { id: "suppliers" as const, label: "供应商管理", icon: Users },
+  { id: "orders" as const, label: "采购订单", icon: ShoppingCart },
   { id: "ai" as const, label: "AI 任务", icon: Bot },
   { id: "reviews" as const, label: "人工审核", icon: ClipboardCheck },
 ];

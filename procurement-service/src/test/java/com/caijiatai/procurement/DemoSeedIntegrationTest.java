@@ -60,6 +60,10 @@ class DemoSeedIntegrationTest {
     @Autowired ComparisonService comparison;
     @Autowired PendingDecisionRepository pendingDecisions;
     @Autowired ProcurementDecisionRepository decisions;
+    @Autowired com.caijiatai.procurement.order.OrderService orderService;
+    @Autowired com.caijiatai.procurement.order.OrderRepository orderRepository;
+    @Autowired com.caijiatai.procurement.settlement.SettlementService settlementService;
+    @Autowired com.caijiatai.procurement.settlement.SettlementRepository settlementRepository;
     @Autowired AppProperties properties;
     @Autowired ObjectMapper mapper;
 
@@ -187,7 +191,8 @@ class DemoSeedIntegrationTest {
                 properties.outbox(), properties.agentMode(), new AppProperties.DemoSeed(true, root), properties.internalHmacKey());
         var runner = new DemoSeedRunner(
                 demoProperties, taskService, tasks, quotes, artifactStore, audit,
-                comparison, pendingDecisions, decisions, jdbc, mapper);
+                comparison, pendingDecisions, decisions, orderService, settlementService,
+                settlementRepository, jdbc, mapper);
         runner.run(null);
 
         assertThat(tasks.count()).isEqualTo(4);
@@ -259,7 +264,8 @@ class DemoSeedIntegrationTest {
                 properties.outbox(), properties.agentMode(), new AppProperties.DemoSeed(true, root), properties.internalHmacKey());
         var runner = new DemoSeedRunner(
                 demoProperties, taskService, tasks, quotes, artifactStore, audit,
-                comparison, pendingDecisions, decisions, jdbc, mapper);
+                comparison, pendingDecisions, decisions, orderService, settlementService,
+                settlementRepository, jdbc, mapper);
         runner.run(null);
 
         var approved = tasks.findAll().stream()
@@ -289,9 +295,22 @@ class DemoSeedIntegrationTest {
         assertThat(orderArtifacts).hasSize(6);
         assertThat(orderArtifacts).allSatisfy(row ->
                 assertThat(String.valueOf(row.get("metadata"))).contains("\"synthetic\": true"));
+        // 订单与对账付款：3 张订单（SHIPPED/RECEIVED/RECEIVED）+ 2 张对账单（SETTLED/PAID）
+        assertThat(orderRepository.count()).isEqualTo(3);
+        var orderStatuses = jdbc.queryForList("select status from purchase_order").stream()
+                .map(row -> String.valueOf(row.get("status"))).sorted().toList();
+        assertThat(orderStatuses).containsExactly("RECEIVED", "RECEIVED", "SHIPPED");
+        assertThat(settlementRepository.count()).isEqualTo(2);
+        var settlementStatuses = jdbc.queryForList("select status from purchase_settlement").stream()
+                .map(row -> String.valueOf(row.get("status"))).sorted().toList();
+        assertThat(settlementStatuses).containsExactly("PAID", "SETTLED");
+        assertThat(audit.findAll()).anySatisfy(event ->
+                assertThat(event.getEventType()).isEqualTo("settlement_paid"));
         // 幂等：重复运行不产生重复的历史业务
         runner.run(null);
         assertThat(tasks.count()).isEqualTo(4);
         assertThat(decisions.count()).isEqualTo(3);
+        assertThat(orderRepository.count()).isEqualTo(3);
+        assertThat(settlementRepository.count()).isEqualTo(2);
     }
 }

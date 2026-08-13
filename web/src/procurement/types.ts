@@ -561,6 +561,83 @@ export type SupplierProfile = {
   updated_at: string;
 };
 
+export type OrderStatus = "PENDING_SHIPMENT" | "SHIPPED" | "RECEIVED" | "CLOSED";
+export type SettlementStatus = "UNSETTLED" | "SETTLED" | "PAID";
+
+export type OrderArtifact = {
+  id: string;
+  kind: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  sha256: string;
+  created_at: string;
+};
+
+export type OrderSettlement = {
+  id: string;
+  settlement_no: string;
+  total_amount: string;
+  status: SettlementStatus;
+  paid_at: string | null;
+  notes: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OrderView = {
+  id: string;
+  task_id: string;
+  order_no: string;
+  supplier_name: string;
+  item_name: string;
+  quantity: string;
+  unit: string;
+  landed_total: string | null;
+  status: OrderStatus;
+  received_quantity: string | null;
+  arrival_date: string | null;
+  notes: string | null;
+  version: number;
+  task_reference: string | null;
+  task_title: string | null;
+  artifacts: OrderArtifact[];
+  settlement: OrderSettlement | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OrderPage = {
+  items: OrderView[];
+  page: number;
+  size: number;
+  total: number;
+};
+
+export type SettlementView = {
+  id: string;
+  order_id: string;
+  settlement_no: string;
+  supplier_name: string;
+  total_amount: string;
+  status: SettlementStatus;
+  paid_at: string | null;
+  notes: string | null;
+  version: number;
+  order_no: string | null;
+  task_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SettlementPage = {
+  items: SettlementView[];
+  page: number;
+  size: number;
+  total: number;
+};
+
 export type ProcurementAuditReport = {
   schema_version: number;
   evidence_sha256: string;

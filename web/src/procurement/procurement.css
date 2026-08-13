@@ -1094,3 +1094,49 @@
 .proc-quote-list small { overflow: hidden; color: var(--text-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .proc-muted { color: var(--text-muted); font-size: 10px; }
 .proc-supplier-profile h4 { margin: 10px 0 2px; color: var(--text-muted); font-size: 10px; }
+
+/* ---------- K2 采购订单 / K8 对账付款 ---------- */
+.proc-page-count { color: var(--text-muted); font-size: var(--text-xs); }
+.proc-filter-chip { height: 30px; padding: 0 12px; border: 1px solid var(--border); border-radius: 15px; background: var(--surface); color: var(--text-secondary); font-size: 11px; cursor: pointer; }
+.proc-filter-chip:hover { border-color: var(--border-strong); color: var(--text); }
+.proc-filter-chip.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+.proc-toolbar-error { color: var(--danger); font-size: 11px; }
+.proc-order-list { min-height: 0; flex: 1; overflow: auto; padding: 16px 22px; }
+.proc-order-card { margin-bottom: 12px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-xs); }
+.proc-order-card > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.proc-order-title { display: grid; min-width: 0; gap: 3px; }
+.proc-order-title code { color: var(--accent); font-size: 11px; }
+.proc-order-title strong { font-size: var(--text-sm); }
+.proc-order-title small { overflow: hidden; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.proc-order-facts { display: grid; gap: 10px; margin: 12px 0; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.proc-order-facts > span { display: grid; gap: 2px; }
+.proc-order-facts small { color: var(--text-muted); font-size: 9px; }
+.proc-order-facts strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.proc-order-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.proc-settlement-inline { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 14px; background: var(--accent-softer); color: var(--accent); font-size: 10px; font-weight: 650; }
+.proc-settlement-inline.muted { background: var(--surface-subtle); color: var(--text-muted); }
+.proc-link-button { border: 0; background: transparent; color: var(--accent); font-size: 10px; font-weight: 700; cursor: pointer; text-decoration: underline; }
+.proc-link-button:disabled { color: var(--text-muted); cursor: default; }
+.proc-order-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.proc-order-footer small { color: var(--text-muted); font-size: 9px; }
+.proc-artifact-link { display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-secondary); font-size: 10px; text-decoration: none; }
+.proc-artifact-link:hover { border-color: var(--accent); color: var(--accent); }
+.proc-settlement-section { padding: 14px 22px 20px; border-top: 1px solid var(--border); background: var(--surface-subtle); }
+.proc-settlement-section > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.proc-settlement-section > header > div { display: flex; align-items: center; gap: 7px; }
+.proc-settlement-section > header h3 { margin: 0; font-size: var(--text-xs); }
+.proc-settlement-section > header span { color: var(--text-muted); font-size: 9px; }
+.proc-settlement-table { display: grid; gap: 6px; }
+.proc-settlement-row { display: grid; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); grid-template-columns: minmax(120px, 1fr) minmax(120px, 1.2fr) 110px 70px auto auto 70px; }
+.proc-settlement-row code { color: var(--text-muted); font-size: 10px; }
+.proc-settlement-row span { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.proc-settlement-row strong { font-family: var(--mono); font-size: 11px; }
+.proc-settlement-row i { font-size: 10px; font-style: normal; font-weight: 700; }
+.proc-settlement-row i.warning { color: var(--warning); }
+.proc-settlement-row i.info { color: var(--info); }
+.proc-settlement-row i.success { color: var(--accent); }
+.proc-settlement-row small { color: var(--text-muted); font-size: 9px; }
+@media (max-width: 1100px) {
+  .proc-settlement-row { grid-template-columns: minmax(110px, 1fr) minmax(100px, 1fr) 100px 64px auto; }
+  .proc-order-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

@@ -56,6 +56,143 @@
       "type": "string",
       "enum": ["ACTIVE", "PAUSED", "BLACKLISTED"]
     },
+    "OrderStatus": {
+      "type": "string",
+      "enum": ["PENDING_SHIPMENT", "SHIPPED", "RECEIVED", "CLOSED"]
+    },
+    "OrderAction": {
+      "type": "string",
+      "enum": ["ship", "receive", "close"]
+    },
+    "SettlementStatus": {
+      "type": "string",
+      "enum": ["UNSETTLED", "SETTLED", "PAID"]
+    },
+    "SettlementAction": {
+      "type": "string",
+      "enum": ["settle", "pay"]
+    },
+    "OrderArtifactView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "filename", "content_type", "size_bytes", "sha256", "created_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "type": "string" },
+        "filename": { "type": "string" },
+        "content_type": { "type": "string" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/Sha256" },
+        "created_at": { "$ref": "#/$defs/DateTime" }
+      }
+    },
+    "OrderSettlementView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "settlement_no", "total_amount", "status", "version", "created_at", "updated_at"],
+      "properties": {
+        "id": { "$ref": "#/$defs/Id32" },
+        "settlement_no": { "type": "string" },
+        "total_amount": { "type": "string" },
+        "status": { "$ref": "#/$defs/SettlementStatus" },
+        "paid_at": { "type": ["string", "null"], "format": "date-time" },
+        "notes": { "type": ["string", "null"] },
+        "version": { "type": "integer", "minimum": 0 },
+        "created_at": { "$ref": "#/$defs/DateTime" },
+        "updated_at": { "$ref": "#/$defs/DateTime" }
+      }
+    },
+    "OrderView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "task_id",
+        "order_no",
+        "supplier_name",
+        "item_name",
+        "quantity",
+        "unit",
+        "status",
+        "version",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/Id32" },
+        "task_id": { "$ref": "#/$defs/Id32" },
+        "order_no": { "type": "string" },
+        "supplier_name": { "type": "string" },
+        "item_name": { "type": "string" },
+        "quantity": { "type": "string" },
+        "unit": { "type": "string" },
+        "landed_total": { "type": ["string", "null"] },
+        "status": { "$ref": "#/$defs/OrderStatus" },
+        "received_quantity": { "type": ["string", "null"] },
+        "arrival_date": { "type": ["string", "null"], "format": "date-time" },
+        "notes": { "type": ["string", "null"] },
+        "version": { "type": "integer", "minimum": 0 },
+        "task_reference": { "type": ["string", "null"] },
+        "task_title": { "type": ["string", "null"] },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/OrderArtifactView" } },
+        "settlement": {
+          "oneOf": [{ "$ref": "#/$defs/OrderSettlementView" }, { "type": "null" }]
+        },
+        "created_at": { "$ref": "#/$defs/DateTime" },
+        "updated_at": { "$ref": "#/$defs/DateTime" }
+      }
+    },
+    "OrderTransitionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action"],
+      "properties": {
+        "action": { "$ref": "#/$defs/OrderAction" },
+        "received_quantity": { "type": ["string", "null"] },
+        "arrival_date": { "type": ["string", "null"], "format": "date-time" },
+        "notes": { "type": ["string", "null"] }
+      }
+    },
+    "SettlementView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "order_id",
+        "settlement_no",
+        "supplier_name",
+        "total_amount",
+        "status",
+        "version",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/Id32" },
+        "order_id": { "$ref": "#/$defs/Id32" },
+        "settlement_no": { "type": "string" },
+        "supplier_name": { "type": "string" },
+        "total_amount": { "type": "string" },
+        "status": { "$ref": "#/$defs/SettlementStatus" },
+        "paid_at": { "type": ["string", "null"], "format": "date-time" },
+        "notes": { "type": ["string", "null"] },
+        "version": { "type": "integer", "minimum": 0 },
+        "order_no": { "type": ["string", "null"] },
+        "task_id": { "type": ["string", "null"] },
+        "created_at": { "$ref": "#/$defs/DateTime" },
+        "updated_at": { "$ref": "#/$defs/DateTime" }
+      }
+    },
+    "SettlementTransitionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action"],
+      "properties": {
+        "action": { "$ref": "#/$defs/SettlementAction" },
+        "paid_at": { "type": ["string", "null"], "format": "date-time" },
+        "notes": { "type": ["string", "null"] }
+      }
+    },
     "SupplierPerformance": {
       "type": "object",
       "additionalProperties": false,

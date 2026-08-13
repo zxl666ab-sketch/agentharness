@@ -191,6 +191,83 @@ paths:
             application/json:
               schema: {$ref: './procurement-workbench.schema.json#/$defs/SupplierProfileView'}
         '404': {description: Unknown supplier.}
+  /api/procurement/orders:
+    get:
+      operationId: listOrders
+      parameters:
+        - name: status
+          in: query
+          schema: {$ref: './procurement-workbench.schema.json#/$defs/OrderStatus'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Paged purchase orders. Approved-task orders are lazily derived before querying.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OrderPage'}
+  /api/procurement/orders/{orderId}:
+    get:
+      operationId: getOrder
+      parameters: [{$ref: '#/components/parameters/OrderId'}]
+      responses:
+        '200':
+          description: Order detail with artifacts and settlement.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/OrderView'}
+        '404': {description: Unknown order.}
+  /api/procurement/orders/{orderId}/transition:
+    post:
+      operationId: transitionOrder
+      parameters: [{$ref: '#/components/parameters/OrderId'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: './procurement-workbench.schema.json#/$defs/OrderTransitionRequest'}
+      responses:
+        '200':
+          description: Order after transition (ship/receive/close).
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/OrderView'}
+        '400': {description: Missing receive fields or invalid action.}
+        '404': {description: Unknown order.}
+        '409': {description: Illegal transition, over-receipt, missing landed cost, or version conflict.}
+  /api/procurement/settlements:
+    get:
+      operationId: listSettlements
+      parameters:
+        - name: status
+          in: query
+          schema: {$ref: './procurement-workbench.schema.json#/$defs/SettlementStatus'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Paged settlements derived from received orders.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SettlementPage'}
+  /api/procurement/settlements/{settlementId}/transition:
+    post:
+      operationId: transitionSettlement
+      parameters: [{$ref: '#/components/parameters/SettlementId'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: './procurement-workbench.schema.json#/$defs/SettlementTransitionRequest'}
+      responses:
+        '200':
+          description: Settlement after transition (settle/pay).
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/SettlementView'}
+        '400': {description: Missing paid_at or invalid action.}
+        '404': {description: Unknown settlement.}
+        '409': {description: Illegal transition or version conflict.}
 components:
   parameters:
     BusinessId:
@@ -238,7 +315,37 @@ components:
       in: path
       required: true
       schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+    SettlementId:
+      name: settlementId
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[0-9a-f]{32}$'}
   schemas:
+    OrderPage:
+      type: object
+      required: [items, page, size, total]
+      properties:
+        items:
+          type: array
+          items: {$ref: './procurement-workbench.schema.json#/$defs/OrderView'}
+        page: {type: integer, minimum: 0}
+        size: {type: integer, minimum: 1}
+        total: {type: integer, minimum: 0}
+    SettlementPage:
+      type: object
+      required: [items, page, size, total]
+      properties:
+        items:
+          type: array
+          items: {$ref: './procurement-workbench.schema.json#/$defs/SettlementView'}
+        page: {type: integer, minimum: 0}
+        size: {type: integer, minimum: 1}
+        total: {type: integer, minimum: 0}
     SupplierPage:
       type: object
       required: [items, page, size, total]

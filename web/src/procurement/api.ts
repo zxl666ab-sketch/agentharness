@@ -17,6 +17,12 @@ import type {
   ReviewDetail,
   ReviewPage,
   ReviewStatus,
+  OrderPage,
+  OrderStatus,
+  OrderView,
+  SettlementPage,
+  SettlementStatus,
+  SettlementView,
   SupplierPage,
   SupplierProfile,
   SupplierSaveRequest,
@@ -286,4 +292,28 @@ export const procurementApi = {
     }),
   supplierProfile: (id: string) =>
     requestJson<SupplierProfile>(`/api/procurement/suppliers/${id}/profile`),
+  orders: (status?: OrderStatus, page = 0, size = 50) => {
+    const query = new URLSearchParams({ page: String(page), size: String(size) });
+    if (status) query.set("status", status);
+    return requestJson<OrderPage>(`/api/procurement/orders?${query}`);
+  },
+  order: (id: string) => requestJson<OrderView>(`/api/procurement/orders/${id}`),
+  transitionOrder: (
+    id: string,
+    input: {
+      action: "ship" | "receive" | "close";
+      received_quantity?: string | null;
+      arrival_date?: string | null;
+      notes?: string | null;
+    }
+  ) => postJson<OrderView>(`/api/procurement/orders/${id}/transition`, input),
+  settlements: (status?: SettlementStatus, page = 0, size = 50) => {
+    const query = new URLSearchParams({ page: String(page), size: String(size) });
+    if (status) query.set("status", status);
+    return requestJson<SettlementPage>(`/api/procurement/settlements?${query}`);
+  },
+  transitionSettlement: (
+    id: string,
+    input: { action: "settle" | "pay"; paid_at?: string | null; notes?: string | null }
+  ) => postJson<SettlementView>(`/api/procurement/settlements/${id}/transition`, input),
 };

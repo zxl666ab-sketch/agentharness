@@ -8,10 +8,15 @@ import com.caijiatai.procurement.approval.ProcurementDecisionRepository;
 import com.caijiatai.procurement.artifact.ArtifactStore;
 import com.caijiatai.procurement.comparison.ComparisonService;
 import com.caijiatai.procurement.config.AppProperties;
+import com.caijiatai.procurement.order.OrderService;
+import com.caijiatai.procurement.order.PurchaseOrder;
 import com.caijiatai.procurement.quote.ProcurementQuote;
 import com.caijiatai.procurement.quote.ProcurementQuoteRepository;
 import com.caijiatai.procurement.report.AuditEvent;
 import com.caijiatai.procurement.report.AuditEventRepository;
+import com.caijiatai.procurement.settlement.PurchaseSettlement;
+import com.caijiatai.procurement.settlement.SettlementRepository;
+import com.caijiatai.procurement.settlement.SettlementService;
 import com.caijiatai.procurement.task.ProcurementDtos;
 import com.caijiatai.procurement.task.ProcurementTask;
 import com.caijiatai.procurement.task.ProcurementTaskRepository;
@@ -61,6 +66,9 @@ public class DemoSeedRunner implements ApplicationRunner {
     private final ComparisonService comparison;
     private final PendingDecisionRepository pendingDecisions;
     private final ProcurementDecisionRepository decisions;
+    private final OrderService orderService;
+    private final SettlementService settlementService;
+    private final SettlementRepository settlements;
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
 
@@ -74,6 +82,9 @@ public class DemoSeedRunner implements ApplicationRunner {
             ComparisonService comparison,
             PendingDecisionRepository pendingDecisions,
             ProcurementDecisionRepository decisions,
+            OrderService orderService,
+            SettlementService settlementService,
+            SettlementRepository settlements,
             JdbcTemplate jdbc,
             ObjectMapper mapper) {
         this.properties = properties;
@@ -85,6 +96,9 @@ public class DemoSeedRunner implements ApplicationRunner {
         this.comparison = comparison;
         this.pendingDecisions = pendingDecisions;
         this.decisions = decisions;
+        this.orderService = orderService;
+        this.settlementService = settlementService;
+        this.settlements = settlements;
         this.jdbc = jdbc;
         this.mapper = mapper;
     }
@@ -127,6 +141,7 @@ public class DemoSeedRunner implements ApplicationRunner {
     private void seedClosedLoopHistories() throws Exception {
         seedClosedLoopHistory(
                 "history-1-courier-mailer",
+                "settled",
                 "历史补货：快递袋（华东仓，已成交）",
                 "ecommerce_packaging",
                 "快递袋",
@@ -181,6 +196,7 @@ public class DemoSeedRunner implements ApplicationRunner {
                                 "payment_terms", "月结 30 天", "valid_until", "2099-12-31"))));
         seedClosedLoopHistory(
                 "history-2-bubble-wrap",
+                "shipped",
                 "历史补货：气泡膜（华南仓，已成交）",
                 "ecommerce_packaging",
                 "气泡膜",
@@ -235,6 +251,7 @@ public class DemoSeedRunner implements ApplicationRunner {
                                 "payment_terms", "月结 30 天", "valid_until", "2099-12-31"))));
         seedClosedLoopHistory(
                 "history-3-carton-tape",
+                "paid",
                 "历史补货：封箱胶带（出口仓，已成交）",
                 "ecommerce_packaging",
                 "封箱胶带",
@@ -292,10 +309,11 @@ public class DemoSeedRunner implements ApplicationRunner {
     /**
      * 将一套 synthetic 历史业务推进到审批闭环终态：
      * 创建任务 → 导入报价 → 确定性比价快照 → 直接落 approved 决策（demo-seed actor）→
-     * 生成订单草稿与供应商确认邮件工件（synthetic 标记）。
+     * 生成订单草稿与供应商确认邮件工件（synthetic 标记）→ 按阶段派生订单与对账付款记录。
      */
     private void seedClosedLoopHistory(
             String scenario,
+            String closedLoopStage,
             String title,
             String category,
             String itemName,
@@ -390,7 +408,35 @@ public class DemoSeedRunner implements ApplicationRunner {
                         "supplier_name", winnerName,
                         "landed_total_base", winnerCost(result, recommended),
                         "item_name", task.getItemName())));
+        task = tasks.findById(taskId).orElseThrow();
+        applyClosedLoopStage(task, closedLoopStage, scenario);
         log.info("历史业务种子已预置（审批闭环）：{}（成交 {}，{}）", scenario, winnerName, title);
+    }
+
+    /**
+     * 对 closed-loop 订单按演示阶段推进：shipped=已发货；settled=已收货+已对账；
+     * paid=已收货+已对账+已付款。全部经订单/对账状态机流转，demo-seed actor 写审计。
+     */
+    private void applyClosedLoopStage(ProcurementTask task, String stage, String scenario) {
+        var order = orderService.ensureOrderForApprovedTask(task);
+        if (order == null) {
+            return;
+        }
+        if ("shipped".equals(stage)) {
+            orderService.transition(order.getId(), "ship", null, null, null, "demo-seed");
+            return;
+        }
+        var receivedAt = Instant.parse("2026-07-20T08:00:00Z");
+        orderService.transition(order.getId(), "ship", null, null, null, "demo-seed");
+        orderService.transition(order.getId(), "receive", order.getQuantity(), receivedAt, null, "demo-seed");
+        var settlement = settlements.findByOrderId(order.getId()).orElseThrow();
+        if ("settled".equals(stage)) {
+            settlementService.transition(settlement.getId(), "settle", null, null, "demo-seed");
+            return;
+        }
+        settlementService.transition(settlement.getId(), "settle", null, null, "demo-seed");
+        settlementService.transition(settlement.getId(), "pay",
+                Instant.parse("2026-07-25T10:00:00Z"), "synthetic 演示付款", "demo-seed");
     }
 
     @SuppressWarnings("unchecked")
