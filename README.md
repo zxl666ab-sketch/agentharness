@@ -1,10 +1,12 @@
-# 采价台 · 采购询价与供应商比价
+# AI 智能采购平台（原采价台）· 采购询价、比价、审批、订单与供应商管理
 
-采价台是本地、自托管的采购决策工作台。采购员提交采购目标和多家 XLSX/文本型 PDF 报价，Python Agent 负责自然语言需求结构化、受限文档解析和受治理 Runtime；Java 负责采购业务状态、确定性比价、审批、审计与执行草稿。
+AI 智能采购平台是本地、自托管的采购决策工作台。采购员提交采购目标和多家 XLSX/文本型 PDF 报价，Python Agent 负责自然语言需求结构化、受限文档解析和受治理 Runtime；Java 负责采购业务状态、确定性比价、审批、订单生命周期、对账付款、供应商绩效、统计报表、审计与执行草稿。
 
 浏览器唯一入口是 [http://127.0.0.1:8741](http://127.0.0.1:8741)。
 
-![采价台三家报价比价与人工审批入口](docs/evidence/comparison.png)
+![AI 智能采购平台管理驾驶舱](docs/evidence/dashboard.png)
+
+采购任务详情（三家报价比价与人工审批入口）见 [docs/evidence/comparison.png](docs/evidence/comparison.png)。
 
 ## 冻结证据
 
@@ -18,6 +20,39 @@
 
 冻结数据是合成证据，不外推未知供应商版式或真实企业提效。完整脱敏证据见 [docs/evidence](docs/evidence/README.md)。
 
+## 面试官视角：3 分钟看懂架构与差异化
+
+> 一句话：**Java 业务主机 + Python Agent 微服务 + Kafka 可靠消息 + 确定性比价评测**，在此基础上补齐了传统 Java 项目的高频考点（状态机引擎、分布式锁、缓存、超时调度、并发派生）。
+
+```mermaid
+flowchart TB
+    subgraph Web["React 工作台（9 个视图 · 角色视角）"]
+        Dashboard["管理驾驶舱（待办中心）"]
+        Pages["供应商 / 订单 / 对账 / 报表 / 审计 / 系统信息"]
+    end
+    Web -->|"HTTP/SSE 仅 127.0.0.1:8741"| Java["Java 业务主机（Spring Boot 4.1 / Java 21）"]
+    Java --> MySQL["MySQL 8 caijiatai_business（Flyway V1–V11）"]
+    Java <--> Redis["Redis：上下文缓存 · 分布式锁 · 看板缓存"]
+    Java <-->|"Kafka（唯一通道）commands/results/rpc/events + DLQ"| Agent["Python Agent 微服务（解析 / 结构化 / RAG 软提示）"]
+    Agent --> Provider["LLM API"]
+
+    Java --> SM["注册式状态机引擎 StateMachineRegistry"]
+    SM --> OrderSM["订单状态机（K2）"]
+    SM --> SettleSM["对账状态机（K8）"]
+    Java --> Guard["三层防护：幂等表 / 乐观锁 / 分布式锁"]
+    Java --> Perf["供应商绩效模型（K1）"]
+    Java --> Insights["成本节约率口径（K3）"]
+```
+
+**六大面试考点速览**（详见 [docs/resume.md](docs/resume.md) 双语言项目描述）：
+
+1. **注册式通用状态机引擎（平台叙事）**：`platform/statemachine` 包定义状态/事件枚举 + 流转表 + 动作钩子，`StateMachineRegistry` 注册订单（PENDING_SHIPMENT→SHIPPED→RECEIVED→CLOSED）与对账（UNSETTLED→SETTLED→PAID）状态机；非法流转 409，并发由乐观锁兜底。新增业务只需注册自己的状态机——"平台可扩展"有代码证据。现有任务状态机为历史实现，不迁移（README 如实说明）。
+2. **三层防护各司其职**：幂等表防**重放**（同请求重复提交返回原结果）；乐观锁防**版本覆盖**（任务修正后旧审批失效，`version` 条件更新）；Redis 分布式锁防**并发双写**（`lock:decision:{taskId}` SETNX + 请求标识 + Lua 条件释放，10s TTL，Redis 不可用自动回退无锁路径）。被问"已有幂等为什么还要锁"：三层防的是三种不同故障。
+3. **惰性派生 tradeoff**：订单由已批准任务在查询时惰性派生（读接口带写副作用——反模式），权衡是**绝不触碰审批核心证据链**；`purchase_order.UNIQUE(task_id)` + `DuplicateKeyException` 幂等吞掉保证并发双请求只落一条。生产化可改为审批完成事件监听（README 注明）。
+4. **供应商绩效模型（冻结口径）**：绩效分实时派生不落表——中标率得分（0–60，报价 **<3 次按 0.5 折减**防新供应商虚高）+ 活跃度（min(20, 次数×2)）+ 合作状态（20/10/0）；**黑名单强制封顶 30**；等级映射 优质/良好/一般/待观察。BigDecimal 精确到 2 位。
+5. **成本节约率口径（保守）**：`(Σ预算单价×数量 − Σ批准到货总价) / Σ预算单价×数量`；预算取任务约束 `max_landed_unit_cost`（到货单价上限），**无预算任务不计入**，比例保留 4 位。被问"为什么用上限做分母"：保守口径，实际节约率不低于此值。
+6. **历史报价 RAG（软提示）**：Java RPC `get_reference_prices` 聚合历史已批准订单成交价（物料名归一化匹配 + 品类兜底，p25/p75，**不足 3 条返回 null**）；Python 注入 `reference_price_interval` 可选字段与异常价格风险 flag——**只进解释文本与风险标记，不参与比价排序、不排除报价、不影响冻结评测**；硬规则化与向量库（Milvus/BGE）为后续扩展。
+
 ## 架构（0.5.0：Java 业务主机 + Python Agent 微服务，Kafka 唯一通道）
 
 ```mermaid
@@ -27,18 +62,18 @@ flowchart LR
     Agent --> Provider["LLM API"]
     Java --> MySQL["MySQL 8 caijiatai_business"]
     Agent --> RuntimeDB["MySQL 8 caijiatai_runtime"]
-    Java <--> Redis["Redis 上下文缓存"]
-    Agent <--> Redis
+    Java <--> Redis["Redis 分布式锁 / 上下文与看板缓存"]
 ```
 
-- Java 是采购任务、附件、报价、人工修正、比价快照、待决审批、正式决定、业务审计、业务 Artifact、SSE 事件投影的唯一真源；可脱离 Python 独立运行（`APP_AGENT_MODE=demo`）。
-- Python Agent 是嵌入式微服务，只保留自然语言需求结构化、XLSX/PDF 文档解析、Provider 调用、Run/事件与运行时 MySQL；通过 Kafka 命令/结果/RPC/事件与 Java 通信。
-- 业务 Schema 只由 Java Flyway 创建（V1-V7），运行时 Schema 由 Python Agent 自建；禁止交叉建表。金额使用 `DECIMAL`/`BigDecimal`，时间使用 `DATETIME(6)`/`Instant`。
+- Java 是采购任务、附件、报价、人工修正、比价快照、待决审批、正式决定、供应商档案、采购订单、对账付款、统计报表、业务审计、业务 Artifact、SSE 事件投影的唯一真源；可脱离 Python 独立运行（`APP_AGENT_MODE=demo`）。
+- Python Agent 是嵌入式微服务，只保留自然语言需求结构化、XLSX/PDF 文档解析、历史成交参考区间软提示（RAG）、Provider 调用、Run/事件与运行时 MySQL；通过 Kafka 命令/结果/RPC/事件与 Java 通信。
+- 业务 Schema 只由 Java Flyway 创建（V1-V11：任务/报价/审批/审计 + 供应商 V8 + 订单 V9 + 对账 V10 + 审计通用业务定位 V11），运行时 Schema 由 Python Agent 自建；禁止交叉建表。金额使用 `DECIMAL`/`BigDecimal`，时间使用 `DATETIME(6)`/`Instant`。
 - Kafka 使用 KRaft 单节点：`caijiatai.commands/results/rpc.requests/rpc.responses/events` + 各 `*.dlq`；消息带 HMAC-SHA256 签名与 `payload_sha256`，双侧幂等。
-- 内部 HTTP 与 `X-Agent-Internal-Token` 已删除；Python 读取业务上下文/原件走 Kafka RPC（`get_task_context` / `get_artifact` / `list_events`）。
+- Python 读取业务上下文/原件走 Kafka RPC（`get_task_context` / `get_artifact` / `list_events` / `get_reference_prices`）。
+- 审计事件全量留痕：任务事件挂 `task_id`，供应商/订单/对账等业务事件挂 `business_type`/`business_id`（V11），全局审计页可按类型/操作人/业务对象筛选。
 - 历史 SQLite/PostgreSQL 数据不迁移，仅归档；Python Runtime 与业务库使用全新数据卷。
 
-详细设计见 [架构文档](docs/architecture.md)，安全边界见 [威胁模型](docs/threat-model.md)。
+详细设计见 [架构文档](docs/architecture.md)，升级设计与面试话术见 [平台升级设计](docs/platform-upgrade-design.md)，安全边界见 [威胁模型](docs/threat-model.md)。
 
 ## 采购闭环
 
@@ -50,9 +85,11 @@ flowchart LR
 - 规则推荐不会自动形成决定。批准或流标必须经 Harness 产生的一次性 Approval，并逐项绑定 Run、工具、任务版本、快照、输入哈希、决定、报价和备注哈希。
 - 需求或报价修正会原子失效当前快照与待决审批；迟到审批返回 stale approval，旧证据继续保留。
 - 批准后生成采购订单与供应商确认邮件两个 Java 业务 Artifact；流标不生成执行草稿，可复制需求并选择是否复制报价重新询价。
+- **订单闭环（K2/K8）**：已批准任务在订单页查询时惰性派生订单（幂等）；订单状态机 待发货→已发货→已收货→已关闭（待发货关闭=取消、已收货关闭=完成）；收货必填数量与日期且不得超收；收货自动派生对账单（缺到货总价时拒绝），对账状态机 未对账→已对账→已付款；发货/付款双超时调度（7 天，clock 注入可测，审计幂等去重）。
+- **供应商档案（K1）**：与报价/中标按名称自动关联；删除保护（有报价历史 409）；绩效评分实时派生（口径见上）。
+- **历史报价 RAG（K5）**：比价分析时经 Kafka RPC 获取同物料历史成交参考区间，注入解释文本与风险 flag（软提示，不参与比价）。
 - Java 采购报告与已投影的 Run 审计在 Python 不可用时仍可读取；实时 `/api/runtime` 可用性检查在心跳过期时返回结构化 503。
-- kafka/demo 模式下冻结评测面板由 Java 自带资源提供（`frozen-evaluation.json`，与 Python 冻结真值集同步，见 `scripts/export_frozen_evaluation.py`）。
-
+- kafka/demo 模式下冻结评测面板由 Java 自带资源提供（`frozen-evaluation.json`，与 Python 冻结真值集同步，见 `scripts/export_frozen_evaluation.py`）；K5 扩展用例在独立的 `frozen-evaluation-ext.json`（冻结资源一个字节不动）。
 
 ## 快速开始
 
@@ -75,7 +112,8 @@ docker compose ps
 
 - 只有 `127.0.0.1:8741` 映射到宿主机；MySQL/Redis/Kafka/Python Agent 只在 Compose 网络内可达。
 - Java readiness 只依赖 MySQL；`agent_status` 来自 Python 每 5s 的 `heartbeat.ping`（≤15s 为 up），不可用时降级为 down 而不影响业务。
-- 黄金演示：`APP_DEMO_SEED_ENABLED=true` 时 Java 启动预置 3 套合成场景（标记 synthetic），用 `APP_AGENT_MODE=demo` 可脱离 Python 走通全闭环。
+- 黄金演示：`APP_DEMO_SEED_ENABLED=true` 时 Java 启动预置合成场景与**5 套走完审批闭环的历史业务**（approved 决策 + 订单 + 部分收货/对账/付款 + 同物料多次成交供 RAG 参考区间演示），全部标记 synthetic、demo-seed actor 写审计；用 `APP_AGENT_MODE=demo` 可脱离 Python 走通全闭环。
+- 角色视角：右上角角色选择器（采购员/审批人/管理员，localStorage 持久化，纯前端演示视角，无登录鉴权）。
 - SASL/SCRAM 加固：`compose.kafka-sasl.yml`（cp-kafka）首次启动在 `kafka-storage format --add-scram` 预置 admin/java-svc/python-agent；已实测五服务 healthy、无凭据访问失败、全闭环通过。
 - 本地开发（不构建镜像）：先 `docker compose up -d mysql redis` 再 `docker compose -f compose.kafka.yml up -d` 起 Kafka；
   Java 用 `mvnw spring-boot:run`，Python 用 `uv run python -m agentharness.agent_service`（Agent 会读取仓库 `.env`，
@@ -97,6 +135,7 @@ docker compose ps
 | `APP_PORT` / `AGENT_PORT` | `8741` / `8742` |
 | `APP_AGENT_MODE` | `kafka`（默认生产形态）/ `demo`（脱离 Python 的合成闭环） |
 | `APP_DEMO_SEED_ENABLED` / `APP_DEMO_SEED_ROOT` | `false` / `output/procurement-scenarios` |
+| `APP_REDIS_ENABLED` | `false`（无锁/无缓存回退）/ `true`（分布式锁 + 看板缓存；不可用自动降级） |
 | `AGENTHARNESS_PROCUREMENT_PROVIDER` | `procurement_fake`（离线演示）或 `openai` |
 
 ## 模型配置
@@ -138,9 +177,17 @@ POST /api/procurement/requests/{id}/analyze
 POST /api/procurement/requests/{id}/decision
 POST /api/procurement/requests/{id}/reopen
 GET  /api/procurement/requests/{id}/report
+GET  /api/procurement/suppliers               # K1 供应商档案（列表/创建/更新/删除/档案聚合）
+GET  /api/procurement/orders                  # K2 采购订单（惰性派生 + 状态流转）
+POST /api/procurement/orders/{id}/transition
+GET  /api/procurement/settlements             # K8 对账单（列表/流转 settle/pay）
+POST /api/procurement/settlements/{id}/transition
+GET  /api/procurement/insights/*              # K3 报表：overview/trend/supplier-ranking/categories
+GET  /api/procurement/audit-events            # K6 全局审计（类型/操作人/业务对象/任务筛选）
+GET  /api/procurement/platform                # K6 系统信息（版本/组件/解析器/规则集/模型脱敏）
 ```
 
-`contracts/` 保存 Java/Python OpenAPI、Decimal 规范化、规范 JSON 字节与 SHA-256、31 份完整比价黄金契约。API Schema 为 11，Java、Python 和 Web 版本均为 0.5.0。
+`contracts/` 保存 Java/Python OpenAPI（含 Kafka RPC kinds 双语言契约）、Decimal 规范化、规范 JSON 字节与 SHA-256、31 份完整比价黄金契约。API Schema 为 14，Java、Python 和 Web 版本均为 0.5.0。
 
 ## 验证
 
@@ -161,7 +208,7 @@ Set-Location ..
 uv run python scripts/check_web_build_determinism.py
 ```
 
-完整阶段执行顺序见 [采购工作台重构总控](docs/procurement-workbench-refactor-plan.md)；Compose、故障和浏览器验收顺序见 [发布检查清单](docs/release-checklist.md)，现场演示见 [演示手册](docs/demo-playbook.md)。
+完整阶段执行顺序见 [采购工作台重构总控](docs/procurement-workbench-refactor-plan.md)；升级阶段与验收见 [平台升级设计](docs/platform-upgrade-design.md)；Compose、故障和浏览器验收顺序见 [发布检查清单](docs/release-checklist.md)，现场演示见 [演示手册](docs/demo-playbook.md)。
 
 ## License
 
