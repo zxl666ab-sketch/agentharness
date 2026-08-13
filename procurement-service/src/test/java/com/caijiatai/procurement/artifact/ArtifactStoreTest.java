@@ -23,8 +23,9 @@ class ArtifactStoreTest {
         var repository = mock(BusinessArtifactRepository.class);
         when(repository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         var properties = new AppProperties(
-                "采购员", temp, URI.create("http://127.0.0.1:8742"), "token",
-                URI.create("http://127.0.0.1:5173"), false, new AppProperties.Outbox(500), "http", null, "test-hmac-key");
+                "采购员", temp, URI.create("http://127.0.0.1:5173"), false,
+                new AppProperties.Outbox(500), "kafka", null,
+                "test-hmac-key-for-artifact-store-0123456789abcdef");
         var store = new ArtifactStore(properties, repository);
         var artifact = store.store(
                 "procurement_original", "task", "quote.xlsx",

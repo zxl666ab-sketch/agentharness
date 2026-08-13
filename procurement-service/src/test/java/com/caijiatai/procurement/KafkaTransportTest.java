@@ -61,7 +61,6 @@ class KafkaTransportTest {
 
     private AppProperties properties() {
         return new AppProperties("采购员", java.nio.file.Path.of("target", "test-artifacts-kafka"),
-                java.net.URI.create("http://127.0.0.1:8742"), "token",
                 java.net.URI.create("http://127.0.0.1:5173"), false,
                 new AppProperties.Outbox(500), "kafka", new AppProperties.DemoSeed(false, java.nio.file.Path.of(".")),
                 HMAC);
@@ -73,7 +72,13 @@ class KafkaTransportTest {
         var template = template();
         var publisher = new KafkaCommandPublisher(template, properties());
         var command = AgentCommand.accept("analyze", "a".repeat(32), 1, 0,
-                Map.of("task_id", "a".repeat(32)));
+                Map.ofEntries(
+                        Map.entry("task_id", "a".repeat(32)),
+                        Map.entry("ai_task_id", "b".repeat(32)),
+                        Map.entry("trace_id", "c".repeat(32)),
+                        Map.entry("task_type", "QUOTE_ANALYSIS"),
+                        Map.entry("file_ids", List.of("jb" + "d".repeat(32))),
+                        Map.entry("input_sha256", "e".repeat(64))));
 
         publisher.dispatch(command);
 
@@ -94,9 +99,14 @@ class KafkaTransportTest {
         assertThat(records).isNotEmpty();
         var envelope = CanonicalJson.read(records.peek().value());
         assertThat(envelope.get("operation_id")).isEqualTo(command.getOperationId());
+        assertThat(envelope).containsEntry("message_type", "ai_task.command");
+        assertThat(envelope).containsEntry("ai_task_id", "b".repeat(32));
+        assertThat(envelope).containsEntry("business_id", "a".repeat(32));
+        assertThat(envelope).containsEntry("trace_id", "c".repeat(32));
+        assertThat(envelope).containsEntry("task_type", "QUOTE_ANALYSIS");
+        assertThat(envelope.get("file_ids")).isEqualTo(List.of("jb" + "d".repeat(32)));
         assertThat(envelope.get("payload_sha256")).isEqualTo(command.getPayloadSha256());
-        assertThat(envelope.get("signature")).isEqualTo(MessageCodec.sign(
-                HMAC, command.getOperationId(), command.getPayloadSha256(), "command"));
+        assertThat(envelope.get("signature")).isEqualTo(MessageCodec.signEnvelope(HMAC, envelope));
     }
 
     @Test
@@ -121,13 +131,13 @@ class KafkaTransportTest {
         var correlationId = UUID.randomUUID().toString().replace("-", "");
         var payload = Map.<String, Object>of("after_seq", 0L, "limit", 10);
         var requestSha = CanonicalJson.sha256(payload);
-        var envelope = Map.<String, Object>of(
+        var envelope = new java.util.LinkedHashMap<String, Object>(Map.of(
                 "correlation_id", correlationId,
                 "kind", "list_events",
                 "payload", payload,
                 "reply_to", responses,
-                "request_sha256", requestSha,
-                "signature", MessageCodec.sign(HMAC, correlationId, requestSha, "rpc"));
+                "request_sha256", requestSha));
+        envelope.put("signature", MessageCodec.signEnvelope(HMAC, envelope));
         server.onRequest(new ConsumerRecord<>(topic, 0, 0L, correlationId, CanonicalJson.bytes(envelope)));
 
         var records = new ConcurrentLinkedQueue<ConsumerRecord<String, byte[]>>();
@@ -148,7 +158,7 @@ class KafkaTransportTest {
         var response = CanonicalJson.read(records.peek().value());
         assertThat(response.get("correlation_id")).isEqualTo(correlationId);
         assertThat(response.get("status")).isEqualTo("ok");
-        assertThat(response.get("signature")).isEqualTo(MessageCodec.sign(HMAC, correlationId, requestSha, "rpc"));
+        assertThat(response.get("signature")).isEqualTo(MessageCodec.signEnvelope(HMAC, response));
         var result = (Map<?, ?>) response.get("result");
         assertThat((List<?>) result.get("events")).hasSize(1);
     }

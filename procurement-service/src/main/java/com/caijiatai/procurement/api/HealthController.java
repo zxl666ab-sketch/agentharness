@@ -1,6 +1,6 @@
 package com.caijiatai.procurement.api;
 
-import com.caijiatai.procurement.agent.AgentClient;
+import com.caijiatai.procurement.agent.RuntimeQueryService;
 import com.caijiatai.procurement.config.AppProperties;
 import java.io.IOException;
 import java.time.Instant;
@@ -11,8 +11,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.client.RestClient;
-import org.springframework.web.client.RestClientException;
 import tools.jackson.databind.ObjectMapper;
 
 @RestController
@@ -32,41 +30,29 @@ public final class HealthController {
             "durable_agent_outbox_v1");
 
     private final JdbcTemplate jdbc;
-    private final RestClient agent;
+    private final RuntimeQueryService runtime;
     private final AppProperties properties;
-    private final String token;
     private final String webBuildId;
     private final Instant startedAt = Instant.now();
 
     public HealthController(
             JdbcTemplate jdbc,
-            RestClient agentRestClient,
+            RuntimeQueryService runtime,
             AppProperties properties,
             ObjectMapper objectMapper) {
         this.jdbc = jdbc;
-        this.agent = agentRestClient;
+        this.runtime = runtime;
         this.properties = properties;
-        this.token = properties.agentInternalToken();
         this.webBuildId = loadWebBuildId(objectMapper);
     }
 
     @GetMapping("/api/health")
     public ResponseEntity<Map<String, Object>> health() {
         jdbc.queryForObject("select 1", Integer.class);
-        boolean agentAvailable = false;
-        Object agentHealth = null;
-        if ("kafka".equals(properties.agentMode())) {
-            agentAvailable = kafkaAgentAvailable();
-            agentHealth = Map.of("status", agentAvailable ? "up" : "down",
-                    "source", "heartbeat.ping");
-        } else {
-            try {
-                agentHealth = agent.get().uri("/api/health").retrieve().body(Map.class);
-                agentAvailable = true;
-            } catch (RestClientException ignored) {
-                // MySQL determines readiness; Agent health is a separate degraded capability.
-            }
-        }
+        boolean agentAvailable = "demo".equals(properties.agentMode()) || runtime.agentAvailable();
+        Object agentHealth = Map.of(
+                "status", agentAvailable ? "up" : "down",
+                "source", "demo".equals(properties.agentMode()) ? "synthetic_demo" : "heartbeat.ping");
         return ResponseEntity.ok(Map.ofEntries(
                 Map.entry("service", "procurement-service"),
                 Map.entry("status", "ok"),
@@ -77,19 +63,7 @@ public final class HealthController {
                 Map.entry("server_started_at", startedAt),
                 Map.entry("database", "ready"),
                 Map.entry("agent_available", agentAvailable),
-                Map.entry("agent_status", agentHealth == null ? Map.of("status", "unavailable") : agentHealth)));
-    }
-
-    private boolean kafkaAgentAvailable() {
-        try {
-            var heartbeat = jdbc.queryForObject(
-                    "select occurred_at from runtime_event where type = 'heartbeat.ping' "
-                            + "order by global_seq desc limit 1",
-                    java.sql.Timestamp.class);
-            return heartbeat != null && Instant.now().minusSeconds(15).isBefore(heartbeat.toInstant());
-        } catch (org.springframework.dao.EmptyResultDataAccessException error) {
-            return false;
-        }
+                Map.entry("agent_status", agentHealth)));
     }
 
     private String loadWebBuildId(ObjectMapper mapper) {

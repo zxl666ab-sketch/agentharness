@@ -3,16 +3,45 @@ import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import { ComparisonView } from "./ComparisonView";
+import { AiTaskRecovery } from "./AiTaskRecovery";
 import { NewProcurementConversation, ProcurementConversation } from "./ProcurementConversation";
 import { QuoteWorkspace } from "./QuoteWorkspace";
 import { RequirementReview } from "./RequirementReview";
+import { WorkbenchHome } from "./WorkbenchHome";
+import { WorkbenchNavigation } from "./WorkbenchNavigation";
 import { procurementReportMarkdown, ReportView } from "./ReportView";
 import { procurementApi } from "./api";
 import type {
+  AiTaskDetail,
   ProcurementAuditReport,
   ProcurementMeta,
   ProcurementRequest,
 } from "./types";
+
+const failedAiTask: AiTaskDetail = {
+  ai_task_id: "a".repeat(32),
+  business_id: "b".repeat(32),
+  generation: 1,
+  status: "FAILED",
+  task_type: "QUOTE_ANALYSIS",
+  trace_id: "c".repeat(32),
+  current_step: "QUOTE_PARSE",
+  progress: 0.4,
+  retry_count: 0,
+  max_retries: 3,
+  retryable: false,
+  operation_id: "operation",
+  result_id: null,
+  stale: false,
+  stale_reason: null,
+  error_category: "VALIDATION",
+  error_code: "QUOTE_PARSE_ERROR",
+  error_message: "报价文件为空",
+  created_at: "2026-08-12T00:00:00Z",
+  updated_at: "2026-08-12T00:00:01Z",
+  records: [],
+  result: null,
+};
 
 const meta: ProcurementMeta = {
   category: "ecommerce_packaging",
@@ -178,6 +207,63 @@ function allExcluded(): ProcurementRequest {
 }
 
 describe("procurement workflow views", () => {
+  it("renders workbench metrics as actionable filters and only real navigation", () => {
+    const home = renderToString(
+      <WorkbenchHome
+        requests={[request]}
+        aiTasks={[]}
+        reviews={[]}
+        loading={false}
+        onCreate={() => undefined}
+        onOpenTask={() => undefined}
+        onOpenTasks={() => undefined}
+        onOpenView={() => undefined}
+      />
+    );
+    const navigation = renderToString(
+      <WorkbenchNavigation active="workbench" aiAttention={0} reviewAttention={0} onChange={() => undefined} />
+    );
+
+    expect(home).toContain("今日采购工作");
+    expect(home).toMatch(/<button[^>]*><[^>]+>.*采购任务/s);
+    expect(home).toContain("待处理");
+    expect(home).toContain("待审核");
+    expect(navigation).toContain("工作台");
+    expect(navigation).toContain("AI 任务");
+    expect(navigation).not.toContain("供应商档案");
+  });
+
+  it("disables blind retry for non-retryable AI failures and keeps recovery actions visible", () => {
+    const html = renderToString(
+      <AiTaskRecovery
+        task={failedAiTask}
+        busy={null}
+        onRetry={async () => undefined}
+        onCancel={async () => undefined}
+        onSupplement={() => undefined}
+      />
+    );
+    expect(html).toContain("分析失败");
+    expect(html).toContain("报价文件为空");
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*title="该错误不可直接重试/);
+    expect(html).toContain("补充资料");
+    expect(html).toContain("查看日志");
+  });
+
+  it("offers cancellation while an AI task is still active", () => {
+    const html = renderToString(
+      <AiTaskRecovery
+        task={{ ...failedAiTask, status: "RUNNING", retryable: false, error_message: null }}
+        busy={null}
+        onRetry={async () => undefined}
+        onCancel={async () => undefined}
+        onSupplement={() => undefined}
+      />
+    );
+    expect(html).toContain("正在分析");
+    expect(html).toContain("取消任务");
+  });
+
   it("surfaces a failed durable conversation operation", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({
@@ -572,6 +658,30 @@ describe("procurement workflow views", () => {
     expect(html).not.toContain("【采购决策已验证】");
   });
 
+  it("counts backend completed tool invocations as finished", () => {
+    const client = new QueryClient();
+    client.setQueryData(["procurement-run", "run"], { status: "completed" });
+    client.setQueryData(["procurement-messages", "run"], []);
+    client.setQueryData(["procurement-tools", "run"], [
+      { id: "1", tool_name: "parse_quote", status: "completed" },
+      { id: "2", tool_name: "parse_quote", status: "completed" },
+      { id: "3", tool_name: "parse_quote", status: "completed" },
+    ]);
+    const html = renderToString(
+      <QueryClientProvider client={client}>
+        <ProcurementConversation
+          request={{ ...request, analysis_run_id: "run" }}
+          onResume={async () => undefined}
+          onRecover={async () => undefined}
+          onOpenComparison={() => undefined}
+        />
+      </QueryClientProvider>
+    );
+    expect(html).toMatch(/3(?:<!-- -->)?\/(?:<!-- -->)?3/);
+    expect(html).toContain("已完成");
+    expect(html).not.toContain("执行中");
+  });
+
   it("renders an accepted task before the Agent binds its session", () => {
     const client = new QueryClient();
     const html = renderToString(
@@ -685,3 +795,66 @@ describe("procurement workflow views", () => {
     expect(procurementReportMarkdown(report)).toContain("本轮流标");
   });
 });
+
+  it("renders and preserves the carton height field in requirement review", () => {
+    const cartonRequest: ProcurementRequest = {
+      ...request,
+      item_name: "五层瓦楞纸箱",
+      specifications: {
+        width_mm: "400",
+        length_mm: "300",
+        height_mm: "250",
+        thickness_um: "5000",
+        material: "瓦楞纸",
+        color: "牛皮色",
+        print_colors: 1,
+      },
+    };
+    const html = renderToString(
+      <RequirementReview
+        request={cartonRequest}
+        busy={false}
+        onSave={async () => undefined}
+      />
+    );
+    expect(html).toContain("高度（mm）");
+    expect(html).toContain('value="250"');
+  });
+
+  it("renders the carton height quote field for correction", () => {
+    const heightRequest: ProcurementRequest = {
+      ...request,
+      item_name: "五层瓦楞纸箱",
+      quotes: [{
+        ...request.quotes[0],
+        extracted: {
+          ...request.quotes[0].extracted,
+          fields: {
+            ...request.quotes[0].extracted.fields,
+            width_mm: { value: "400", confidence: 0.97, status: "accepted", source: { document_kind: "xlsx", locator: "产品规格!B3", excerpt: "400", method: "spec_pattern" } },
+            length_mm: { value: "300", confidence: 0.97, status: "accepted", source: { document_kind: "xlsx", locator: "产品规格!B3", excerpt: "300", method: "spec_pattern" } },
+            height_mm: { value: "250", confidence: 0.97, status: "accepted", source: { document_kind: "xlsx", locator: "产品规格!B3", excerpt: "250", method: "spec_pattern" } },
+          },
+        },
+      }],
+    };
+    const heightMeta: ProcurementMeta = {
+      ...meta,
+      field_meta: {
+        ...meta.field_meta,
+        height_mm: { label: "高度（mm）", kind: "decimal", required: true },
+      },
+    };
+    const html = renderToString(
+      <QuoteWorkspace
+        request={heightRequest}
+        meta={heightMeta}
+        busy={null}
+        onUpload={async () => undefined}
+        onCorrect={async () => undefined}
+        onAnalyze={async () => undefined}
+      />
+    );
+    expect(html).toContain('data-field="height_mm"');
+    expect(html).toContain('value="250"');
+  });

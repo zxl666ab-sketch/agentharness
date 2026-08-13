@@ -43,5 +43,6 @@ public class RuntimeReportProjection {
     }
 
     public String getEvidenceSha256() { return evidenceSha256; }
+    public String getRunId() { return runId; }
     public Map<String, Object> getReport() { return report; }
 }

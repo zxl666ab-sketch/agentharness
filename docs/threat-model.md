@@ -17,10 +17,10 @@
 ```mermaid
 flowchart LR
     Browser["本地浏览器"] -->|"127.0.0.1:8741"| Java["Java 业务边界"]
-    Java --> PG["PostgreSQL"]
+    Java --> PG["MySQL 业务 schema"]
     Java --> JArt["Java Artifact Store"]
-    Java -->|"内部 Token"| Agent["Python Agent Runtime"]
-    Agent --> RDB["Runtime SQLite / Artifacts"]
+    Java <-->|"Kafka HMAC envelope"| Agent["Python Agent Runtime"]
+    Agent --> RDB["MySQL runtime schema"]
     Agent --> Tools["受治理工具"]
     Agent --> External["Provider / MCP / 批准网络"]
 ```
@@ -30,17 +30,17 @@ flowchart LR
 | Threat | Controls |
 |---|---|
 | 远程浏览器访问 | Java 生产模式只接受本地 Host；非安全方法校验同源 Origin；开发模式只额外允许配置的 Vite Origin |
-| 直接访问 Python | Python 端口不映射宿主机；internal-only 模式除健康检查外全部校验 `X-Agent-Internal-Token` |
+| 直接访问 Python | Python 端口不映射宿主机；浏览器只访问 Java，Java 与 Python 之间只经 Kafka |
 | 任意反向代理 | Java 只实现显式 Runtime 路径允许列表，不接受用户提供的代理目标或任意路径 |
 | 请求伪造 actor | 公共请求不接受 actor；本地采购员来自 `APP_LOCAL_OPERATOR`，Agent actor 固定为 `agent` |
 | 上传炸弹或恶意文档 | 扩展名、单文件/总大小、数量、XLSX ZIP 条目/压缩比/工作表/行列、PDF 页数/字符/加密限制；扫描件拒绝 |
 | Artifact 路径穿越 | 内容寻址 ID、所有者前缀、两级 SHA-256 分片、规范路径校验、临时文件加原子移动 |
 | 模型修改报价或决定 | Python 无采购业务写入 Repo；人工修正和最终事务仅在 Java；模型只能经白名单命令和 Harness Approval |
-| 重放或重复副作用 | PostgreSQL 持久幂等键、不可变 operation ID/payload SHA、generation/version、Python 幂等结果与最终决定复用 |
+| 重放或重复副作用 | MySQL 持久幂等键、不可变 operation ID/payload SHA、generation/version、Python 幂等结果与最终决定复用 |
 | stale approval | pending decision 绑定 Run、工具、任务版本、快照、输入哈希、决定、报价与备注哈希；Java 最终事务重新核验 |
 | Agent 中断或响应丢失 | durable outbox、有界重试、同 operation replay；非重试失败恢复任务状态；未知副作用结果保留证据并拒绝盲目重复 |
-| PostgreSQL 中途失败 | 业务状态、outbox、失效、决定和审计在对应单一事务中提交；乐观锁与最终悲观锁复核 |
-| Python 宕机拖垮业务读取 | Java readiness 不依赖 Python；业务报告本地投影或 unavailable 降级均返回 200；实时 Runtime 代理返回结构化 503 |
+| MySQL 中途失败 | 业务状态、outbox、失效、决定和审计在对应单一事务中提交；乐观锁与最终悲观锁复核 |
+| Python 宕机拖垮业务读取 | Java readiness 不依赖 Python；业务报告和已投影 Run 审计保持可读；只有实时 `/api/runtime` 可用性检查返回结构化 503 |
 | Secret 泄露 | Token/凭据来自环境或 Python 本地配置；结构化脱敏后再持久化/返回；凭据 Header 不透传到公共响应 |
 | SSRF / 私网访问 | 每跳 DNS/IP 与 peer 校验、默认拒绝私网目标、Provider/网络工具遵循显式治理 |
 | 成本失控 | step/time/token/output/费用上限，Provider 尝试与 429/Retry-After 证据持久化 |
@@ -48,7 +48,7 @@ flowchart LR
 
 ## Data lifecycle
 
-PostgreSQL 与 Java Artifact 卷保存当前采购业务；Python Runtime 卷只保存 Runtime 事实。历史 SQLite 采购数据只可离线归档，不自动导入或双写。不得把 `.env`、数据库卷、完整日志、浏览器 profile、trace 或真实报价提交到 Git。
+MySQL 业务 schema 与 Java Artifact 卷保存当前采购业务；Python runtime schema 只保存 Runtime 事实。历史 SQLite/PostgreSQL 采购数据只可离线归档，不自动导入或双写。不得把 `.env`、数据库卷、完整日志、浏览器 profile、trace 或真实报价提交到 Git。
 
 ## Residual risks
 

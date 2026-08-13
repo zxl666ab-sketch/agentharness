@@ -1,0 +1,407 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://caijiatai.local/contracts/procurement-workbench.schema.json",
+  "title": "Caijiatai procurement workbench contract",
+  "description": "Canonical public views and Kafka envelopes shared by Java, Python and Web.",
+  "oneOf": [
+    { "$ref": "#/$defs/AiTaskView" },
+    { "$ref": "#/$defs/AiTaskRecordView" },
+    { "$ref": "#/$defs/AiResultView" },
+    { "$ref": "#/$defs/ReviewView" },
+    { "$ref": "#/$defs/AiTaskCommandEnvelope" },
+    { "$ref": "#/$defs/AiTaskEventEnvelope" }
+  ],
+  "x-ai-status-transitions": {
+    "PENDING": ["DISPATCHING", "CANCELLED"],
+    "DISPATCHING": ["RUNNING", "FAILED", "CANCELLED"],
+    "RUNNING": ["SUCCEEDED", "FAILED", "CANCELLED"],
+    "SUCCEEDED": [],
+    "FAILED": ["RETRYING", "CANCELLED"],
+    "RETRYING": ["RUNNING", "FAILED", "CANCELLED"],
+    "CANCELLED": []
+  },
+  "x-wire-compatibility": {
+    "aggregate_id": "Deprecated Kafka alias for business_id during the staged rollout.",
+    "operation_type": "Deprecated Kafka alias; analyze maps to task_type QUOTE_ANALYSIS.",
+    "analyzing": "Deprecated procurement status. AI execution is represented only by ai_status."
+  },
+  "$defs": {
+    "Id32": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "Sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "DateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ProcurementStatus": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "collecting",
+        "review",
+        "ready",
+        "analyzed",
+        "approval_pending",
+        "approved",
+        "no_award",
+        "cancelled"
+      ]
+    },
+    "AiTaskStatus": {
+      "type": "string",
+      "enum": [
+        "PENDING",
+        "DISPATCHING",
+        "RUNNING",
+        "SUCCEEDED",
+        "FAILED",
+        "RETRYING",
+        "CANCELLED"
+      ]
+    },
+    "AiTaskType": {
+      "type": "string",
+      "enum": ["QUOTE_ANALYSIS"]
+    },
+    "AiTaskStep": {
+      "type": "string",
+      "enum": [
+        "INPUT_VALIDATE",
+        "ARTIFACT_FETCH",
+        "QUOTE_PARSE",
+        "RULE_ANALYSIS",
+        "EXPLANATION",
+        "RESULT_PUBLISH"
+      ]
+    },
+    "AiStepStatus": {
+      "type": "string",
+      "enum": ["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "SKIPPED"]
+    },
+    "AiErrorCategory": {
+      "type": "string",
+      "enum": ["VALIDATION", "BUSINESS", "PROVIDER", "TRANSPORT", "INTERNAL"]
+    },
+    "ReviewStatus": {
+      "type": "string",
+      "enum": ["PENDING", "APPROVED", "REJECTED", "NO_AWARD", "STALE"]
+    },
+    "ReviewAction": {
+      "type": "string",
+      "enum": [
+        "APPROVE_SUGGESTION",
+        "REVISE_AND_APPROVE",
+        "REJECT_AND_RETRY",
+        "NO_AWARD"
+      ]
+    },
+    "AiSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "locator", "excerpt", "confidence", "method"],
+      "properties": {
+        "artifact_id": { "type": "string", "pattern": "^jb[0-9a-f]{32}$" },
+        "locator": { "type": "string", "minLength": 1 },
+        "excerpt": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "method": { "type": "string", "minLength": 1 }
+      }
+    },
+    "AiTaskView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ai_task_id",
+        "business_id",
+        "generation",
+        "status",
+        "task_type",
+        "trace_id",
+        "current_step",
+        "progress",
+        "retry_count",
+        "retryable",
+        "stale",
+        "error_code",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "ai_task_id": { "$ref": "#/$defs/Id32" },
+        "business_id": { "$ref": "#/$defs/Id32" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "status": { "$ref": "#/$defs/AiTaskStatus" },
+        "task_type": { "$ref": "#/$defs/AiTaskType" },
+        "trace_id": { "$ref": "#/$defs/Id32" },
+        "current_step": {
+          "oneOf": [{ "$ref": "#/$defs/AiTaskStep" }, { "type": "null" }]
+        },
+        "progress": { "type": "number", "minimum": 0, "maximum": 1 },
+        "retry_count": { "type": "integer", "minimum": 0 },
+        "max_retries": { "type": "integer", "minimum": 0 },
+        "retryable": { "type": "boolean" },
+        "operation_id": { "type": ["string", "null"], "format": "uuid" },
+        "result_id": {
+          "oneOf": [{ "$ref": "#/$defs/Id32" }, { "type": "null" }]
+        },
+        "stale": { "type": "boolean" },
+        "stale_reason": { "type": ["string", "null"] },
+        "error_category": {
+          "oneOf": [{ "$ref": "#/$defs/AiErrorCategory" }, { "type": "null" }]
+        },
+        "error_code": { "type": ["string", "null"] },
+        "error_message": { "type": ["string", "null"] },
+        "created_at": { "$ref": "#/$defs/DateTime" },
+        "updated_at": { "$ref": "#/$defs/DateTime" },
+        "started_at": {
+          "oneOf": [{ "$ref": "#/$defs/DateTime" }, { "type": "null" }]
+        },
+        "finished_at": {
+          "oneOf": [{ "$ref": "#/$defs/DateTime" }, { "type": "null" }]
+        }
+      }
+    },
+    "AiTaskRecordView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_id",
+        "ai_task_id",
+        "operation_id",
+        "attempt",
+        "sequence",
+        "step",
+        "status",
+        "created_at"
+      ],
+      "properties": {
+        "record_id": { "$ref": "#/$defs/Id32" },
+        "ai_task_id": { "$ref": "#/$defs/Id32" },
+        "operation_id": { "type": "string", "format": "uuid" },
+        "operation_type": { "const": "analyze" },
+        "aggregate_id": { "$ref": "#/$defs/Id32" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "step": { "$ref": "#/$defs/AiTaskStep" },
+        "status": { "$ref": "#/$defs/AiStepStatus" },
+        "summary": { "type": ["string", "null"] },
+        "error_category": {
+          "oneOf": [{ "$ref": "#/$defs/AiErrorCategory" }, { "type": "null" }]
+        },
+        "error_code": { "type": ["string", "null"] },
+        "error_message": { "type": ["string", "null"] },
+        "started_at": {
+          "oneOf": [{ "$ref": "#/$defs/DateTime" }, { "type": "null" }]
+        },
+        "finished_at": {
+          "oneOf": [{ "$ref": "#/$defs/DateTime" }, { "type": "null" }]
+        },
+        "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "created_at": { "$ref": "#/$defs/DateTime" }
+      }
+    },
+    "AiResultView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ai_result_id",
+        "ai_task_id",
+        "business_id",
+        "generation",
+        "input_sha256",
+        "result_sha256",
+        "structured_result",
+        "sources",
+        "prompt_version",
+        "stale",
+        "created_at"
+      ],
+      "properties": {
+        "ai_result_id": { "$ref": "#/$defs/Id32" },
+        "ai_task_id": { "$ref": "#/$defs/Id32" },
+        "business_id": { "$ref": "#/$defs/Id32" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "input_sha256": { "$ref": "#/$defs/Sha256" },
+        "result_sha256": { "$ref": "#/$defs/Sha256" },
+        "raw_result": { "type": ["object", "null"] },
+        "structured_result": { "type": "object" },
+        "sources": { "type": "array", "items": { "$ref": "#/$defs/AiSource" } },
+        "provider": { "type": ["string", "null"] },
+        "model": { "type": ["string", "null"] },
+        "prompt_version": { "type": "string", "minLength": 1 },
+        "parser_version": { "type": ["string", "null"] },
+        "stale": { "type": "boolean" },
+        "stale_reason": { "type": ["string", "null"] },
+        "created_at": { "$ref": "#/$defs/DateTime" }
+      }
+    },
+    "ReviewView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "review_id",
+        "business_id",
+        "ai_task_id",
+        "ai_result_id",
+        "status",
+        "priority",
+        "risk_flags",
+        "waiting_since",
+        "version",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "review_id": { "$ref": "#/$defs/Id32" },
+        "business_id": { "$ref": "#/$defs/Id32" },
+        "ai_task_id": { "$ref": "#/$defs/Id32" },
+        "ai_result_id": { "$ref": "#/$defs/Id32" },
+        "status": { "$ref": "#/$defs/ReviewStatus" },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "risk_flags": { "type": "array", "items": { "type": "string" } },
+        "waiting_since": { "$ref": "#/$defs/DateTime" },
+        "version": { "type": "integer", "minimum": 0 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "task_version": { "type": "integer", "minimum": 0 },
+        "snapshot_id": { "type": "string" },
+        "input_sha256": { "$ref": "#/$defs/Sha256" },
+        "suggested_quote_id": { "type": ["string", "null"] },
+        "final_quote_id": { "type": ["string", "null"] },
+        "action": {
+          "oneOf": [{ "$ref": "#/$defs/ReviewAction" }, { "type": "null" }]
+        },
+        "reason": { "type": ["string", "null"] },
+        "actor": { "type": ["string", "null"] },
+        "revisions": { "type": ["object", "null"] },
+        "evidence_sha256": {
+          "oneOf": [{ "$ref": "#/$defs/Sha256" }, { "type": "null" }]
+        },
+        "pending_decision_id": { "type": ["string", "null"] },
+        "decision_id": { "type": ["string", "null"] },
+        "stale_reason": { "type": ["string", "null"] },
+        "acted_at": {
+          "oneOf": [{ "$ref": "#/$defs/DateTime" }, { "type": "null" }]
+        },
+        "created_at": { "$ref": "#/$defs/DateTime" },
+        "updated_at": { "$ref": "#/$defs/DateTime" }
+      }
+    },
+    "ReviewActionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "expected_version", "actor"],
+      "properties": {
+        "action": { "$ref": "#/$defs/ReviewAction" },
+        "expected_version": { "type": "integer", "minimum": 0 },
+        "actor": { "type": "string", "minLength": 1 },
+        "final_quote_id": { "type": ["string", "null"] },
+        "revisions": { "type": "object" },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "AiTaskCommandEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "message_type",
+        "message_id",
+        "operation_id",
+        "ai_task_id",
+        "business_id",
+        "trace_id",
+        "task_type",
+        "file_ids",
+        "generation",
+        "expected_task_version",
+        "payload_sha256",
+        "payload",
+        "signature"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "message_type": { "const": "ai_task.command" },
+        "message_id": { "$ref": "#/$defs/Id32" },
+        "operation_id": { "type": "string", "format": "uuid" },
+        "ai_task_id": { "$ref": "#/$defs/Id32" },
+        "business_id": { "$ref": "#/$defs/Id32" },
+        "trace_id": { "$ref": "#/$defs/Id32" },
+        "task_type": { "$ref": "#/$defs/AiTaskType" },
+        "file_ids": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^jb[0-9a-f]{32}$" },
+          "uniqueItems": true
+        },
+        "generation": { "type": "integer", "minimum": 1 },
+        "expected_task_version": { "type": "integer", "minimum": 0 },
+        "payload_sha256": { "$ref": "#/$defs/Sha256" },
+        "payload": { "type": "object" },
+        "published_at": { "$ref": "#/$defs/DateTime" },
+        "signature": { "$ref": "#/$defs/Sha256" }
+      }
+    },
+    "AiTaskEventEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "message_type",
+        "event_id",
+        "operation_id",
+        "ai_task_id",
+        "business_id",
+        "trace_id",
+        "generation",
+        "event_type",
+        "status",
+        "progress",
+        "attempt",
+        "payload_sha256",
+        "payload",
+        "occurred_at",
+        "signature"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "message_type": { "const": "ai_task.event" },
+        "event_id": { "$ref": "#/$defs/Id32" },
+        "operation_id": { "type": "string", "format": "uuid" },
+        "ai_task_id": { "$ref": "#/$defs/Id32" },
+        "business_id": { "$ref": "#/$defs/Id32" },
+        "trace_id": { "$ref": "#/$defs/Id32" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "event_type": {
+          "type": "string",
+          "enum": ["STEP_STARTED", "STEP_SUCCEEDED", "STEP_FAILED", "TASK_SUCCEEDED", "TASK_FAILED"]
+        },
+        "step": {
+          "oneOf": [{ "$ref": "#/$defs/AiTaskStep" }, { "type": "null" }]
+        },
+        "step_status": { "$ref": "#/$defs/AiStepStatus" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "summary": { "type": ["string", "null"] },
+        "error_category": {
+          "oneOf": [{ "$ref": "#/$defs/AiErrorCategory" }, { "type": "null" }]
+        },
+        "error_code": { "type": ["string", "null"] },
+        "error_message": { "type": ["string", "null"] },
+        "retryable": { "type": "boolean" },
+        "status": { "$ref": "#/$defs/AiTaskStatus" },
+        "progress": { "type": "number", "minimum": 0, "maximum": 1 },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "payload_sha256": { "$ref": "#/$defs/Sha256" },
+        "payload": { "type": "object" },
+        "occurred_at": { "$ref": "#/$defs/DateTime" },
+        "global_seq": { "type": "integer", "minimum": 0 },
+        "task_id": { "$ref": "#/$defs/Id32" },
+        "run_id": { "$ref": "#/$defs/Id32" },
+        "signature": { "$ref": "#/$defs/Sha256" }
+      }
+    }
+  }
+}

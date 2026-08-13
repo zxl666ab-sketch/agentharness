@@ -9,7 +9,8 @@ FROM eclipse-temurin:21-jdk AS java-build
 WORKDIR /workspace/procurement-service
 COPY procurement-service/ ./
 COPY --from=web-build /workspace/web/dist ./src/main/resources/static
-RUN chmod +x mvnw && ./mvnw -q -DskipTests package
+RUN chmod +x mvnw \
+    && MVNW_REPOURL=https://maven.aliyun.com/repository/public ./mvnw -q -DskipTests package
 
 FROM eclipse-temurin:21-jre
 WORKDIR /app

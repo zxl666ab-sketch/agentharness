@@ -49,6 +49,7 @@ FIELD_META: dict[str, dict[str, Any]] = {
     "supports_invoice": {"label": "是否可开票", "kind": "boolean", "required": True},
     "width_mm": {"label": "宽度（mm）", "kind": "decimal", "required": True},
     "length_mm": {"label": "长度（mm）", "kind": "decimal", "required": True},
+    "height_mm": {"label": "高度（mm）", "kind": "decimal", "required": False},
     "thickness_um": {"label": "厚度（µm）", "kind": "decimal", "required": True},
     "layers": {"label": "瓦楞层数", "kind": "integer", "required": False},
     "payment_terms": {"label": "付款条件", "kind": "text", "required": False},
@@ -72,7 +73,8 @@ _ALIASES = {
     "lead_time_days": ["交期", "交货期", "生产周期", "交期天", "leaddays", "leadtime", "deliverydays"],
     "supports_invoice": ["可开票", "是否可开票", "发票", "增值税专票", "invoice", "supportsinvoice"],
     "width_mm": ["宽", "宽度", "宽mm", "width", "widthmm"],
-    "length_mm": ["长", "长度", "高度", "长mm", "length", "height", "lengthmm"],
+    "length_mm": ["长", "长度", "长mm", "length", "lengthmm"],
+    "height_mm": ["高", "高度", "高mm", "height", "heightmm"],
     "thickness_um": ["厚度", "材料厚度", "厚度um", "厚度微米", "丝数", "thickness", "thicknessum", "micron"],
     "layers": ["瓦楞层数", "层数", "layers", "corrugatedlayers"],
     "payment_terms": ["付款条件", "结算方式", "账期", "payment", "paymentterms"],
@@ -283,7 +285,7 @@ def coerce_field_value(field: str, value: Any) -> Any:
         if result is None:
             return None
         number = Decimal(result)
-        if field in {"unit_price", "width_mm", "length_mm", "thickness_um"} and number <= 0:
+        if field in {"unit_price", "width_mm", "length_mm", "height_mm", "thickness_um"} and number <= 0:
             return None
         if field == "shipping_fee" and number < 0:
             return None
@@ -432,13 +434,16 @@ def _extract_specs(fields: dict[str, Any], document_kind: str) -> None:
         return
     text = str(description["value"])
     size = re.search(
-        r"(\d+(?:\.\d+)?)\s*[xX×*]\s*(\d+(?:\.\d+)?)\s*(?:mm)?",
+        r"(\d+(?:\.\d+)?)\s*[xX×*]\s*(\d+(?:\.\d+)?)\s*(?:[xX×*]\s*(\d+(?:\.\d+)?))?\s*(?:mm)?",
         text,
     )
     thickness = re.search(r"(\d+(?:\.\d+)?)\s*(?:um|[μµ]m|微米|micron|丝)", text, re.I)
     source = description.get("source", {})
     if size:
-        for field, value in zip(("width_mm", "length_mm"), size.groups(), strict=True):
+        dimensions = [("width_mm", size.group(1)), ("length_mm", size.group(2))]
+        if size.group(3) is not None:
+            dimensions.append(("height_mm", size.group(3)))
+        for field, value in dimensions:
             _set_field(
                 fields,
                 field,

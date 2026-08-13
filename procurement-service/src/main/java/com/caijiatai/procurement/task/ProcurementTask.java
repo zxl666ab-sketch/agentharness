@@ -223,4 +223,11 @@ public class ProcurementTask {
         status = noAward ? TaskStatus.NO_AWARD.wireValue() : TaskStatus.APPROVED.wireValue();
         updatedAt = Instant.now();
     }
+
+    public void prepareReviewRetry() {
+        currentSnapshotId = null;
+        approvedQuoteId = null;
+        status = TaskStatus.READY.wireValue();
+        updatedAt = Instant.now();
+    }
 }

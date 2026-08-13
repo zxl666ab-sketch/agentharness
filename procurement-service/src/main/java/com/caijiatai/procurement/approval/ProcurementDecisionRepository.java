@@ -9,4 +9,6 @@ public interface ProcurementDecisionRepository extends JpaRepository<Procurement
     Optional<ProcurementDecision> findByTaskId(String taskId);
     Optional<ProcurementDecision> findByPendingDecisionId(String pendingDecisionId);
     Optional<ProcurementDecision> findByQuoteId(String quoteId);
+    java.util.List<ProcurementDecision> findByQuoteIdIn(java.util.Collection<String> quoteIds);
+    java.util.List<ProcurementDecision> findByTaskIdIn(java.util.Collection<String> taskIds);
 }

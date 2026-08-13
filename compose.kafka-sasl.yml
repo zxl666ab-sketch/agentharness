@@ -16,10 +16,9 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: SASL_PLAINTEXT
       KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-256
       KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: SCRAM-SHA-256
-      KAFKA_SUPER_USERS: User:admin,User:ANONYMOUS
+      KAFKA_SUPER_USERS: User:${KAFKA_ADMIN_USERNAME:?Set KAFKA_ADMIN_USERNAME in .env}
       KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
-      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "true"
-      KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/secrets/kafka_jaas.conf
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "false"
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
@@ -28,23 +27,43 @@ services:
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       KAFKA_MESSAGE_MAX_BYTES: 16777216
       KAFKA_REPLICA_FETCH_MAX_BYTES: 16777216
+      KAFKA_ADMIN_USERNAME: ${KAFKA_ADMIN_USERNAME:?Set KAFKA_ADMIN_USERNAME in .env}
+      KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD:?Set KAFKA_ADMIN_PASSWORD in .env}
+      KAFKA_JAVA_USERNAME: ${KAFKA_JAVA_USERNAME:?Set KAFKA_JAVA_USERNAME in .env}
+      KAFKA_JAVA_PASSWORD: ${KAFKA_JAVA_PASSWORD:?Set KAFKA_JAVA_PASSWORD in .env}
+      KAFKA_AGENT_USERNAME: ${KAFKA_AGENT_USERNAME:?Set KAFKA_AGENT_USERNAME in .env}
+      KAFKA_AGENT_PASSWORD: ${KAFKA_AGENT_PASSWORD:?Set KAFKA_AGENT_PASSWORD in .env}
     volumes:
-      - ./deploy/kafka-secrets/kafka_jaas.conf:/etc/kafka/secrets/kafka_jaas.conf:ro
-      - ./deploy/kafka-secrets/admin.properties:/etc/kafka/secrets/admin.properties:ro
       - caijiatai-kafka-data:/var/lib/kafka/data
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
         set -e
+        cat > /tmp/kafka_jaas.conf <<EOF
+        KafkaServer {
+          org.apache.kafka.common.security.scram.ScramLoginModule required
+          username="$${KAFKA_ADMIN_USERNAME}"
+          password="$${KAFKA_ADMIN_PASSWORD}";
+        };
+        EOF
+        export KAFKA_OPTS="-Djava.security.auth.login.config=/tmp/kafka_jaas.conf"
+        cat > /tmp/admin.properties <<EOF
+        security.protocol=SASL_PLAINTEXT
+        sasl.mechanism=SCRAM-SHA-256
+        sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="$${KAFKA_ADMIN_USERNAME}" password="$${KAFKA_ADMIN_PASSWORD}";
+        EOF
         bash /etc/confluent/docker/configure
         DATA=$$KAFKA_LOG_DIRS
         mkdir -p "$$DATA"
         if [ ! -f "$$DATA/meta.properties" ]; then
-          kafka-storage format -t "$$CLUSTER_ID" -c /etc/kafka/kafka.properties             --add-scram 'SCRAM-SHA-256=[name=admin,password=admin-secret]'             --add-scram 'SCRAM-SHA-256=[name=java-svc,password=java-secret]'             --add-scram 'SCRAM-SHA-256=[name=python-agent,password=python-secret]'
+          kafka-storage format -t "$$CLUSTER_ID" -c /etc/kafka/kafka.properties \
+            --add-scram "SCRAM-SHA-256=[name=$${KAFKA_ADMIN_USERNAME},password=$${KAFKA_ADMIN_PASSWORD}]" \
+            --add-scram "SCRAM-SHA-256=[name=$${KAFKA_JAVA_USERNAME},password=$${KAFKA_JAVA_PASSWORD}]" \
+            --add-scram "SCRAM-SHA-256=[name=$${KAFKA_AGENT_USERNAME},password=$${KAFKA_AGENT_PASSWORD}]"
         fi
         exec /etc/confluent/docker/launch
     healthcheck:
-      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server 127.0.0.1:9092 --command-config /etc/kafka/secrets/admin.properties >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server 127.0.0.1:9092 --command-config /tmp/admin.properties >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 10s
       retries: 30
@@ -54,43 +73,51 @@ services:
       kafka:
         condition: service_healthy
     environment:
-      KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/secrets/kafka_jaas.conf
       KAFKA_BOOTSTRAP: kafka:9092
-    volumes:
-      - ./deploy/kafka-secrets/kafka_jaas.conf:/etc/kafka/secrets/kafka_jaas.conf:ro
-      - ./deploy/kafka-secrets/admin.properties:/etc/kafka/secrets/admin.properties:ro
+      KAFKA_ADMIN_USERNAME: ${KAFKA_ADMIN_USERNAME:?Set KAFKA_ADMIN_USERNAME in .env}
+      KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD:?Set KAFKA_ADMIN_PASSWORD in .env}
+      KAFKA_JAVA_USERNAME: ${KAFKA_JAVA_USERNAME:?Set KAFKA_JAVA_USERNAME in .env}
+      KAFKA_JAVA_PASSWORD: ${KAFKA_JAVA_PASSWORD:?Set KAFKA_JAVA_PASSWORD in .env}
+      KAFKA_AGENT_USERNAME: ${KAFKA_AGENT_USERNAME:?Set KAFKA_AGENT_USERNAME in .env}
+      KAFKA_AGENT_PASSWORD: ${KAFKA_AGENT_PASSWORD:?Set KAFKA_AGENT_PASSWORD in .env}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -e
-        ADMIN="--command-config /etc/kafka/secrets/admin.properties --bootstrap-server $${KAFKA_BOOTSTRAP}"
+        cat > /tmp/admin.properties <<EOF
+        security.protocol=SASL_PLAINTEXT
+        sasl.mechanism=SCRAM-SHA-256
+        sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="$${KAFKA_ADMIN_USERNAME}" password="$${KAFKA_ADMIN_PASSWORD}";
+        EOF
+        ADMIN="--command-config /tmp/admin.properties --bootstrap-server $${KAFKA_BOOTSTRAP}"
         kafka-topics $${ADMIN} --create --if-not-exists --topic caijiatai.commands --partitions 3 --replication-factor 1
-        for t in caijiatai.results caijiatai.rpc.requests caijiatai.rpc.responses caijiatai.events caijiatai.commands.dlq caijiatai.results.dlq caijiatai.events.dlq; do
+        for t in caijiatai.results caijiatai.rpc.requests caijiatai.rpc.responses caijiatai.events caijiatai.commands.dlq caijiatai.results.dlq caijiatai.rpc.requests.dlq caijiatai.rpc.responses.dlq caijiatai.events.dlq; do
           kafka-topics $${ADMIN} --create --if-not-exists --topic $$t --partitions 1 --replication-factor 1
         done
-        for topic in caijiatai.commands caijiatai.rpc.responses caijiatai.commands.dlq; do
-          kafka-acls $${ADMIN} --add --allow-principal User:java-svc --operation Write --topic $$topic
-          kafka-acls $${ADMIN} --add --allow-principal User:java-svc --operation Describe --topic $$topic
+        for topic in caijiatai.commands caijiatai.rpc.responses caijiatai.results.dlq caijiatai.rpc.requests.dlq caijiatai.events.dlq; do
+          kafka-acls $${ADMIN} --add --allow-principal User:$${KAFKA_JAVA_USERNAME} --operation Write --topic $$topic
+          kafka-acls $${ADMIN} --add --allow-principal User:$${KAFKA_JAVA_USERNAME} --operation Describe --topic $$topic
         done
-        for topic in caijiatai.results caijiatai.rpc.requests caijiatai.events caijiatai.results.dlq caijiatai.events.dlq; do
-          kafka-acls $${ADMIN} --add --allow-principal User:java-svc --operation Read --topic $$topic
-          kafka-acls $${ADMIN} --add --allow-principal User:java-svc --operation Describe --topic $$topic
-          kafka-acls $${ADMIN} --add --allow-principal User:python-agent --operation Write --topic $$topic
-          kafka-acls $${ADMIN} --add --allow-principal User:python-agent --operation Describe --topic $$topic
-          kafka-acls $${ADMIN} --add --allow-principal User:python-agent --operation Read --topic $$topic
+        for topic in caijiatai.results caijiatai.rpc.requests caijiatai.events; do
+          kafka-acls $${ADMIN} --add --allow-principal User:$${KAFKA_JAVA_USERNAME} --operation Read --topic $$topic
+          kafka-acls $${ADMIN} --add --allow-principal User:$${KAFKA_JAVA_USERNAME} --operation Describe --topic $$topic
+          kafka-acls $${ADMIN} --add --allow-principal User:$${KAFKA_AGENT_USERNAME} --operation Write --topic $$topic
+          kafka-acls $${ADMIN} --add --allow-principal User:$${KAFKA_AGENT_USERNAME} --operation Describe --topic $$topic
         done
-        for g in java-svc java-svc-events java-svc-rpc python-agent python-agent-rpc python-agent-seq-boot; do
-          kafka-acls $${ADMIN} --add --allow-principal User:java-svc --operation Read --group $$g
-          kafka-acls $${ADMIN} --add --allow-principal User:python-agent --operation Read --group $$g
+        for g in java-svc java-svc-events java-svc-rpc; do
+          kafka-acls $${ADMIN} --add --allow-principal User:$${KAFKA_JAVA_USERNAME} --operation Read --group $$g
         done
-        for topic in caijiatai.commands caijiatai.rpc.responses caijiatai.commands.dlq; do
-          kafka-acls $${ADMIN} --add --allow-principal User:python-agent --operation Read --topic $$topic
-          kafka-acls $${ADMIN} --add --allow-principal User:python-agent --operation Describe --topic $$topic
+        for g in python-agent python-agent-rpc python-agent-seq-boot; do
+          kafka-acls $${ADMIN} --add --allow-principal User:$${KAFKA_AGENT_USERNAME} --operation Read --group $$g
+        done
+        for topic in caijiatai.commands caijiatai.rpc.responses caijiatai.events; do
+          kafka-acls $${ADMIN} --add --allow-principal User:$${KAFKA_AGENT_USERNAME} --operation Read --topic $$topic
+          kafka-acls $${ADMIN} --add --allow-principal User:$${KAFKA_AGENT_USERNAME} --operation Describe --topic $$topic
         done
   agent:
     environment:
-      AGENT_KAFKA_SASL_USERNAME: python-agent
-      AGENT_KAFKA_SASL_PASSWORD: ${AGENT_KAFKA_SASL_PASSWORD:-python-secret}
+      AGENT_KAFKA_SASL_USERNAME: ${KAFKA_AGENT_USERNAME:?Set KAFKA_AGENT_USERNAME in .env}
+      AGENT_KAFKA_SASL_PASSWORD: ${KAFKA_AGENT_PASSWORD:?Set KAFKA_AGENT_PASSWORD in .env}
       AGENTHARNESS_PROCUREMENT_PROVIDER: ${AGENTHARNESS_PROCUREMENT_PROVIDER:-procurement_fake}
       AGENTHARNESS_PROCUREMENT_REASONING_EFFORT: ${AGENTHARNESS_PROCUREMENT_REASONING_EFFORT:-none}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -100,7 +127,7 @@ services:
     environment:
       SPRING_KAFKA_PROPERTIES_SECURITY_PROTOCOL: SASL_PLAINTEXT
       SPRING_KAFKA_PROPERTIES_SASL_MECHANISM: SCRAM-SHA-256
-      SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG: org.apache.kafka.common.security.scram.ScramLoginModule required username="java-svc" password="${KAFKA_SASL_PASSWORD:-java-secret}";
+      SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG: org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_JAVA_USERNAME:?Set KAFKA_JAVA_USERNAME in .env}" password="${KAFKA_JAVA_PASSWORD:?Set KAFKA_JAVA_PASSWORD in .env}";
       AGENTHARNESS_PROCUREMENT_PROVIDER: ${AGENTHARNESS_PROCUREMENT_PROVIDER:-procurement_fake}
       AGENTHARNESS_PROCUREMENT_REASONING_EFFORT: ${AGENTHARNESS_PROCUREMENT_REASONING_EFFORT:-none}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

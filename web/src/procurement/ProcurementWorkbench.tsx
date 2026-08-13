@@ -3,6 +3,8 @@ import {
   Activity,
   AlertTriangle,
   Archive,
+  ChevronLeft,
+  ChevronRight,
   CheckCircle2,
   FileCheck2,
   Files,
@@ -23,6 +25,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useAgentStream } from "../useAgentStream";
 import { AuditView } from "./AuditView";
+import { AiTaskCenter } from "./AiTaskCenter";
+import { AiTaskRecovery } from "./AiTaskRecovery";
 import { procurementApi } from "./api";
 import { ComparisonView } from "./ComparisonView";
 import {
@@ -31,13 +35,25 @@ import {
 } from "./ProcurementConversation";
 import { QuoteWorkspace } from "./QuoteWorkspace";
 import { ReportView } from "./ReportView";
+import { ReviewCenter } from "./ReviewCenter";
 import { RequirementReview } from "./RequirementReview";
+import { WorkbenchHome } from "./WorkbenchHome";
+import { WorkbenchNavigation } from "./WorkbenchNavigation";
+import {
+  readWorkbenchUrl,
+  writeWorkbenchUrl,
+  type TaskFilter,
+  type TaskTab,
+  type WorkbenchUrlState,
+  type WorkbenchView,
+} from "./workbenchUrl";
 import type {
   ProcurementModelConfig,
   ProcurementModelConfigUpdate,
   ProcurementRequest,
   ProcurementRequestSummary,
   ProcurementStatus,
+  ReviewView,
 } from "./types";
 
 type Props = {
@@ -46,7 +62,11 @@ type Props = {
   onToggleTheme: () => void;
 };
 
-type Tab = "quotes" | "compare" | "report" | "audit";
+type Tab = TaskTab;
+
+const TASK_PAGE_SIZE = 20;
+const ATTENTION_STATUSES = new Set<ProcurementStatus>(["review", "ready", "analyzed", "approval_pending"]);
+const COMPLETE_STATUSES = new Set<ProcurementStatus>(["approved", "no_award", "cancelled"]);
 
 const STATUS: Record<ProcurementStatus, { label: string; tone: string; step: number }> = {
   draft: { label: "Agent 读取中", tone: "info", step: 1 },
@@ -58,6 +78,7 @@ const STATUS: Record<ProcurementStatus, { label: string; tone: string; step: num
   approval_pending: { label: "等待审批", tone: "warning", step: 4 },
   approved: { label: "已批准", tone: "success", step: 5 },
   no_award: { label: "本轮流标", tone: "neutral", step: 5 },
+  cancelled: { label: "已取消", tone: "neutral", step: 5 },
 };
 
 const STEPS = ["创建需求", "上传报价", "字段复核", "供应商比价", "人工审批"];
@@ -113,11 +134,17 @@ function configFormFrom(config: ProcurementModelConfig): ProcurementModelConfigU
 
 export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: Props) {
   const queryClient = useQueryClient();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<Tab>("quotes");
+  const initialUrl = useMemo(() => readWorkbenchUrl(), []);
+  const [view, setView] = useState<WorkbenchView>(initialUrl.view);
+  const [selectedId, setSelectedId] = useState<string | null>(initialUrl.task);
+  const [selectedAiId, setSelectedAiId] = useState<string | null>(initialUrl.ai);
+  const [selectedReviewId, setSelectedReviewId] = useState<string | null>(initialUrl.review);
+  const [activeTab, setActiveTab] = useState<Tab>(initialUrl.tab);
+  const [taskFilter, setTaskFilter] = useState<TaskFilter>(initialUrl.status);
+  const [taskPage, setTaskPage] = useState(initialUrl.page);
   const [showCreate, setShowCreate] = useState(false);
   const [pendingRunId, setPendingRunId] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(initialUrl.q);
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [showConfig, setShowConfig] = useState(false);
@@ -128,10 +155,22 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   const [deleteTarget, setDeleteTarget] = useState<ProcurementRequestSummary | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [aiActionBusy, setAiActionBusy] = useState<"retry" | "cancel" | null>(null);
+  const [aiActionError, setAiActionError] = useState<string | null>(null);
 
   const metaQuery = useQuery({ queryKey: ["procurement-meta"], queryFn: procurementApi.meta });
   const configQuery = useQuery({ queryKey: ["procurement-config"], queryFn: procurementApi.config });
   const requestsQuery = useQuery({ queryKey: ["procurement-requests"], queryFn: procurementApi.requests });
+  const allAiTasksQuery = useQuery({
+    queryKey: ["procurement-ai-tasks"],
+    queryFn: () => procurementApi.aiTasks(),
+    refetchInterval: view === "ai" ? 3_000 : false,
+  });
+  const reviewsQuery = useQuery({
+    queryKey: ["procurement-reviews"],
+    queryFn: () => procurementApi.reviews(),
+    refetchInterval: view === "reviews" ? 3_000 : false,
+  });
   const detailQuery = useQuery({
     queryKey: ["procurement-request", selectedId],
     queryFn: () => procurementApi.request(selectedId!),
@@ -143,6 +182,24 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
         : false;
     },
   });
+  const aiTasksQuery = useQuery({
+    queryKey: ["procurement-ai-tasks", selectedId],
+    queryFn: () => procurementApi.aiTasks(selectedId!),
+    enabled: !!selectedId,
+    refetchInterval: (query) => query.state.data?.items.some((task) =>
+      ["PENDING", "DISPATCHING", "RUNNING", "RETRYING"].includes(task.status)
+    ) ? 1_500 : false,
+  });
+  const latestAiTaskId = aiTasksQuery.data?.items[0]?.ai_task_id || null;
+  const aiTaskQuery = useQuery({
+    queryKey: ["procurement-ai-task", latestAiTaskId],
+    queryFn: () => procurementApi.aiTask(latestAiTaskId!),
+    enabled: !!latestAiTaskId,
+    refetchInterval: (query) => query.state.data &&
+      ["PENDING", "DISPATCHING", "RUNNING", "RETRYING"].includes(query.state.data.status)
+      ? 1_500
+      : false,
+  });
   const reportQuery = useQuery({
     queryKey: ["procurement-report", selectedId],
     queryFn: () => procurementApi.report(selectedId!),
@@ -152,20 +209,61 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   const disconnectPolls = useRef(0);
 
   const requests = useMemo(() => requestsQuery.data || [], [requestsQuery.data]);
+  const allAiTasks = useMemo(() => allAiTasksQuery.data?.items || [], [allAiTasksQuery.data]);
+  const reviews = useMemo<ReviewView[]>(() => reviewsQuery.data?.items || [], [reviewsQuery.data]);
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
-    if (!query) return requests;
-    return requests.filter((request) =>
-      [request.reference, request.title, request.item_name]
+    return requests.filter((request) => {
+      const matchesText = !query || [request.reference, request.title, request.item_name]
         .join(" ")
         .toLowerCase()
-        .includes(query)
-    );
-  }, [requests, search]);
+        .includes(query);
+      const matchesStatus = taskFilter === "all"
+        || (taskFilter === "attention" && ATTENTION_STATUSES.has(request.status))
+        || (taskFilter === "completed" && COMPLETE_STATUSES.has(request.status))
+        || (taskFilter === "active" && !COMPLETE_STATUSES.has(request.status));
+      return matchesText && matchesStatus;
+    });
+  }, [requests, search, taskFilter]);
+  const totalTaskPages = Math.max(1, Math.ceil(filtered.length / TASK_PAGE_SIZE));
+  const visibleRequests = filtered.slice(taskPage * TASK_PAGE_SIZE, (taskPage + 1) * TASK_PAGE_SIZE);
+
+  const urlState = useMemo<WorkbenchUrlState>(() => ({
+    view,
+    task: selectedId,
+    ai: selectedAiId,
+    review: selectedReviewId,
+    tab: activeTab,
+    status: taskFilter,
+    q: search,
+    page: taskPage,
+  }), [activeTab, search, selectedAiId, selectedId, selectedReviewId, taskFilter, taskPage, view]);
+
+  useEffect(() => writeWorkbenchUrl(urlState), [urlState]);
+  useEffect(() => {
+    const restore = () => {
+      const next = readWorkbenchUrl();
+      setView(next.view);
+      setSelectedId(next.task);
+      setSelectedAiId(next.ai);
+      setSelectedReviewId(next.review);
+      setActiveTab(next.tab);
+      setTaskFilter(next.status);
+      setSearch(next.q);
+      setTaskPage(next.page);
+      setShowCreate(false);
+    };
+    window.addEventListener("popstate", restore);
+    return () => window.removeEventListener("popstate", restore);
+  }, []);
 
   useEffect(() => {
-    if (!selectedId && !showCreate && requests.length) setSelectedId(requests[0].id);
-  }, [requests, selectedId, showCreate]);
+    if (taskPage >= totalTaskPages) setTaskPage(totalTaskPages - 1);
+  }, [taskPage, totalTaskPages]);
+
+  useEffect(() => {
+    if (view === "tasks" && !selectedId && !showCreate && requests.length) setSelectedId(requests[0].id);
+  }, [requests, selectedId, showCreate, view]);
 
   const currentRunId = detailQuery.data?.analysis_run_id || pendingRunId;
   const latestEvent = stream.events.at(-1);
@@ -294,11 +392,47 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
       setPendingRunId(accepted.run_id);
       await queryClient.invalidateQueries({ queryKey: ["procurement-request", selectedId] });
       await queryClient.invalidateQueries({ queryKey: ["procurement-requests"] });
+      await queryClient.invalidateQueries({ queryKey: ["procurement-ai-tasks", selectedId] });
       setActiveTab("compare");
     } catch (error) {
       setActionError(errorText(error));
     } finally {
+      await queryClient.invalidateQueries({ queryKey: ["procurement-ai-tasks", selectedId] });
       setBusy(null);
+    }
+  }
+
+  async function retryAiTask() {
+    if (!latestAiTaskId || !selectedId) return;
+    setAiActionBusy("retry");
+    setAiActionError(null);
+    try {
+      await procurementApi.retryAiTask(latestAiTaskId);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["procurement-ai-tasks", selectedId] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-ai-task", latestAiTaskId] }),
+      ]);
+    } catch (error) {
+      setAiActionError(errorText(error));
+    } finally {
+      setAiActionBusy(null);
+    }
+  }
+
+  async function cancelAiTask() {
+    if (!latestAiTaskId || !selectedId) return;
+    setAiActionBusy("cancel");
+    setAiActionError(null);
+    try {
+      await procurementApi.cancelAiTask(latestAiTaskId);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["procurement-ai-tasks", selectedId] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-ai-task", latestAiTaskId] }),
+      ]);
+    } catch (error) {
+      setAiActionError(errorText(error));
+    } finally {
+      setAiActionBusy(null);
     }
   }
 
@@ -446,6 +580,57 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     }
   }
 
+  function navigate(patch: Partial<WorkbenchUrlState>, push = true) {
+    const next = { ...urlState, ...patch };
+    writeWorkbenchUrl(next, push);
+    setView(next.view);
+    setSelectedId(next.task);
+    setSelectedAiId(next.ai);
+    setSelectedReviewId(next.review);
+    setActiveTab(next.tab);
+    setTaskFilter(next.status);
+    setSearch(next.q);
+    setTaskPage(next.page);
+  }
+
+  function openView(nextView: WorkbenchView) {
+    setShowCreate(false);
+    setActionError(null);
+    navigate({
+      view: nextView,
+      task: nextView === "tasks" ? selectedId : null,
+      ai: nextView === "ai" ? selectedAiId : null,
+      review: nextView === "reviews" ? selectedReviewId : null,
+      page: 0,
+    });
+  }
+
+  function openTask(taskId: string, tab: Tab = "quotes") {
+    setShowCreate(false);
+    setActionError(null);
+    navigate({ view: "tasks", task: taskId, ai: null, review: null, tab });
+  }
+
+  function openTaskFilter(filter: TaskFilter) {
+    setShowCreate(false);
+    navigate({ view: "tasks", status: filter, task: null, ai: null, review: null, page: 0 });
+  }
+
+  function openCreate() {
+    setActionError(null);
+    setSelectedId(null);
+    setShowCreate(true);
+    navigate({ view: "tasks", task: null, ai: null, review: null, tab: "quotes" });
+  }
+
+  function selectAiTask(aiTaskId: string | null, push = true) {
+    navigate({ view: "ai", task: null, ai: aiTaskId, review: null }, push);
+  }
+
+  function selectReview(reviewId: string | null, push = true) {
+    navigate({ view: "reviews", task: null, ai: null, review: reviewId }, push);
+  }
+
   return (
     <div className="proc-app">
       <header className="proc-topbar">
@@ -464,17 +649,36 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
         </div>
       </header>
 
-      <main className="proc-layout">
-        <aside className="proc-sidebar">
+      <main className={`proc-layout ${view === "tasks" ? "with-tasks" : ""}`}>
+        <aside className="proc-rail">
+          <WorkbenchNavigation
+            active={view}
+            aiAttention={allAiTasks.filter((task) => task.status === "FAILED" || task.stale).length}
+            reviewAttention={reviews.filter((review) => review.status === "PENDING").length}
+            onChange={openView}
+          />
+          <div className="proc-rail-status">
+            <Wifi size={14} /><span>服务在线</span><small>{backendVersion}</small>
+          </div>
+        </aside>
+
+        {view === "tasks" ? <aside className="proc-sidebar">
           <div className="proc-sidebar-head">
             <span>采购任务</span>
-            <button className="proc-icon-button primary-icon" type="button" title="新建采购对话" aria-label="新建采购对话" onClick={() => { setActionError(null); setSelectedId(null); setShowCreate(true); }}>
+            <button className="proc-icon-button primary-icon" type="button" title="新建采购对话" aria-label="新建采购对话" onClick={openCreate}>
               <Plus size={17} />
             </button>
           </div>
+          <div className="proc-task-filters" aria-label="采购任务状态筛选">
+            {(["all", "attention", "active", "completed"] as const).map((filter) => (
+              <button key={filter} type="button" className={taskFilter === filter ? "active" : ""} onClick={() => { setTaskFilter(filter); setTaskPage(0); }}>
+                {{ all: "全部", attention: "待办", active: "进行中", completed: "已结束" }[filter]}
+              </button>
+            ))}
+          </div>
           <label className="proc-search">
             <Search size={15} />
-            <input aria-label="搜索采购任务" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="编号、任务或物料" />
+            <input aria-label="搜索采购任务" value={search} onChange={(event) => { setSearch(event.target.value); setTaskPage(0); }} placeholder="编号、任务或物料" />
           </label>
           <div className="proc-request-list">
             {requestsQuery.isPending ? (
@@ -483,7 +687,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
             {requestsQuery.isError ? (
               <div className="proc-sidebar-empty error" role="alert"><span>采购任务加载失败</span></div>
             ) : null}
-            {filtered.map((request) => {
+            {visibleRequests.map((request) => {
               const itemStatus = STATUS[request.status];
               return (
                 <div
@@ -493,7 +697,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                   <button
                     type="button"
                     className="proc-request-item-main"
-                    onClick={() => { setSelectedId(request.id); setShowCreate(false); setActiveTab("quotes"); setActionError(null); }}
+                    onClick={() => openTask(request.id)}
                   >
                     <span className="proc-request-row"><code>{request.reference}</code><small>{requestDate(request.updated_at)}</small></span>
                     <strong>{request.title}</strong>
@@ -515,10 +719,48 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
               <div className="proc-sidebar-empty"><Archive size={22} /><span>{search ? "没有匹配任务" : "还没有采购任务"}</span></div>
             ) : null}
           </div>
-        </aside>
+          {filtered.length ? (
+            <footer className="proc-task-pagination">
+              <button type="button" title="上一页" aria-label="上一页" disabled={taskPage === 0} onClick={() => setTaskPage((page) => Math.max(0, page - 1))}><ChevronLeft size={15} /></button>
+              <span>{taskPage + 1} / {totalTaskPages}</span>
+              <button type="button" title="下一页" aria-label="下一页" disabled={taskPage + 1 >= totalTaskPages} onClick={() => setTaskPage((page) => Math.min(totalTaskPages - 1, page + 1))}><ChevronRight size={15} /></button>
+            </footer>
+          ) : null}
+        </aside> : null}
 
         <section className="proc-main">
-          {showCreate || (!selectedId && !detail) ? (
+          {view === "workbench" ? (
+            <WorkbenchHome
+              requests={requests}
+              aiTasks={allAiTasks}
+              reviews={reviews}
+              loading={requestsQuery.isPending || allAiTasksQuery.isPending || reviewsQuery.isPending}
+              onCreate={openCreate}
+              onOpenTask={openTask}
+              onOpenTasks={openTaskFilter}
+              onOpenView={openView}
+            />
+          ) : view === "ai" ? (
+            <AiTaskCenter
+              requests={requests}
+              tasks={allAiTasks}
+              loading={allAiTasksQuery.isPending}
+              error={allAiTasksQuery.isError ? errorText(allAiTasksQuery.error) : null}
+              selectedId={selectedAiId}
+              onSelect={selectAiTask}
+              onOpenTask={openTask}
+            />
+          ) : view === "reviews" ? (
+            <ReviewCenter
+              requests={requests}
+              reviews={reviews}
+              loading={reviewsQuery.isPending}
+              error={reviewsQuery.isError ? errorText(reviewsQuery.error) : null}
+              selectedId={selectedReviewId}
+              onSelect={selectReview}
+              onOpenTask={openTask}
+            />
+          ) : showCreate || (!selectedId && !detail) ? (
             <NewProcurementConversation
               busy={busy === "conversation"}
               error={actionError}
@@ -550,6 +792,17 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                 </ol>
               </header>
 
+              {aiTaskQuery.data ? (
+                <AiTaskRecovery
+                  task={aiTaskQuery.data}
+                  busy={aiActionBusy}
+                  error={aiActionError}
+                  onRetry={retryAiTask}
+                  onCancel={cancelAiTask}
+                  onSupplement={() => setActiveTab("quotes")}
+                />
+              ) : null}
+
               <div className="proc-task-body">
                 <ProcurementConversation
                   request={detail}
@@ -560,10 +813,10 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                 />
                 <section className="proc-structured-workspace">
                   <nav className="proc-tabs" aria-label="采购任务视图">
-                    <button className={activeTab === "quotes" ? "active" : ""} type="button" onClick={() => setActiveTab("quotes")}><Files size={16} />报价与复核{detail.unresolved_field_count ? <span>{detail.unresolved_field_count}</span> : null}</button>
-                    <button className={activeTab === "compare" ? "active" : ""} type="button" onClick={() => setActiveTab("compare")}><Scale size={16} />供应商比价</button>
-                    <button className={activeTab === "report" ? "active" : ""} type="button" onClick={() => setActiveTab("report")}><FileCheck2 size={16} />审批报告</button>
-                    <button className={activeTab === "audit" ? "active" : ""} type="button" onClick={() => setActiveTab("audit")}><Activity size={16} />运行审计</button>
+                    <button className={activeTab === "quotes" ? "active" : ""} type="button" onClick={() => navigate({ tab: "quotes" })}><Files size={16} />报价与复核{detail.unresolved_field_count ? <span>{detail.unresolved_field_count}</span> : null}</button>
+                    <button className={activeTab === "compare" ? "active" : ""} type="button" onClick={() => navigate({ tab: "compare" })}><Scale size={16} />供应商比价</button>
+                    <button className={activeTab === "report" ? "active" : ""} type="button" onClick={() => navigate({ tab: "report" })}><FileCheck2 size={16} />审批报告</button>
+                    <button className={activeTab === "audit" ? "active" : ""} type="button" onClick={() => navigate({ tab: "audit" })}><Activity size={16} />运行审计</button>
                   </nav>
 
                   <div className="proc-tab-content">

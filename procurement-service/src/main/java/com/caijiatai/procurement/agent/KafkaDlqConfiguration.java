@@ -17,7 +17,7 @@ import org.springframework.util.backoff.FixedBackOff;
  * 超出后投递到 {@code <topic>.dlq}；校验失败/409 由业务代码直接终态。
  */
 @Configuration
-@ConditionalOnProperty(prefix = "app.agent", name = "mode", havingValue = "kafka")
+@ConditionalOnProperty(prefix = "app", name = "agent-mode", havingValue = "kafka")
 public class KafkaDlqConfiguration {
 
     @Bean

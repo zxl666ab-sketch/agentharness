@@ -8,14 +8,12 @@
 uv sync --all-groups --frozen
 uv run python scripts/generate_procurement_demo.py --output output/procurement-demo
 
-$env:DOCKER_BUILDKIT='0'
-docker build -f Dockerfile.agent -t caijiatai-agent:0.4.0 .
-docker build -f procurement-service/Dockerfile -t caijiatai-procurement:0.4.0 .
+docker compose build
 docker compose up -d --no-build
 docker compose ps
 ```
 
-只打开 [http://127.0.0.1:8741](http://127.0.0.1:8741)。不要访问或映射 Python 8742、PostgreSQL 5432，也不要复用真实浏览器 profile 做自动验收。
+只打开 [http://127.0.0.1:8741](http://127.0.0.1:8741)。不要访问或映射 Python 8742、MySQL 3306，也不要复用真实浏览器 profile 做自动验收。
 
 核心目标：
 
@@ -35,7 +33,7 @@ docker compose ps
 | 1:30-2:10 | 修正星河包装供应商名；为顺达包装补运费 650；确认冲突字段真实值。 | 每次修正增加 generation、保存人工 actor 并失效旧快照/待决审批。 |
 | 2:10-3:00 | 确认 CNY/USD/EUR 固定汇率并开始比价。 | 31 份场景应为 19 家合格、12 家淘汰，推荐华东优包；错误物料不得入选。 |
 | 3:00-4:00 | 选择供应商并二次确认。 | pending decision 与 Harness allow-once Approval 逐项绑定，Java 最终事务再次复核。 |
-| 4:00-5:00 | 打开审批报告和运行审计，刷新页面。 | 报告显示 PostgreSQL 供应商历史、采购订单草稿、供应商确认邮件、Run/Checkpoint/Approval 和证据哈希。 |
+| 4:00-5:00 | 打开审批报告和运行审计，刷新页面。 | 报告显示 MySQL 供应商历史、采购订单草稿、供应商确认邮件、Run/Checkpoint/Approval 和证据哈希。 |
 
 ## 其他核心分支
 
@@ -55,7 +53,7 @@ docker compose ps
 docker compose stop agent
 ```
 
-任务应显示 retryable，Java readiness 保持 UP，采购报告仍为 HTTP 200，实时 `/api/runs/**` 返回结构化 503。恢复后 outbox 使用原 operation ID 继续：
+任务应显示 retryable，Java readiness 保持 UP，采购报告和已投影 Run 审计仍可读取，实时 `/api/runtime` 返回结构化 503。恢复后 outbox 使用原 operation ID 继续：
 
 ```powershell
 docker compose start agent
@@ -72,7 +70,7 @@ docker compose ps
 |---|---|
 | 缺少 USD/EUR 汇率 | operation 标记 failed，Web 显示具体错误，任务恢复到 ready；补齐汇率后可重新分析 |
 | Python 暂时不可用 | outbox 保留命令、任务 retryable、有界重试；不丢弃业务状态 |
-| Java 重启 | PostgreSQL 中 accepted/pending 命令继续；刷新恢复任务、报价、Session/Run 和修正 |
+| Java 重启 | MySQL 中 accepted/pending 命令继续；刷新恢复任务、报价、Session/Run 和修正 |
 | Python 重启 | operation ID 幂等重放；同键同载荷返回原结果，同键异载荷返回 409 |
 | 修改与批准竞争 | 最终事务锁定任务并复核版本/快照/输入哈希；只有一方成功 |
 | 数据库事务失败 | 不留下部分任务、孤立决定或缺审计状态 |

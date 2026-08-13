@@ -8,16 +8,20 @@ services:
     image: mysql:8.0
     container_name: cjt-mysql
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root-local}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
       MYSQL_DATABASE: caijiatai_business
-      MYSQL_USER: caijiatai
-      MYSQL_PASSWORD: ${DATABASE_PASSWORD:-caijiatai-local}
+      MYSQL_USER: ${PROCUREMENT_DATABASE_USER:?Set PROCUREMENT_DATABASE_USER in .env}
+      MYSQL_PASSWORD: ${PROCUREMENT_DATABASE_PASSWORD:?Set PROCUREMENT_DATABASE_PASSWORD in .env}
+      PROCUREMENT_DATABASE_USER: ${PROCUREMENT_DATABASE_USER:?Set PROCUREMENT_DATABASE_USER in .env}
+      PROCUREMENT_DATABASE_PASSWORD: ${PROCUREMENT_DATABASE_PASSWORD:?Set PROCUREMENT_DATABASE_PASSWORD in .env}
+      AGENT_DATABASE_USER: ${AGENT_DATABASE_USER:?Set AGENT_DATABASE_USER in .env}
+      AGENT_DATABASE_PASSWORD: ${AGENT_DATABASE_PASSWORD:?Set AGENT_DATABASE_PASSWORD in .env}
     command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
     volumes:
       - ./deploy/mysql-init:/docker-entrypoint-initdb.d:ro
       - caijiatai-mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root-local}"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -67,7 +71,7 @@ services:
       - |
         set -e
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic caijiatai.commands --partitions 3 --replication-factor 1
-        for t in caijiatai.results caijiatai.rpc.requests caijiatai.rpc.responses caijiatai.events caijiatai.commands.dlq caijiatai.results.dlq caijiatai.events.dlq; do
+        for t in caijiatai.results caijiatai.rpc.requests caijiatai.rpc.responses caijiatai.events caijiatai.commands.dlq caijiatai.results.dlq caijiatai.rpc.requests.dlq caijiatai.rpc.responses.dlq caijiatai.events.dlq; do
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic $$t --partitions 1 --replication-factor 1
         done
 
@@ -84,9 +88,9 @@ services:
       kafka-init:
         condition: service_completed_successfully
     environment:
-      AGENTHARNESS_DATABASE_URL: mysql+pymysql://caijiatai:${DATABASE_PASSWORD:-caijiatai-local}@mysql:3306/caijiatai_runtime
+      AGENTHARNESS_DATABASE_URL: mysql+pymysql://${AGENT_DATABASE_USER:?Set AGENT_DATABASE_USER in .env}:${AGENT_DATABASE_PASSWORD:?Set AGENT_DATABASE_PASSWORD in .env}@mysql:3306/caijiatai_runtime
       AGENT_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      AGENT_INTERNAL_HMAC_KEY: ${AGENT_INTERNAL_HMAC_KEY:-local-hmac-key-change-me}
+      AGENT_INTERNAL_HMAC_KEY: ${AGENT_INTERNAL_HMAC_KEY:?Set AGENT_INTERNAL_HMAC_KEY in .env}
       AGENT_PORT: 8742
       AGENTHARNESS_PROCUREMENT_PROVIDER: ${AGENTHARNESS_PROCUREMENT_PROVIDER:-procurement_fake}
       AGENTHARNESS_PROCUREMENT_REASONING_EFFORT: ${AGENTHARNESS_PROCUREMENT_REASONING_EFFORT:-none}
@@ -116,11 +120,11 @@ services:
       APP_BIND_ADDRESS: 0.0.0.0
       APP_PORT: 8741
       DATABASE_URL: jdbc:mysql://mysql:3306/caijiatai_business?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=UTF-8
-      DATABASE_USER: caijiatai
-      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-caijiatai-local}
+      DATABASE_USER: ${PROCUREMENT_DATABASE_USER:?Set PROCUREMENT_DATABASE_USER in .env}
+      DATABASE_PASSWORD: ${PROCUREMENT_DATABASE_PASSWORD:?Set PROCUREMENT_DATABASE_PASSWORD in .env}
       APP_AGENT_MODE: kafka
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      AGENT_INTERNAL_HMAC_KEY: ${AGENT_INTERNAL_HMAC_KEY:-local-hmac-key-change-me}
+      AGENT_INTERNAL_HMAC_KEY: ${AGENT_INTERNAL_HMAC_KEY:?Set AGENT_INTERNAL_HMAC_KEY in .env}
       APP_ARTIFACT_ROOT: /data/artifacts
       APP_LOCAL_OPERATOR: ${APP_LOCAL_OPERATOR:-采购员}
       APP_DEMO_SEED_ENABLED: ${APP_DEMO_SEED_ENABLED:-false}

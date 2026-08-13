@@ -11,9 +11,9 @@ uv run pytest --cov=agentharness --cov-report=term --cov-fail-under=80 -q
 uv build
 ```
 
-必须保留解析器、Runtime、Provider、Run、Checkpoint、Approval、工具治理和 internal-only 安全测试。Python 不得重新出现公共采购 Router、业务 Service、costing 或采购 Repo。
+必须保留解析器、Runtime、Provider、Run、Checkpoint、Approval、工具治理和 Kafka 内部边界安全测试。Python 不得重新出现公共采购 Router、业务 Service、costing 或采购 Repo。
 
-## 2. Java 与 PostgreSQL 17
+## 2. Java 与 MySQL 8
 
 ```powershell
 Set-Location procurement-service
@@ -21,7 +21,7 @@ Set-Location procurement-service
 Set-Location ..
 ```
 
-Testcontainers 必须实际启动 PostgreSQL 17。验证 BigDecimal 精度、税费、汇率、MOQ、交期、V1/V2 动态规格、排序、规范 JSON/hash、Artifact 路径、失效、审批状态机、事务回滚、乐观锁、幂等、重复调度、响应丢失和重启恢复。
+Testcontainers 必须实际启动 MySQL 8。验证 BigDecimal 精度、税费、汇率、MOQ、交期、V1/V2 动态规格、排序、规范 JSON/hash、Artifact 路径、失效、审批状态机、事务回滚、乐观锁、幂等、重复调度、响应丢失和重启恢复。
 
 ## 3. Web
 
@@ -35,7 +35,7 @@ Set-Location ..
 uv run python scripts/check_web_build_determinism.py
 ```
 
-`web/dist` 必须被忽略。不得恢复 `src/agentharness/web_dist` 或 Python Web 打包逻辑。
+`web/dist` 必须被忽略。确定性脚本还必须确认其全部文件与 Java 内嵌的 `procurement-service/src/main/resources/static` 逐字节一致；不得恢复 `src/agentharness/web_dist` 或 Python Web 打包逻辑。
 
 ## 4. 冻结契约
 
@@ -57,23 +57,31 @@ uv run python scripts/evaluate_procurement.py verify --input output/procurement-
 
 ## 5. Compose
 
-在 Windows 中文路径遇到 BuildKit header 错误时使用：
-
 ```powershell
-$env:DOCKER_BUILDKIT='0'
-docker build -f Dockerfile.agent -t caijiatai-agent:0.4.0 .
-docker build -f procurement-service/Dockerfile -t caijiatai-procurement:0.4.0 .
+docker compose build
 docker compose up -d --no-build
 docker compose ps
 ```
 
+如果当前 Docker Desktop/Compose 版本在 `docker compose build` 阶段报
+`header key "x-docker-expose-session-sharedkey" contains value with non-printable ASCII characters`，这是 Compose Bake 的环境兼容性问题，不是应用构建失败。保留 Compose 配置校验后，使用等价的 direct build fallback：
+
+```powershell
+docker build -f Dockerfile.agent -t caijiatai-agent:0.5.0 .
+docker build -f procurement-service/Dockerfile -t caijiatai-procurement:0.5.0 .
+docker compose up -d --no-build
+docker compose ps
+```
+
+不要用 `DOCKER_BUILDKIT=0` 绕过；它在当前 Docker Desktop 上不能修复该 Bake header 错误。
+
 检查：
 
-- 三个服务 healthy；
+- MySQL、Redis、Kafka、Agent、Procurement 五个服务 healthy；
 - 只有 `127.0.0.1:8741->8741` 映射宿主机；
-- Java `/api/health` 报告版本 0.4.0、API Schema 11、数据库 ready 和独立 Agent 状态；
+- Java `/api/health` 报告版本 0.5.0、API Schema 11、数据库 ready 和独立 Agent 状态；
 - Java readiness 在 Agent 停止时仍为 UP；
-- Python internal-only 无 Token 返回 401，有效 Token 才能访问 Runtime；
+- Java/Python Kafka envelope 的 HMAC、`payload_sha256` 和双侧幂等校验通过；无 Kafka 凭据的客户端被拒绝；
 - Java Host/Origin 边界拒绝非本地生产请求。
 
 ## 6. 隔离无头浏览器
@@ -89,13 +97,13 @@ docker compose ps
 7. 重复审批：只存在一个正式决定、一个订单和一个邮件。
 8. 并发失效：修正与审批竞争时旧审批 stale，迟到结果被拒绝。
 9. Agent 中断恢复：accepted operation 不丢失，恢复后沿原 operation 继续。
-10. Runtime 降级：Agent 停止时业务报告 HTTP 200，实时 Runtime 结构化 503。
+10. Runtime 降级：Agent 停止时业务报告和已投影 Run 审计可读，实时 `/api/runtime` 返回结构化 503。
 11. V2 动态规格：标签/key 映射和 `µm/mm/cm/m` 单位换算正确。
 12. 异步失败：错误可见且任务不永久停在 analyzing。
 13. SSE：连接超过 30 秒不被服务器超时，保留 ID、Last-Event-ID、心跳和重连。
 14. 控制台无应用错误；文字无溢出或重叠；核心控件在两种视口可见可用。
 
-批准报告必须可见 2 个执行 Artifact 和 PostgreSQL 供应商历史。截图、trace 和日志只写临时/忽略目录，并在验收后删除。
+批准报告必须可见 2 个执行 Artifact 和 MySQL 供应商历史。截图、trace 和日志只写临时/忽略目录，并在验收后删除。
 
 ## 7. 故障与事务
 
@@ -104,7 +112,7 @@ docker compose ps
 - 同幂等键同载荷返回原结果；异载荷返回 409。
 - 需求/报价修正原子失效快照与 pending decision。
 - 最终提交锁定并复核任务版本、快照、输入哈希、资格、审批摘要和日期。
-- PostgreSQL 回滚不留下部分业务状态；乐观锁冲突返回 409。
+- MySQL 回滚不留下部分业务状态；乐观锁冲突返回 409。
 - Java Artifact Store 拒绝路径穿越并验证 SHA-256。
 - Python 关闭时采购报告仍返回 200 且明确 `runtime_evidence_status=unavailable`。
 
@@ -113,8 +121,8 @@ docker compose ps
 - 检查 `git status` 和所有新增路径所有者；
 - 删除本次任务创建的 `.playwright-cli`、截图、trace、日志、临时数据库和演示输出；
 - 不删除归属不明的预存用户数据；
-- 清理测试容器后用新 PostgreSQL/Agent/Artifact 卷完成一次最终 Compose 闭环；
-- 最后保持 `docker compose ps` 三服务 healthy，并确认 [http://127.0.0.1:8741](http://127.0.0.1:8741) 可访问。
+- 清理测试容器后用新 MySQL/Agent/Artifact 卷完成一次最终 Compose 闭环；
+- 最后保持 `docker compose ps` 五服务 healthy，并确认 [http://127.0.0.1:8741](http://127.0.0.1:8741) 可访问。
 
 旧 SQLite 采购数据只可归档，不自动导入或双写。任何未验证的 Compose/Testcontainers/浏览器项都不能以单元测试绿灯替代。
 
@@ -137,7 +145,8 @@ python scripts/check_web_build_determinism.py
 # 确认 procurement-service/src/main/resources/static 与 web/dist 一致
 
 # Compose 五服务
-docker compose up -d --build
+docker compose build
+docker compose up -d --no-build
 docker compose ps   # mysql/redis/kafka/agent/procurement healthy
 # 仅 127.0.0.1:8741 暴露；无 MQ 凭据访问失败；杀 agent 后命令滞留、重启续跑
 ```

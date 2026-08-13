@@ -52,8 +52,12 @@ function working(status?: string | null) {
   return status === "pending" || status === "running" || status === "waiting_approval";
 }
 
+function toolSucceeded(status?: string | null) {
+  return status === "succeeded" || status === "completed";
+}
+
 function toolTone(status: string) {
-  if (status === "succeeded") return "success";
+  if (toolSucceeded(status)) return "success";
   if (status === "failed" || status === "cancelled") return "danger";
   if (status === "indeterminate") return "warning";
   return "active";
@@ -88,7 +92,7 @@ function ToolState({ invocation }: { invocation: ToolInvocationRow }) {
       </span>
       <span>
         <strong>{TOOL_LABELS[invocation.tool_name] || invocation.tool_name}</strong>
-        <small>{invocation.status === "succeeded" ? "已完成" : invocation.status === "failed" ? "失败" : invocation.status === "indeterminate" ? "结果待确认" : "执行中"}</small>
+        <small>{toolSucceeded(invocation.status) ? "已完成" : invocation.status === "failed" ? "失败" : invocation.status === "indeterminate" ? "结果待确认" : "执行中"}</small>
       </span>
     </li>
   );
@@ -334,7 +338,7 @@ export function ProcurementConversation({
         ) : null}
         {visibleTools.length ? (
           <section className="proc-conversation-tools">
-            <header><span>工具进度</span><strong>{visibleTools.filter((item) => item.status === "succeeded").length}/{visibleTools.length}</strong></header>
+            <header><span>工具进度</span><strong>{visibleTools.filter((item) => toolSucceeded(item.status)).length}/{visibleTools.length}</strong></header>
             <ol>{visibleTools.map((item) => <ToolState invocation={item} key={item.id} />)}</ol>
             {foldedToolCount ? <small className="proc-conversation-history-note">已折叠 {foldedToolCount} 次失败尝试，完整记录见运行审计</small> : null}
           </section>

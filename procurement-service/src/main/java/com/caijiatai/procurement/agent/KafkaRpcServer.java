@@ -25,7 +25,7 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
 @Component
-@ConditionalOnProperty(prefix = "app.agent", name = "mode", havingValue = "kafka")
+@ConditionalOnProperty(prefix = "app", name = "agent-mode", havingValue = "kafka")
 public final class KafkaRpcServer {
     public static final String REQUESTS_TOPIC = "caijiatai.rpc.requests";
     public static final String RESPONSES_TOPIC = "caijiatai.rpc.responses";
@@ -61,8 +61,8 @@ public final class KafkaRpcServer {
         var correlationId = text(envelope.get("correlation_id"));
         var kind = text(envelope.get("kind"));
         var requestSha = text(envelope.get("request_sha256"));
-        var signature = text(envelope.get("signature"));
-        if (!MessageCodec.verify(hmacKey, correlationId, requestSha, "rpc", signature)) {
+        if (!MessageCodec.verifyEnvelope(hmacKey, envelope)
+                || !requestSha.equals(CanonicalJson.sha256(map(envelope.get("payload"))))) {
             log.warn("RPC 签名校验失败：{}", correlationId);
             return;
         }
@@ -88,7 +88,7 @@ public final class KafkaRpcServer {
         response.put("error", error);
         response.put("request_sha256", requestSha);
         response.put("processed_at", Instant.now().toString());
-        response.put("signature", MessageCodec.sign(hmacKey, correlationId, requestSha, "rpc"));
+        response.put("signature", MessageCodec.signEnvelope(hmacKey, response));
         kafka.send(RESPONSES_TOPIC, correlationId, CanonicalJson.bytes(response));
     }
 

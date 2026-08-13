@@ -1,15 +1,14 @@
 package com.caijiatai.procurement.config;
 
-import java.net.URI;
 import java.nio.file.Path;
+import java.net.URI;
+import java.util.Set;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 @ConfigurationProperties("app")
 public record AppProperties(
         String localOperator,
         Path artifactRoot,
-        URI agentBaseUrl,
-        String agentInternalToken,
         URI allowedViteOrigin,
         boolean developmentMode,
         Outbox outbox,
@@ -24,14 +23,14 @@ public record AppProperties(
         if (artifactRoot == null) {
             artifactRoot = Path.of("data", "artifacts");
         }
-        if (agentInternalToken == null || agentInternalToken.isBlank()) {
-            throw new IllegalArgumentException("app.agent-internal-token must not be blank");
-        }
         if (agentMode == null || agentMode.isBlank()) {
-            agentMode = "http";
+            agentMode = "kafka";
         }
-        if (internalHmacKey == null || internalHmacKey.isBlank()) {
-            internalHmacKey = "development-only-hmac-key-change-me";
+        if (!Set.of("kafka", "demo").contains(agentMode)) {
+            throw new IllegalArgumentException("app.agent-mode must be kafka or demo");
+        }
+        if (internalHmacKey == null || internalHmacKey.getBytes(java.nio.charset.StandardCharsets.UTF_8).length < 32) {
+            throw new IllegalArgumentException("app.internal-hmac-key must be at least 32 bytes");
         }
         if (demoSeed == null) {
             demoSeed = new DemoSeed(false, Path.of("..", "output", "procurement-scenarios"));

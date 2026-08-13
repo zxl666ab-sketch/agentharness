@@ -8,12 +8,20 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.caijiatai.procurement.agent.AgentClient;
+import com.caijiatai.procurement.agent.AgentDispatcher;
 import com.caijiatai.procurement.agent.AgentCommandRepository;
 import com.caijiatai.procurement.agent.AgentOutboxWorker;
 import com.caijiatai.procurement.agent.AgentResultApplication;
 import com.caijiatai.procurement.agent.CanonicalJson;
 import com.caijiatai.procurement.agent.IdempotencyRecordRepository;
+import com.caijiatai.procurement.ai.AiResult;
+import com.caijiatai.procurement.ai.AiResultRepository;
+import com.caijiatai.procurement.ai.AiTask;
+import com.caijiatai.procurement.ai.AiTaskRepository;
+import com.caijiatai.procurement.ai.AiTaskService;
+import com.caijiatai.procurement.ai.AiTaskStatus;
+import com.caijiatai.procurement.ai.AiTaskType;
+import com.caijiatai.procurement.ai.AiErrorCategory;
 import com.caijiatai.procurement.api.ApiException;
 import com.caijiatai.procurement.approval.ApprovalService;
 import com.caijiatai.procurement.approval.PendingDecision;
@@ -25,6 +33,12 @@ import com.caijiatai.procurement.comparison.ComparisonSnapshotRepository;
 import com.caijiatai.procurement.quote.ProcurementQuote;
 import com.caijiatai.procurement.quote.ProcurementQuoteRepository;
 import com.caijiatai.procurement.report.ProcurementReportService;
+import com.caijiatai.procurement.review.ReviewAction;
+import com.caijiatai.procurement.review.ReviewDtos;
+import com.caijiatai.procurement.review.ReviewRecord;
+import com.caijiatai.procurement.review.ReviewRecordRepository;
+import com.caijiatai.procurement.review.ReviewService;
+import com.caijiatai.procurement.review.ReviewStatus;
 import com.caijiatai.procurement.task.ProcurementDtos;
 import com.caijiatai.procurement.task.ProcurementTask;
 import com.caijiatai.procurement.task.ProcurementTaskRepository;
@@ -45,6 +59,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -55,7 +70,8 @@ import org.testcontainers.mysql.MySQLContainer;
 
 @Testcontainers
 @SpringBootTest(properties = {
-        "app.agent-internal-token=test-internal-token",
+        "app.agent-mode=demo",
+        "app.internal-hmac-key=test-hmac-key-for-spring-context-0123456789abcdef",
         "app.artifact-root=target/test-artifacts",
         "app.outbox.enabled=false"
 })
@@ -84,12 +100,17 @@ class MySqlIntegrationTest {
     @Autowired ProcurementDecisionRepository decisions;
     @Autowired AgentCommandRepository commands;
     @Autowired IdempotencyRecordRepository idempotency;
+    @Autowired AiTaskRepository aiTasks;
+    @Autowired AiResultRepository aiResults;
+    @Autowired AiTaskService aiTaskService;
     @Autowired ProcurementTaskService taskService;
     @Autowired ComparisonService comparisonService;
     @Autowired ApprovalService approvalService;
     @Autowired ArtifactStore artifactStore;
     @Autowired AgentResultApplication resultApplication;
     @Autowired ProcurementReportService reportService;
+    @Autowired ReviewRecordRepository reviewRecords;
+    @Autowired ReviewService reviewService;
     @Autowired EntityManagerFactory entityManagerFactory;
     @Autowired PlatformTransactionManager transactionManager;
 
@@ -135,6 +156,47 @@ class MySqlIntegrationTest {
     }
 
     @Test
+    void aiTaskDomainEnforcesOwnershipGenerationIdempotencyAndSingleResult() {
+        var task = tasks.saveAndFlush(newTask());
+        var inputSha = "1".repeat(64);
+        var first = aiTasks.saveAndFlush(AiTask.create(
+                task.getId(), AiTaskType.QUOTE_ANALYSIS, 1, task.getVersion(),
+                inputSha, "same-request", "采购员", 3));
+        var nextGeneration = aiTasks.saveAndFlush(AiTask.create(
+                task.getId(), AiTaskType.QUOTE_ANALYSIS, 2, task.getVersion(),
+                "2".repeat(64), "same-request", "采购员", 3));
+
+        assertThat(nextGeneration.getGeneration()).isEqualTo(2);
+        assertThat(aiTasks.findByBusinessIdOrderByCreatedAtDesc(task.getId())).hasSize(2);
+        assertThatThrownBy(() -> transactions.executeWithoutResult(ignored ->
+                aiTasks.saveAndFlush(AiTask.create(
+                        task.getId(), AiTaskType.QUOTE_ANALYSIS, 1, task.getVersion(),
+                        inputSha, "same-request", "采购员", 3))))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> transactions.executeWithoutResult(ignored ->
+                aiTasks.saveAndFlush(AiTask.create(
+                        "f".repeat(32), AiTaskType.QUOTE_ANALYSIS, 1, 0,
+                        inputSha, "unknown-business", "采购员", 3))))
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        var result = aiResults.saveAndFlush(AiResult.create(
+                first.getId(), task.getId(), 1, inputSha,
+                Map.of("summary", "raw"),
+                Map.of("summary", "structured"),
+                List.of(),
+                "procurement_fake", "deterministic", "quote-analysis-v1", "parser-v3"));
+        assertThat(result.getResultSha256()).hasSize(64);
+        assertThatThrownBy(() -> transactions.executeWithoutResult(ignored ->
+                aiResults.saveAndFlush(AiResult.create(
+                        first.getId(), task.getId(), 1, inputSha,
+                        Map.of("summary", "other"),
+                        Map.of("summary", "other"),
+                        List.of(),
+                        "procurement_fake", "deterministic", "quote-analysis-v1", "parser-v3"))))
+                .isInstanceOf(DataIntegrityViolationException.class);
+    }
+
+    @Test
     void persistentIdempotencyReplaysAndRejectsChangedPayload() {
         var first = taskService.createStructured(requirement("10"), "stable-create-key");
         var replay = taskService.createStructured(requirement("10.0"), "stable-create-key");
@@ -163,6 +225,66 @@ class MySqlIntegrationTest {
         assertThat(replay.operationId()).isEqualTo(first.operationId());
         assertThat(commands.findAll()).extracting(command -> command.getOperationType())
                 .containsExactly("analyze");
+        assertThat(aiTasks.count()).isEqualTo(1);
+        assertThat(tasks.findById(taskId).orElseThrow().getStatus()).isEqualTo("ready");
+    }
+
+    @Test
+    void aiAnalysisPersistsStepsExplanationAndDeterministicSnapshot() {
+        var taskId = preparedAnalyzableTask();
+        var accepted = taskService.analyze(taskId, "ai-analysis-once");
+        var command = commands.findById(accepted.operationId()).orElseThrow();
+        var aiTask = aiTasks.findByOperationId(command.getOperationId()).orElseThrow();
+
+        assertThat(tasks.findById(taskId).orElseThrow().getStatus()).isEqualTo("ready");
+        assertThat(aiTask.getStatus()).isEqualTo(AiTaskStatus.PENDING);
+        assertThat(aiTask.getInputSha256()).isEqualTo(command.getPayload().get("input_sha256"));
+
+        aiTaskService.markDispatching(command);
+        aiTaskService.applyStepEvent(Map.ofEntries(
+                Map.entry("ai_task_id", aiTask.getId()),
+                Map.entry("operation_id", command.getOperationId()),
+                Map.entry("attempt", 1),
+                Map.entry("sequence", 1),
+                Map.entry("step", "INPUT_VALIDATE"),
+                Map.entry("step_status", "RUNNING"),
+                Map.entry("progress", "0.02"),
+                Map.entry("summary", "校验输入"),
+                Map.entry("occurred_at", "2026-08-12T12:00:00Z")));
+        assertThat(aiTasks.findById(aiTask.getId()).orElseThrow().getStatus())
+                .isEqualTo(AiTaskStatus.RUNNING);
+
+        var client = mock(AgentDispatcher.class);
+        when(client.dispatch(any())).thenReturn(new AgentDispatcher.DispatchResult(200, Map.of(
+                "status", "completed",
+                "result", Map.ofEntries(
+                        Map.entry("run_id", RUN_ID),
+                        Map.entry("input_sha256", command.getPayload().get("input_sha256")),
+                        Map.entry("structured_result", Map.of(
+                                "summary", "已核对两份报价，确定性计算由 Java 完成",
+                                "risk_flags", List.of())),
+                        Map.entry("sources", List.of()),
+                        Map.entry("provider", "procurement_fake"),
+                        Map.entry("model", "deterministic"),
+                        Map.entry("prompt_version", "quote-analysis-v1"),
+                        Map.entry("parser_version", "packaging-quote-v3")))));
+
+        transactions.executeWithoutResult(ignored ->
+                new AgentOutboxWorker(commands, tasks, client, resultApplication, aiTaskService).dispatch());
+
+        var completedTask = aiTasks.findById(aiTask.getId()).orElseThrow();
+        var detail = aiTaskService.detail(aiTask.getId());
+        assertThat(completedTask.getStatus()).isEqualTo(AiTaskStatus.SUCCEEDED);
+        assertThat(completedTask.getProgress()).isEqualByComparingTo("1");
+        assertThat(tasks.findById(taskId).orElseThrow().getStatus()).isEqualTo("analyzed");
+        assertThat(snapshots.findFirstByTaskIdOrderBySnapshotVersionDesc(taskId)).isPresent();
+        assertThat(aiResults.findByAiTaskId(aiTask.getId())).isPresent();
+        assertThat((List<?>) detail.get("records")).hasSize(2);
+        var persistedResult = (Map<?, ?>) detail.get("result");
+        assertThat(persistedResult.containsKey("ai_result_id")).isTrue();
+        assertThat(persistedResult.containsKey("input_sha256")).isTrue();
+        assertThat(persistedResult.containsKey("result_sha256")).isTrue();
+        assertThat(persistedResult.containsKey("structured_result")).isTrue();
     }
 
     @Test
@@ -200,12 +322,12 @@ class MySqlIntegrationTest {
             return task.getId();
         });
         var accepted = taskService.analyze(taskId, "missing-fx-analysis");
-        var client = mock(AgentClient.class);
-        when(client.dispatch(any())).thenReturn(new AgentClient.DispatchResult(200, Map.of(
+        var client = mock(AgentDispatcher.class);
+        when(client.dispatch(any())).thenReturn(new AgentDispatcher.DispatchResult(200, Map.of(
                 "status", "completed", "result", Map.of("run_id", RUN_ID))));
 
         transactions.executeWithoutResult(ignored ->
-                new AgentOutboxWorker(commands, tasks, client, resultApplication).dispatch());
+                new AgentOutboxWorker(commands, tasks, client, resultApplication, aiTaskService).dispatch());
 
         assertThat(commands.findById(accepted.operationId()).orElseThrow().getStatus()).isEqualTo("failed");
         assertThat(commands.findById(accepted.operationId()).orElseThrow().getLastError())
@@ -214,26 +336,274 @@ class MySqlIntegrationTest {
     }
 
     @Test
+    void agentOutageExhaustsDeliveryThenManualRetryRecoversTheSameAiTask() {
+        var taskId = preparedAnalyzableTask();
+        var accepted = taskService.analyze(taskId, "outage-analysis");
+        var firstOperationId = accepted.operationId();
+        var aiTaskId = aiTasks.findByOperationId(firstOperationId).orElseThrow().getId();
+        var unavailable = mock(AgentDispatcher.class);
+        when(unavailable.dispatch(any())).thenThrow(new AgentDispatcher.AgentUnavailableException(
+                "Agent unavailable", new IllegalStateException("stopped")));
+        var worker = new AgentOutboxWorker(
+                commands, tasks, unavailable, resultApplication, aiTaskService);
+
+        for (var attempt = 1; attempt <= 4; attempt++) {
+            transactions.executeWithoutResult(ignored -> worker.dispatch());
+            if (attempt < 4) {
+                jdbc.update(
+                        "update agent_command set next_attempt_at = date_sub(now(), interval 1 second) "
+                                + "where operation_id = ?",
+                        firstOperationId);
+            }
+        }
+
+        var failedCommand = commands.findById(firstOperationId).orElseThrow();
+        var failedTask = aiTasks.findById(aiTaskId).orElseThrow();
+        assertThat(failedCommand.getStatus()).isEqualTo("failed");
+        assertThat(failedCommand.getAttemptCount()).isEqualTo(4);
+        assertThat(failedTask.getStatus()).isEqualTo(AiTaskStatus.FAILED);
+        assertThat(failedTask.getErrorCategory()).isEqualTo(AiErrorCategory.TRANSPORT);
+        assertThat(failedTask.isRetryable()).isTrue();
+        assertThat(tasks.findById(taskId).orElseThrow().getStatus()).isEqualTo("ready");
+
+        var retry = aiTaskService.retry(aiTaskId, "manual-retry-key", false);
+        var replay = aiTaskService.retry(aiTaskId, "manual-retry-key", false);
+        assertThat(replay.getOperationId()).isEqualTo(retry.getOperationId());
+        assertThat(retry.getOperationId()).isNotEqualTo(firstOperationId);
+        assertThat(retry.getRetryCount()).isEqualTo(1);
+        assertThat(commands.count()).isEqualTo(2);
+
+        var retryCommand = commands.findById(retry.getOperationId()).orElseThrow();
+        var recovered = mock(AgentDispatcher.class);
+        when(recovered.dispatch(any())).thenReturn(analysisResponse(retryCommand));
+        transactions.executeWithoutResult(ignored -> new AgentOutboxWorker(
+                commands, tasks, recovered, resultApplication, aiTaskService).dispatch());
+
+        assertThat(aiTasks.findById(aiTaskId).orElseThrow().getStatus())
+                .isEqualTo(AiTaskStatus.SUCCEEDED);
+        assertThat(aiResults.findByAiTaskId(aiTaskId)).isPresent();
+        assertThat(tasks.findById(taskId).orElseThrow().getStatus()).isEqualTo("analyzed");
+    }
+
+    @Test
+    void cancelIsIdempotentAndLateResultCannotMutateBusinessState() {
+        var taskId = preparedAnalyzableTask();
+        var accepted = taskService.analyze(taskId, "cancel-analysis");
+        var command = commands.findById(accepted.operationId()).orElseThrow();
+        var aiTask = aiTasks.findByOperationId(command.getOperationId()).orElseThrow();
+
+        var cancelled = aiTaskService.cancel(aiTask.getId(), "cancel-once-key");
+        var replay = aiTaskService.cancel(aiTask.getId(), "cancel-once-key");
+        assertThat(cancelled.getStatus()).isEqualTo(AiTaskStatus.CANCELLED);
+        assertThat(replay.getStatus()).isEqualTo(AiTaskStatus.CANCELLED);
+        assertThat(commands.findById(command.getOperationId()).orElseThrow().getStatus())
+                .isEqualTo("cancelled");
+
+        // A result arriving after cancellation is not dispatched or applied.
+        transactions.executeWithoutResult(ignored -> new AgentOutboxWorker(
+                commands, tasks, mock(AgentDispatcher.class), resultApplication, aiTaskService).dispatch());
+        assertThat(snapshots.findFirstByTaskIdOrderBySnapshotVersionDesc(taskId)).isEmpty();
+        assertThat(aiResults.findByAiTaskId(aiTask.getId())).isEmpty();
+        assertThat(tasks.findById(taskId).orElseThrow().getStatus()).isEqualTo("ready");
+    }
+
+    @Test
+    void procurementCorrectionMarksHistoricalAiTaskAndResultStale() {
+        var taskId = preparedAnalyzableTask();
+        var accepted = taskService.analyze(taskId, "stale-analysis");
+        var command = commands.findById(accepted.operationId()).orElseThrow();
+        var aiTaskId = aiTasks.findByOperationId(command.getOperationId()).orElseThrow().getId();
+        var client = mock(AgentDispatcher.class);
+        when(client.dispatch(any())).thenReturn(analysisResponse(command));
+        transactions.executeWithoutResult(ignored -> new AgentOutboxWorker(
+                commands, tasks, client, resultApplication, aiTaskService).dispatch());
+
+        taskService.correctRequirement(taskId, requirement("10001"));
+
+        var staleTask = aiTasks.findById(aiTaskId).orElseThrow();
+        var staleResult = aiResults.findByAiTaskId(aiTaskId).orElseThrow();
+        assertThat(staleTask.getStatus()).isEqualTo(AiTaskStatus.SUCCEEDED);
+        assertThat(staleTask.isStale()).isTrue();
+        assertThat(staleTask.getStaleReason()).isEqualTo("INPUT_GENERATION_CHANGED");
+        assertThat(staleResult.isStale()).isTrue();
+        assertThat(staleResult.getStaleReason()).isEqualTo("INPUT_GENERATION_CHANGED");
+        assertThat(tasks.findById(taskId).orElseThrow().getCurrentSnapshotId()).isNull();
+    }
+
+    @Test
+    void approveSuggestionKeepsAiAdviceImmutableAndFinalizesExactlyOnce() {
+        var fixture = pendingReview(false);
+        var initialDetail = reviewService.detail(fixture.review().getId());
+        var comparisonDetail = (Map<?, ?>) initialDetail.get("comparison");
+        assertThat(comparisonDetail.get("id")).isEqualTo(fixture.review().getSnapshotId());
+        assertThat(comparisonDetail.get("input_sha256")).isEqualTo(fixture.review().getInputSha256());
+        assertThat(initialDetail)
+                .containsEntry("generation", fixture.review().getGeneration())
+                .containsEntry("snapshot_id", fixture.review().getSnapshotId())
+                .containsEntry("decision_id", null);
+        var originalResult = Map.copyOf(aiResults.findById(fixture.review().getAiResultId())
+                .orElseThrow().getStructuredResult());
+        var request = new ReviewDtos.ActionRequest(
+                ReviewAction.APPROVE_SUGGESTION,
+                fixture.review().getVersion(),
+                "采购员甲",
+                null,
+                Map.of(),
+                "已核对报价原件与到货成本");
+
+        reviewService.action(fixture.review().getId(), request, "review-approve-once");
+        reviewService.action(fixture.review().getId(), request, "review-approve-once");
+        completeReviewDecision(fixture.review().getId());
+
+        var completed = reviewRecords.findById(fixture.review().getId()).orElseThrow();
+        assertThat(completed.getStatus()).isEqualTo(ReviewStatus.APPROVED);
+        assertThat(completed.getAction()).isEqualTo(ReviewAction.APPROVE_SUGGESTION);
+        assertThat(completed.getFinalQuoteId()).isEqualTo(completed.getSuggestedQuoteId());
+        assertThat(completed.getEvidenceSha256()).hasSize(64);
+        assertThat(decisions.count()).isEqualTo(1);
+        assertThat(aiResults.findById(completed.getAiResultId()).orElseThrow().getStructuredResult())
+                .isEqualTo(originalResult);
+    }
+
+    @Test
+    void reviseAndApproveStoresHumanValuesWithoutOverwritingTheSuggestion() {
+        var fixture = pendingReview(false);
+        var snapshot = snapshots.findById(fixture.review().getSnapshotId()).orElseThrow();
+        var alternative = ((List<?>) snapshot.getResult().get("quotes")).stream()
+                .map(item -> (Map<?, ?>) item)
+                .filter(item -> Boolean.TRUE.equals(item.get("eligible")))
+                .map(item -> String.valueOf(item.get("quote_id")))
+                .filter(id -> !id.equals(fixture.review().getSuggestedQuoteId()))
+                .findFirst().orElseThrow();
+        var suggestion = fixture.review().getSuggestedQuoteId();
+
+        reviewService.action(
+                fixture.review().getId(),
+                new ReviewDtos.ActionRequest(
+                        ReviewAction.REVISE_AND_APPROVE,
+                        fixture.review().getVersion(),
+                        "采购员乙",
+                        alternative,
+                        Map.of("supplier_selection", Map.of("from", suggestion, "to", alternative)),
+                        "交期与付款条件更适合"),
+                "review-revise-once");
+        completeReviewDecision(fixture.review().getId());
+
+        var completed = reviewRecords.findById(fixture.review().getId()).orElseThrow();
+        assertThat(completed.getStatus()).isEqualTo(ReviewStatus.APPROVED);
+        assertThat(completed.getSuggestedQuoteId()).isEqualTo(suggestion);
+        assertThat(completed.getFinalQuoteId()).isEqualTo(alternative);
+        assertThat(completed.getRevisions()).containsKey("supplier_selection");
+        assertThat(decisions.findByTaskId(fixture.taskId()).orElseThrow().getQuoteId())
+                .isEqualTo(alternative);
+    }
+
+    @Test
+    void rejectAndRetryIsIdempotentAndReturnsTheTaskToAnalysis() {
+        var fixture = pendingReview(false);
+        var request = new ReviewDtos.ActionRequest(
+                ReviewAction.REJECT_AND_RETRY,
+                fixture.review().getVersion(),
+                "采购员丙",
+                null,
+                Map.of(),
+                "报价来源需要补充核验");
+
+        reviewService.action(fixture.review().getId(), request, "review-reject-once");
+        reviewService.action(fixture.review().getId(), request, "review-reject-once");
+
+        var rejected = reviewRecords.findById(fixture.review().getId()).orElseThrow();
+        var business = tasks.findById(fixture.taskId()).orElseThrow();
+        assertThat(rejected.getStatus()).isEqualTo(ReviewStatus.REJECTED);
+        assertThat(rejected.getReason()).isEqualTo("报价来源需要补充核验");
+        assertThat(business.getStatus()).isEqualTo("ready");
+        assertThat(business.getCurrentSnapshotId()).isNull();
+        assertThat(pendingDecisions.count()).isZero();
+        assertThat(decisions.count()).isZero();
+    }
+
+    @Test
+    void noAwardRequiresAllQuotesExcludedAndCreatesNoSupplierDecision() {
+        var fixture = pendingReview(true);
+        assertThat(fixture.review().getSuggestedQuoteId()).isNull();
+        assertThat(fixture.review().getRiskFlags()).contains("NO_ELIGIBLE_QUOTES");
+
+        reviewService.action(
+                fixture.review().getId(),
+                new ReviewDtos.ActionRequest(
+                        ReviewAction.NO_AWARD,
+                        fixture.review().getVersion(),
+                        "采购员丁",
+                        null,
+                        Map.of(),
+                        "全部报价均超过交期上限"),
+                "review-no-award");
+        completeReviewDecision(fixture.review().getId());
+
+        var completed = reviewRecords.findById(fixture.review().getId()).orElseThrow();
+        var decision = decisions.findByTaskId(fixture.taskId()).orElseThrow();
+        assertThat(completed.getStatus()).isEqualTo(ReviewStatus.NO_AWARD);
+        assertThat(decision.getDecision()).isEqualTo("no_award");
+        assertThat(decision.getQuoteId()).isNull();
+        assertThat(tasks.findById(fixture.taskId()).orElseThrow().getStatus()).isEqualTo("no_award");
+    }
+
+    @Test
+    void staleAndConcurrentReviewEvidenceCannotBeSubmitted() {
+        var fixture = pendingReview(false);
+        assertThatThrownBy(() -> reviewService.action(
+                fixture.review().getId(),
+                new ReviewDtos.ActionRequest(
+                        ReviewAction.APPROVE_SUGGESTION,
+                        fixture.review().getVersion() + 1,
+                        "采购员戊",
+                        null,
+                        Map.of(),
+                        "旧页面提交"),
+                "review-wrong-version"))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.code()).isEqualTo("review_version_conflict"));
+
+        taskService.correctRequirement(fixture.taskId(), requirement("10001"));
+        var stale = reviewRecords.findById(fixture.review().getId()).orElseThrow();
+        assertThat(stale.getStatus()).isEqualTo(ReviewStatus.STALE);
+        assertThat(stale.getStaleReason()).isEqualTo("INPUT_GENERATION_CHANGED");
+        assertThat(aiResults.findById(stale.getAiResultId()).orElseThrow().isStale()).isTrue();
+        assertThatThrownBy(() -> reviewService.action(
+                stale.getId(),
+                new ReviewDtos.ActionRequest(
+                        ReviewAction.APPROVE_SUGGESTION,
+                        stale.getVersion(),
+                        "采购员戊",
+                        null,
+                        Map.of(),
+                        "旧证据提交"),
+                "review-stale-evidence"))
+                .isInstanceOf(ApiException.class);
+        assertThat(decisions.count()).isZero();
+    }
+
+    @Test
     void acceptedResponseIsReplayedByANewWorkerWithTheSameOperationId() {
         var detail = taskService.createStructured(requirement("10"), "response-loss");
         var taskId = String.valueOf(detail.get("id"));
         var operationId = commands.findAll().getFirst().getOperationId();
-        var client = mock(AgentClient.class);
+        var client = mock(AgentDispatcher.class);
         when(client.dispatch(any())).thenReturn(
-                new AgentClient.DispatchResult(202, Map.of("status", "accepted")),
-                new AgentClient.DispatchResult(200, Map.of(
+                new AgentDispatcher.DispatchResult(202, Map.of("status", "accepted")),
+                new AgentDispatcher.DispatchResult(200, Map.of(
                         "status", "completed",
                         "result", Map.of("session_id", SESSION_ID, "run_id", RUN_ID))));
 
         transactions.executeWithoutResult(ignored ->
-                new AgentOutboxWorker(commands, tasks, client, resultApplication).dispatch());
+                new AgentOutboxWorker(commands, tasks, client, resultApplication, aiTaskService).dispatch());
         assertThat(commands.findById(operationId).orElseThrow().getStatus()).isEqualTo("accepted");
         jdbc.update(
                 "update agent_command set next_attempt_at = date_sub(now(), interval 1 second) where operation_id = ?",
                 operationId);
 
         transactions.executeWithoutResult(ignored ->
-                new AgentOutboxWorker(commands, tasks, client, resultApplication).dispatch());
+                new AgentOutboxWorker(commands, tasks, client, resultApplication, aiTaskService).dispatch());
 
         var recovered = tasks.findById(taskId).orElseThrow();
         assertThat(recovered.getSessionId()).isEqualTo(SESSION_ID);
@@ -361,6 +731,30 @@ class MySqlIntegrationTest {
     }
 
     @Test
+    void createsAndPersistsV2DynamicRequirement() {
+        var body = new ProcurementDtos.Requirement(
+                2, "上海仓 BOPP 透明封箱胶带采购", "ecommerce_packaging", "BOPP透明封箱胶带",
+                new BigDecimal("3000"), "roll", v2TapeSpecifications(),
+                new ProcurementDtos.Constraints(
+                        "CNY", Map.of("CNY", BigDecimal.ONE), 12, true,
+                        null, null, new BigDecimal("4.20"), "上海仓", null));
+
+        var created = taskService.createStructured(body, "v2-dynamic-create");
+        var stored = tasks.findById(String.valueOf(created.get("id"))).orElseThrow();
+
+        assertThat(created.get("schema_version")).isEqualTo(2);
+        assertThat(created.get("unit")).isEqualTo("roll");
+        assertThat(stored.getSchemaVersion()).isEqualTo(2);
+        assertThat(stored.getSpecifications()).containsKeys(
+                "width", "length", "thickness", "material", "color", "print_colors");
+        @SuppressWarnings("unchecked")
+        var length = (Map<String, Object>) stored.getSpecifications().get("length");
+        assertThat(length)
+                .containsEntry("value", "100")
+                .containsEntry("unit", "m");
+    }
+
+    @Test
     void approvalFallsBackToSnapshotRunIdWhenTaskHasNoBoundRun() {
         var taskId = transactions.execute(ignored -> {
             var task = newTask();
@@ -409,6 +803,48 @@ class MySqlIntegrationTest {
         var pending = pendingDecisions.findById(requested.pending().getId()).orElseThrow();
         var command = commands.findById(requested.command().getOperationId()).orElseThrow();
         return new PendingFixture(taskId, pending, command, approvalResult(pending));
+    }
+
+    private AgentDispatcher.DispatchResult analysisResponse(
+            com.caijiatai.procurement.agent.AgentCommand command) {
+        return new AgentDispatcher.DispatchResult(200, Map.of(
+                "status", "completed",
+                "result", Map.ofEntries(
+                        Map.entry("run_id", RUN_ID),
+                        Map.entry("input_sha256", command.getPayload().get("input_sha256")),
+                        Map.entry("structured_result", Map.of(
+                                "summary", "恢复后的确定性分析输入已核对",
+                                "risk_flags", List.of())),
+                        Map.entry("sources", List.of()),
+                        Map.entry("provider", "procurement_fake"),
+                        Map.entry("model", "deterministic"),
+                        Map.entry("prompt_version", "quote-analysis-v1"),
+                        Map.entry("parser_version", "packaging-quote-v3"))));
+    }
+
+    private ReviewFixture pendingReview(boolean allExcluded) {
+        var taskId = preparedAnalyzableTask();
+        if (allExcluded) {
+            taskService.correctRequirement(taskId, requirement("10000", 1));
+        }
+        var accepted = taskService.analyze(taskId, "review-analysis-once");
+        var command = commands.findById(accepted.operationId()).orElseThrow();
+        var client = mock(AgentDispatcher.class);
+        when(client.dispatch(any())).thenReturn(analysisResponse(command));
+        transactions.executeWithoutResult(ignored -> new AgentOutboxWorker(
+                commands, tasks, client, resultApplication, aiTaskService).dispatch());
+        var review = reviewRecords.findByBusinessIdOrderByCreatedAtAsc(taskId).getFirst();
+        return new ReviewFixture(taskId, review);
+    }
+
+    private void completeReviewDecision(String reviewId) {
+        var review = reviewRecords.findById(reviewId).orElseThrow();
+        var pending = pendingDecisions.findById(review.getPendingDecisionId()).orElseThrow();
+        var client = mock(AgentDispatcher.class);
+        when(client.dispatch(any())).thenReturn(new AgentDispatcher.DispatchResult(
+                200, Map.of("status", "completed", "result", approvalResult(pending))));
+        transactions.executeWithoutResult(ignored -> new AgentOutboxWorker(
+                commands, tasks, client, resultApplication, aiTaskService).dispatch());
     }
 
     private Map<String, Object> approvalResult(PendingDecision pending) {
@@ -518,7 +954,34 @@ class MySqlIntegrationTest {
                         "thickness_tolerance_um", "3"));
     }
 
+    private Map<String, Object> v2TapeSpecifications() {
+        var specs = new LinkedHashMap<String, Object>();
+        specs.put("width", dynamicNumber("宽度", "48", "mm"));
+        specs.put("length", dynamicNumber("长度", "100", "m"));
+        specs.put("thickness", dynamicNumber("厚度", "50", "µm"));
+        specs.put("material", dynamicText("材质", "BOPP"));
+        specs.put("color", dynamicText("颜色", "透明"));
+        specs.put("print_colors", dynamicNumber("印刷色数", "0", ""));
+        return specs;
+    }
+
+    private Map<String, Object> dynamicNumber(String label, String value, String unit) {
+        return Map.of(
+                "label", label, "type", "number", "value", value, "unit", unit,
+                "match", "exact", "priority", "hard");
+    }
+
+    private Map<String, Object> dynamicText(String label, String value) {
+        return Map.of(
+                "label", label, "type", "text", "value", value,
+                "match", "exact", "priority", "hard");
+    }
+
     private ProcurementDtos.Requirement requirement(String quantity) {
+        return requirement(quantity, 15);
+    }
+
+    private ProcurementDtos.Requirement requirement(String quantity, int maxLeadDays) {
         return new ProcurementDtos.Requirement(
                 1,
                 "测试采购",
@@ -536,7 +999,7 @@ class MySqlIntegrationTest {
                 new ProcurementDtos.Constraints(
                         "CNY",
                         Map.of("CNY", BigDecimal.ONE),
-                        15,
+                        maxLeadDays,
                         true,
                         new BigDecimal("2"),
                         new BigDecimal("3"),
@@ -560,4 +1023,6 @@ class MySqlIntegrationTest {
             PendingDecision pending,
             com.caijiatai.procurement.agent.AgentCommand command,
             Map<String, Object> agentResult) {}
+
+    private record ReviewFixture(String taskId, ReviewRecord review) {}
 }

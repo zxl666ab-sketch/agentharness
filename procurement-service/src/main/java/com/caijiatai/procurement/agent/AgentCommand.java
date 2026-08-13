@@ -115,6 +115,11 @@ public class AgentCommand {
         nextAttemptAt = Instant.now();
     }
 
+    public void republished() {
+        attemptCount += 1;
+        published();
+    }
+
     public void complete(Map<String, Object> result) {
         status = "completed";
         this.result = result == null ? Map.of() : new LinkedHashMap<>(result);
@@ -122,16 +127,31 @@ public class AgentCommand {
         lastError = null;
     }
 
-    public void retry(String error) {
+    public boolean retry(String error, int maxAttempts) {
+        if (attemptCount >= maxAttempts) {
+            fail(error);
+            return false;
+        }
         status = "pending";
         lastError = error == null ? "agent unavailable" : error.substring(0, Math.min(error.length(), 1000));
         long delay = Math.min(60, 1L << Math.min(attemptCount, 6));
         nextAttemptAt = Instant.now().plusSeconds(delay);
+        return true;
+    }
+
+    public void defer(long seconds) {
+        nextAttemptAt = Instant.now().plusSeconds(Math.max(0, seconds));
     }
 
     public void fail(String error) {
         status = "failed";
         lastError = error == null ? "agent command failed" : error.substring(0, Math.min(error.length(), 1000));
         completedAt = Instant.now();
+    }
+
+    public void cancel() {
+        status = "cancelled";
+        completedAt = Instant.now();
+        lastError = null;
     }
 }

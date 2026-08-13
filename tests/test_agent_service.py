@@ -74,25 +74,47 @@ def make_service(monkeypatch, fake_db):
 
 
 def envelope(operation_id="op-" + "a" * 30, operation_type="analyze", payload=None):
-    payload = payload or {"task_id": "t" * 32}
+    payload = payload or {
+        "task_id": "a" * 32,
+        "business_id": "a" * 32,
+        "ai_task_id": "b" * 32,
+        "trace_id": "c" * 32,
+        "task_type": "QUOTE_ANALYSIS",
+        "file_ids": [],
+        "input_sha256": "d" * 64,
+    }
     payload_sha = svc._sha256(payload)
-    return {
+    value = {
         "operation_id": operation_id,
         "operation_type": operation_type,
-        "aggregate_id": "t" * 32,
+        "schema_version": 1,
+        "message_type": "ai_task.command" if operation_type == "analyze" else "agent.command",
+        "message_id": "e" * 32,
+        "aggregate_id": "a" * 32,
         "generation": 1,
         "expected_task_version": 0,
         "payload_sha256": payload_sha,
         "payload": payload,
-        "signature": svc._hmac_sign(CONFIG["AGENT_INTERNAL_HMAC_KEY"], "command", operation_id, payload_sha),
     }
+    if operation_type == "analyze":
+        value.update({
+            "ai_task_id": "b" * 32,
+            "business_id": "a" * 32,
+            "trace_id": "c" * 32,
+            "task_type": "QUOTE_ANALYSIS",
+            "file_ids": [],
+        })
+    value["signature"] = svc._sign_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], value)
+    return value
 
 
 def test_hmac_roundtrip():
     key = CONFIG["AGENT_INTERNAL_HMAC_KEY"]
-    sig = svc._hmac_sign(key, "command", "op-1", "sha")
-    assert svc._hmac_verify(key, "command", "op-1", "sha", sig)
-    assert not svc._hmac_verify(key, "command", "op-1", "sha", "bad")
+    envelope = {"kind": "command", "operation_id": "op-1", "payload": {"x": 1}}
+    envelope["signature"] = svc._sign_envelope(key, envelope)
+    assert svc._verify_envelope(key, envelope)
+    envelope["payload"]["x"] = 2
+    assert not svc._verify_envelope(key, envelope)
 
 
 def test_fake_requirement_extracts_specs():
@@ -107,6 +129,7 @@ def test_fake_requirement_extracts_specs():
 
 def test_analyze_publishes_result_and_events(monkeypatch, fake_db):
     service = make_service(monkeypatch, fake_db)
+    service.rpc.call = lambda kind, payload: {"quotes": []}
     published = []
     service._publish_result = lambda *a, **k: published.append(a)
     service.handle_command(envelope())
@@ -115,18 +138,21 @@ def test_analyze_publishes_result_and_events(monkeypatch, fake_db):
     assert status == "completed"
     assert result["run_id"].startswith("0" * 0)  # any 32-hex
     assert len(result["run_id"]) == 32
-    # events were emitted (run_started, run_completed)
+    assert result["structured_result"]["quote_count"] == 0
+    assert result["provider"] == "procurement_fake"
+    # Six observable steps emit RUNNING/SUCCEEDED, plus run lifecycle events.
     sent = [call.args[0] for call in service.producer.send.call_args_list if call.args[0] == svc.EVENTS_TOPIC]
-    assert len(sent) == 4  # run_started, tool_call_start, tool_result, run_completed
+    assert len(sent) == 14
 
 
 def test_idempotent_replay_skips_execution(monkeypatch, fake_db):
     service = make_service(monkeypatch, fake_db)
     published = []
     service._publish_result = lambda *a, **k: published.append(a)
+    command = envelope()
     existing = {
-        "operation_id": envelope()["operation_id"],
-        "payload_sha256": svc._sha256({"task_id": "t" * 32}),
+        "operation_id": command["operation_id"],
+        "payload_sha256": command["payload_sha256"],
         "status": "completed",
         "result": '{"run_id": "%s"}' % ("a" * 32),
         "error": None,
@@ -135,7 +161,7 @@ def test_idempotent_replay_skips_execution(monkeypatch, fake_db):
     service._load_operation = lambda operation_id: existing
     executed = []
     service._execute = lambda *a, **k: executed.append(a) or ({}, "completed", None)
-    service.handle_command(envelope())
+    service.handle_command(command)
     assert executed == []
     assert len(published) == 1
     assert published[0][2] == "completed"
@@ -186,8 +212,8 @@ def test_heartbeat_message_shape():
         "payload": payload,
         "occurred_at": "2026-08-11T00:00:00Z",
         "payload_sha256": payload_sha,
-        "signature": svc._hmac_sign(CONFIG["AGENT_INTERNAL_HMAC_KEY"], "event", "::heartbeat.ping", payload_sha),
     }
+    message["signature"] = svc._sign_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], message)
     assert message["type"] == "heartbeat.ping"
     assert message["global_seq"] == 1
 
@@ -208,6 +234,40 @@ def test_coerce_requirement_normalizes_llm_output():
     assert req["constraints"]["base_currency"] == "CNY"
     assert req["constraints"]["max_lead_days"] == 7
     assert req["specifications"]["material"] == "PE"
+
+
+def test_coerce_requirement_normalizes_print_colors():
+    base = {
+        "schema_version": 1,
+        "title": "采购",
+        "category": "ecommerce_packaging",
+        "item_name": "五层瓦楞纸箱",
+        "quantity": 5000,
+        "unit": "piece",
+        "specifications": {"width_mm": 400, "length_mm": 300, "height_mm": 250, "material": "瓦楞纸", "color": "牛皮色", "print_colors": "单色印刷"},
+        "constraints": {"max_lead_days": 20},
+    }
+    assert svc._coerce_requirement({**base, "specifications": {**base["specifications"], "print_colors": "单色印刷"}}, "x")["specifications"]["print_colors"] == 1
+    assert svc._coerce_requirement({**base, "specifications": {**base["specifications"], "print_colors": "2色"}}, "x")["specifications"]["print_colors"] == 2
+    assert svc._coerce_requirement({**base, "specifications": {**base["specifications"], "print_colors": "3"}}, "x")["specifications"]["print_colors"] == 3
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        svc._coerce_requirement({**base, "specifications": {**base["specifications"], "print_colors": "many"}}, "x")
+
+
+def test_coerce_requirement_keeps_carton_height():
+    base = {
+        "schema_version": 1,
+        "title": "采购",
+        "category": "ecommerce_packaging",
+        "item_name": "五层瓦楞纸箱",
+        "quantity": 5000,
+        "unit": "piece",
+        "specifications": {"width_mm": 400, "length_mm": 300, "height_mm": 250, "material": "瓦楞纸", "color": "牛皮色", "print_colors": 1},
+        "constraints": {"max_lead_days": 20},
+    }
+    req = svc._coerce_requirement(base, "x")
+    assert req["specifications"]["height_mm"] == 250
 
 
 def test_coerce_requirement_rejects_bad_quantity():
@@ -245,9 +305,10 @@ def test_accepted_without_result_is_reexecuted(monkeypatch, fake_db):
     service = make_service(monkeypatch, fake_db)
     published = []
     service._publish_result = lambda *a, **k: published.append(a)
+    command = envelope()
     existing = {
-        "operation_id": envelope()["operation_id"],
-        "payload_sha256": svc._sha256({"task_id": "t" * 32}),
+        "operation_id": command["operation_id"],
+        "payload_sha256": command["payload_sha256"],
         "status": "accepted",
         "result": None,
         "error": None,
@@ -256,7 +317,7 @@ def test_accepted_without_result_is_reexecuted(monkeypatch, fake_db):
     service._load_operation = lambda operation_id: existing
     executed = []
     service._execute = lambda *a, **k: executed.append(a) or ({"run_id": "r" * 32}, "completed", None)
-    service.handle_command(envelope())
+    service.handle_command(command)
     assert len(executed) == 1
     assert published[0][2] == "completed"
 
@@ -395,14 +456,22 @@ def test_rpc_loop_resolves_future(monkeypatch):
     from concurrent.futures import Future
     client = svc.RpcClient(dict(CONFIG), CONFIG["AGENT_INTERNAL_HMAC_KEY"])
     future = Future()
-    client._futures["corr-1"] = future
+    client._futures["corr-1"] = (future, "request-sha")
     record = type("R", (), {"value": {"correlation_id": "corr-1", "status": "ok", "result": {"k": "v"}}})()
-    correlation_id = str(record.value.get("correlation_id") or "")
-    popped = client._futures.pop(correlation_id, None)
-    if popped is not None and not popped.done():
-        popped.set_result(record.value)
+    record.value["request_sha256"] = "request-sha"
+    record.value["signature"] = svc._sign_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], record.value)
+    client.consumer = [record]
+    client._loop()
     assert future.done()
     assert future.result()["status"] == "ok"
+
+
+def test_envelope_signature_covers_result_body():
+    value = {"operation_id": "op", "status": "completed", "result": {"run_id": "a" * 32}}
+    value["signature"] = svc._sign_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], value)
+    assert svc._verify_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], value)
+    value["result"]["run_id"] = "b" * 32
+    assert not svc._verify_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], value)
 
 
 def test_emit_publishes_and_persists(monkeypatch, fake_db):
@@ -427,6 +496,50 @@ def test_publish_result_builds_signed_envelope(monkeypatch, fake_db):
     message = sent[0].kwargs["value"]
     assert message["status"] == "completed"
     assert message["signature"]
+
+
+def test_failure_details_distinguish_validation_provider_and_transport():
+    from agentharness.procurement.parsing import QuoteParseError
+    from agentharness.procurement.requirements import RequirementModelError
+
+    validation = svc._failure_details(QuoteParseError("报价文件为空"))
+    provider = svc._failure_details(RequirementModelError("采购模型调用失败"))
+    transport = svc._failure_details(TimeoutError("RPC timed out"))
+
+    assert validation == {
+        "error_category": "VALIDATION",
+        "error_code": "QUOTE_PARSE_ERROR",
+        "error_message": "报价文件为空",
+        "retryable": False,
+    }
+    assert provider["error_category"] == "PROVIDER"
+    assert provider["retryable"] is True
+    assert transport["error_category"] == "TRANSPORT"
+    assert transport["retryable"] is True
+
+
+def test_publish_failed_result_includes_structured_recovery_fields(monkeypatch, fake_db):
+    service = make_service(monkeypatch, fake_db)
+    failure = svc._failure_details(ValueError("模型返回数量无效"))
+    service._publish_result(
+        "op-failed",
+        {
+            "aggregate_id": "a" * 32,
+            "generation": 1,
+            "expected_task_version": 0,
+            "payload_sha256": "p" * 64,
+        },
+        "failed",
+        failure,
+        "VALUE_ERROR: 模型返回数量无效",
+    )
+
+    message = service.producer.send.call_args.kwargs["value"]
+    assert message["error_category"] == "VALIDATION"
+    assert message["error_code"] == "VALUE_ERROR"
+    assert message["error_message"] == "模型返回数量无效"
+    assert message["retryable"] is False
+    assert svc._verify_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], message)
 
 
 def test_topic_max_global_seq_scans_events(monkeypatch, fake_db):
@@ -619,3 +732,33 @@ def test_next_global_seq_fallback_without_row(monkeypatch, fake_db):
     monkeypatch.setattr(service, "_connect", lambda: EmptyConn())
     assert service._next_global_seq() >= 1
 
+
+
+def test_main_loads_project_env_before_start(monkeypatch, fake_db):
+    """README local dev runs `python -m agentharness.agent_service`; .env must be loaded."""
+    calls = []
+
+    class StubService:
+        def __init__(self):
+            pass
+
+        def start(self):
+            raise SystemExit(0)
+
+    monkeypatch.setattr(svc, "AgentService", StubService)
+    monkeypatch.setattr("logging.basicConfig", lambda **kw: None)
+    monkeypatch.setattr(svc, "load_project_env", lambda: calls.append("loaded"))
+    try:
+        svc.main()
+    except SystemExit:
+        pass
+    assert calls == ["loaded"]
+
+
+def test_missing_database_url_raises_actionable_error(monkeypatch):
+    import pytest
+
+    config = dict(CONFIG)
+    config["AGENTHARNESS_DATABASE_URL"] = ""
+    with pytest.raises(ValueError, match="AGENTHARNESS_DATABASE_URL 未配置"):
+        svc.AgentService(config)

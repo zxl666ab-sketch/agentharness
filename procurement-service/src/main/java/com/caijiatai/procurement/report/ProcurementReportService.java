@@ -146,7 +146,7 @@ public class ProcurementReportService {
             item.put("records", records);
             item.put("evidence", records.isEmpty()
                     ? "暂无本地已批准采购记录"
-                    : "基于 PostgreSQL 中的已批准采购决定");
+                    : "基于 MySQL 中的已批准采购决定");
             suppliers.add(item);
         }
         return Map.of("request_id", taskId, "suppliers", suppliers);

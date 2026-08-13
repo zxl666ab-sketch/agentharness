@@ -8,5 +8,7 @@ public interface ProcurementQuoteRepository extends JpaRepository<ProcurementQuo
     List<ProcurementQuote> findByTaskIdOrderByCreatedAtAsc(String taskId);
     Optional<ProcurementQuote> findByIdAndTaskId(String id, String taskId);
     long countByTaskId(String taskId);
+    java.util.List<ProcurementQuote> findAllByOrderByCreatedAtDesc();
+    java.util.List<ProcurementQuote> findByTaskIdInOrderByCreatedAtAsc(java.util.Collection<String> taskIds);
     java.util.List<ProcurementQuote> findBySupplierNameOrderByCreatedAtAsc(String supplierName);
 }

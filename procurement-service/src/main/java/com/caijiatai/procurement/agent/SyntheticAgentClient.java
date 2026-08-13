@@ -1,6 +1,5 @@
 package com.caijiatai.procurement.agent;
 
-import com.caijiatai.procurement.config.AppProperties;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -19,27 +18,31 @@ import org.springframework.stereotype.Component;
  */
 @Component
 @Primary
-@ConditionalOnProperty(prefix = "app.agent", name = "mode", havingValue = "demo")
-public final class SyntheticAgentClient extends AgentClient {
-
-    public SyntheticAgentClient(AppProperties properties) {
-        super(null, properties);
-    }
+@ConditionalOnProperty(prefix = "app", name = "agent-mode", havingValue = "demo")
+public final class SyntheticAgentClient implements AgentDispatcher {
 
     @Override
-    public DispatchResult dispatch(AgentCommand command) {
+    public AgentDispatcher.DispatchResult dispatch(AgentCommand command) {
         var result = switch (command.getOperationType()) {
             case "create_structured", "start_conversation" -> Map.of(
                     "session_id", sha256hex(command.getOperationId() + ":session"),
                     "run_id", sha256hex(command.getOperationId() + ":run"));
             case "analyze" -> Map.of(
-                    "run_id", sha256hex(command.getOperationId() + ":run"));
+                    "run_id", sha256hex(command.getOperationId() + ":run"),
+                    "input_sha256", text(command.getPayload().get("input_sha256")),
+                    "structured_result", Map.of(
+                            "summary", "离线确定性分析已完成",
+                            "risk_flags", java.util.List.of()),
+                    "sources", java.util.List.of(),
+                    "provider", "procurement_fake",
+                    "model", "deterministic",
+                    "prompt_version", "quote-analysis-v1");
             case "approve_decision" -> approval(command);
             case "import_quote", "reopen_task", "resume_run" -> Map.of(
                     "run_id", sha256hex(command.getOperationId() + ":run"));
             default -> Map.of();
         };
-        return new DispatchResult(200, Map.of("status", "completed", "result", result));
+        return new AgentDispatcher.DispatchResult(200, Map.of("status", "completed", "result", result));
     }
 
     private Map<String, Object> approval(AgentCommand command) {

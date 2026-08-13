@@ -1,6 +1,8 @@
 package com.caijiatai.procurement.agent;
 
 import com.caijiatai.procurement.api.ApiException;
+import com.caijiatai.procurement.ai.AiTaskService;
+import com.caijiatai.procurement.ai.AiErrorCategory;
 import com.caijiatai.procurement.approval.ApprovalService;
 import com.caijiatai.procurement.artifact.BusinessArtifactRepository;
 import com.caijiatai.procurement.comparison.ComparisonService;
@@ -10,8 +12,10 @@ import com.caijiatai.procurement.report.AuditEvent;
 import com.caijiatai.procurement.report.AuditEventRepository;
 import com.caijiatai.procurement.report.RuntimeReportProjection;
 import com.caijiatai.procurement.report.RuntimeReportProjectionRepository;
+import com.caijiatai.procurement.review.ReviewService;
 import com.caijiatai.procurement.task.ProcurementTask;
 import com.caijiatai.procurement.task.ProcurementTaskRepository;
+import com.caijiatai.procurement.task.RequirementValidator;
 import com.caijiatai.procurement.task.TaskStatus;
 import java.math.BigDecimal;
 import java.util.List;
@@ -28,6 +32,8 @@ public final class AgentResultApplication {
     private final ApprovalService approvals;
     private final AuditEventRepository audit;
     private final RuntimeReportProjectionRepository runtimeReports;
+    private final AiTaskService aiTasks;
+    private final ReviewService reviews;
 
     public AgentResultApplication(
             ProcurementTaskRepository tasks,
@@ -36,7 +42,9 @@ public final class AgentResultApplication {
             ComparisonService comparison,
             ApprovalService approvals,
             AuditEventRepository audit,
-            RuntimeReportProjectionRepository runtimeReports) {
+            RuntimeReportProjectionRepository runtimeReports,
+            AiTaskService aiTasks,
+            ReviewService reviews) {
         this.tasks = tasks;
         this.quotes = quotes;
         this.artifacts = artifacts;
@@ -44,6 +52,8 @@ public final class AgentResultApplication {
         this.approvals = approvals;
         this.audit = audit;
         this.runtimeReports = runtimeReports;
+        this.aiTasks = aiTasks;
+        this.reviews = reviews;
     }
 
     public void apply(AgentCommand command, Map<String, Object> envelope) {
@@ -56,7 +66,8 @@ public final class AgentResultApplication {
             case "import_quote" -> importQuote(command, result);
             case "analyze" -> analyze(command, result);
             case "approve_decision" -> {
-                approvals.finalizeFromAgent(command, result);
+                var decision = approvals.finalizeFromAgent(command, result);
+                reviews.finalizeDecision(decision);
                 cacheRuntimeReport(command, result);
             }
             case "resume_run" -> resume(command, result);
@@ -67,17 +78,40 @@ public final class AgentResultApplication {
     }
 
     public void recordTerminalFailure(AgentCommand command, String error) {
-        if (!"analyze".equals(command.getOperationType())) {
+        recordTerminalFailure(command, error, AiErrorCategory.BUSINESS, false);
+    }
+
+    public void recordTerminalFailure(
+            AgentCommand command,
+            String error,
+            AiErrorCategory category,
+            boolean retryable) {
+        if ("analyze".equals(command.getOperationType())) {
+            aiTasks.fail(command, error, category, retryable);
+            var task = tasks.lockById(command.getAggregateId()).orElse(null);
+            if (task == null || task.getGeneration() != command.getGeneration()) {
+                return;
+            }
+            task.restoreReadyAfterFailedAnalysis();
+            audit.save(AuditEvent.create(
+                    task.getId(), null, task.getAnalysisRunId(), "analysis_failed", "agent",
+                    Map.of("operation_id", command.getOperationId(), "error", error)));
             return;
         }
-        var task = tasks.lockById(command.getAggregateId()).orElse(null);
-        if (task == null || task.getGeneration() != command.getGeneration()) {
-            return;
+        if ("start_conversation".equals(command.getOperationType())) {
+            var task = tasks.lockById(command.getAggregateId()).orElse(null);
+            if (task == null || task.getGeneration() != command.getGeneration()) {
+                return;
+            }
+            // 需求与报价未成功落库的草稿无法从 UI 恢复，取消它避免“Agent 读取中”死任务。
+            if (TaskStatus.DRAFT.wireValue().equals(task.getStatus())
+                    && quotes.countByTaskId(task.getId()) == 0) {
+                task.setStatus(TaskStatus.CANCELLED);
+            }
+            audit.save(AuditEvent.create(
+                    task.getId(), null, task.getAnalysisRunId(), "conversation_failed", "agent",
+                    Map.of("operation_id", command.getOperationId(), "error", error)));
         }
-        task.restoreReadyAfterFailedAnalysis();
-        audit.save(AuditEvent.create(
-                task.getId(), null, task.getAnalysisRunId(), "analysis_failed", "agent",
-                Map.of("operation_id", command.getOperationId(), "error", error)));
     }
 
     private void startConversation(AgentCommand command, Map<String, Object> result) {
@@ -86,15 +120,23 @@ public final class AgentResultApplication {
         if (requirement.isEmpty()) {
             throw invalidResult("Agent 未返回结构化采购需求");
         }
-        task.applyRequirement(
-                integer(requirement.getOrDefault("schema_version", 1)),
-                text(requirement.get("title")),
-                text(requirement.getOrDefault("category", "ecommerce_packaging")),
-                text(requirement.get("item_name")),
-                number(requirement.get("quantity")),
-                text(requirement.getOrDefault("unit", "piece")),
-                map(requirement.get("specifications")),
-                map(requirement.get("constraints")));
+        var schemaVersion = integer(requirement.getOrDefault("schema_version", 1));
+        var category = text(requirement.getOrDefault("category", "ecommerce_packaging"));
+        var itemName = text(requirement.get("item_name")).strip();
+        var title = text(requirement.get("title")).strip();
+        if (title.isBlank() || title.length() > 200) {
+            throw invalidResult("Agent 未返回有效采购标题");
+        }
+        var quantity = number(requirement.get("quantity"));
+        var unit = text(requirement.getOrDefault("unit", "piece"));
+        var specifications = normalizeSpecifications(map(requirement.get("specifications")));
+        var constraints = map(requirement.get("constraints"));
+        RequirementValidator.validate(schemaVersion, category, itemName, quantity, unit, specifications,
+                decimal(constraints.get("size_tolerance_mm")),
+                decimal(constraints.get("thickness_tolerance_um")),
+                decimal(constraints.get("max_landed_unit_cost")));
+        task.applyRequirement(schemaVersion, title, category, itemName, quantity, unit,
+                specifications, constraints);
         var sessionId = text(result.get("session_id"));
         var runId = text(result.get("run_id"));
         if (sessionId.matches("[0-9a-f]{32}") && runId.matches("[0-9a-f]{32}")) {
@@ -133,7 +175,10 @@ public final class AgentResultApplication {
             throw invalidResult("Agent 分析结果缺少 run_id");
         }
         task.bindAnalysisRun(runId);
-        comparison.analyze(task, runId);
+        var snapshot = comparison.analyze(task, runId);
+        var aiResult = aiTasks.succeed(command, result);
+        tasks.flush();
+        reviews.createPending(task, command.getOperationId(), aiResult, snapshot);
     }
 
     private void resume(AgentCommand command, Map<String, Object> result) {
@@ -216,6 +261,31 @@ public final class AgentResultApplication {
     private String text(Object value) { return value == null ? "" : String.valueOf(value); }
     private int integer(Object value) { return Integer.parseInt(text(value)); }
     private BigDecimal number(Object value) { return new BigDecimal(text(value)); }
+
+    private BigDecimal decimal(Object value) {
+        if (value == null || text(value).isBlank()) return null;
+        try {
+            return new BigDecimal(text(value));
+        } catch (NumberFormatException error) {
+            throw invalidResult("Agent 需求约束不是有效数值");
+        }
+    }
+
+    private Map<String, Object> normalizeSpecifications(Map<String, Object> input) {
+        var result = new java.util.LinkedHashMap<>(input);
+        var printColors = text(result.get("print_colors")).trim();
+        if (!printColors.isBlank()) {
+            if (printColors.matches("[0-9]+")) result.put("print_colors", printColors);
+            else if (printColors.matches("[0-9]+\\s*色")) {
+                result.put("print_colors", printColors.replaceAll("[^0-9].*", ""));
+            } else if (printColors.matches("单色|一色|单色印刷|一色印刷|one[- ]?colou?r")) {
+                result.put("print_colors", "1");
+            } else if (printColors.matches("双色|二色|双色印刷|二色印刷|two[- ]?colou?rs?")) {
+                result.put("print_colors", "2");
+            }
+        }
+        return result;
+    }
 
     private ApiException invalidResult(String message) {
         return new ApiException(HttpStatus.CONFLICT, "invalid_agent_result", message);

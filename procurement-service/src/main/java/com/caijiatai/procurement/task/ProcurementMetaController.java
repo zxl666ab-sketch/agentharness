@@ -30,6 +30,7 @@ public final class ProcurementMetaController {
         field(fields, "supports_invoice", "是否可开票", "boolean", true);
         field(fields, "width_mm", "宽度（mm）", "decimal", true);
         field(fields, "length_mm", "长度（mm）", "decimal", true);
+        field(fields, "height_mm", "高度（mm）", "decimal", true);
         field(fields, "thickness_um", "厚度（µm）", "decimal", true);
         field(fields, "payment_terms", "付款条件", "text", false);
         field(fields, "valid_until", "报价有效期", "date", false);

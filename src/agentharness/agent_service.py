@@ -4,8 +4,8 @@ Consumes commands from Kafka (caijiatai.commands), keeps runtime state in the
 MySQL runtime schema (caijiatai_runtime), and publishes command results and
 runtime events back to Kafka (caijiatai.results / caijiatai.events).
 
-This is the 2a minimal slice: analyze commands are processed deterministically
-(fake run lifecycle); the deterministic comparison itself still runs in Java.
+AI analysis produces an observable extraction/explanation lifecycle. The
+deterministic comparison itself still runs exclusively in Java.
 """
 
 from __future__ import annotations
@@ -25,6 +25,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pymysql
+
+from agentharness.config import load_project_env
 
 try:
     from kafka import KafkaConsumer, KafkaProducer
@@ -77,6 +79,39 @@ SUPPORTED_OPERATIONS = frozenset({
     "import_quote", "start_conversation",
 })
 
+
+def _failure_details(error: BaseException | str) -> dict[str, Any]:
+    """Normalize execution failures for Java-owned retry and recovery state."""
+    if isinstance(error, BaseException):
+        error_type = type(error).__name__
+        message = str(error) or error_type
+    else:
+        error_type = "AgentError"
+        message = str(error) or "Agent execution failed"
+
+    normalized = re.sub(r"(?<!^)(?=[A-Z])", "_", error_type)
+    code = re.sub(r"[^A-Za-z0-9_]+", "_", normalized).strip("_").upper()
+    type_name = error_type.lower()
+    message_lower = message.lower()
+    if type_name in {"quoteparseerror", "valueerror", "jsondecodeerror"}:
+        category, retryable = "VALIDATION", False
+    elif type_name == "requirementmodelerror" or any(
+        token in message_lower for token in ("provider", "model unavailable", "模型调用失败")
+    ):
+        category, retryable = "PROVIDER", True
+    elif isinstance(error, (TimeoutError, ConnectionError)) or any(
+        token in message_lower for token in ("rpc_", "timeout", "timed out", "connection refused", "unavailable")
+    ):
+        category, retryable = "TRANSPORT", True
+    else:
+        category, retryable = "INTERNAL", False
+    return {
+        "error_category": category,
+        "error_code": code[:100] or "AGENT_ERROR",
+        "error_message": message[:1000],
+        "retryable": retryable,
+    }
+
 RUNTIME_SCHEMA_SQL = [
     """
     CREATE TABLE IF NOT EXISTS internal_operations (
@@ -125,16 +160,15 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value)).hexdigest()
 
 
-def _hmac_sign(key: str, kind: str, operation_id: str, payload_sha256: str) -> str:
-    content = f"{kind}\n{operation_id}\n{payload_sha256}".encode()
-    return hmac.new(key.encode("utf-8"), content, hashlib.sha256).hexdigest()
+def _sign_envelope(key: str, envelope: dict[str, Any]) -> str:
+    """Sign the complete canonical envelope except the detached signature."""
+    unsigned = {name: value for name, value in envelope.items() if name != "signature"}
+    return hmac.new(key.encode("utf-8"), _canonical_json(unsigned), hashlib.sha256).hexdigest()
 
 
-def _hmac_verify(key: str, kind: str, operation_id: str, payload_sha256: str, signature: str) -> bool:
-    if not signature:
-        return False
-    expected = _hmac_sign(key, kind, operation_id, payload_sha256)
-    return hmac.compare_digest(expected, signature)
+def _verify_envelope(key: str, envelope: dict[str, Any]) -> bool:
+    signature = str(envelope.get("signature") or "")
+    return bool(signature) and hmac.compare_digest(signature, _sign_envelope(key, envelope))
 
 
 def _new_id() -> str:
@@ -147,9 +181,12 @@ def _utcnow() -> datetime:
 
 _REQUIREMENT_PROMPT = """你是采购需求结构化助手。把用户的采购目标转成 JSON，字段：
 schema_version(1), title, category(ecommerce_packaging), item_name, quantity(整数), unit(piece),
-specifications(width_mm,length_mm,thickness_um,height_mm(纸箱必填),material,color,print_colors 均为字符串/数字),
+specifications(width_mm,length_mm,thickness_um,height_mm(纸箱必填),material,color,print_colors),
 constraints(base_currency(CNY),fx_rates({"CNY":"1"}),max_lead_days,invoice_required(true),
 size_tolerance_mm,thickness_tolerance_um,max_landed_unit_cost(可选),destination(可选))。
+尺寸按“宽×长×高”顺序拆分：400 × 300 × 250 mm 输出 width_mm=400、length_mm=300、height_mm=250；
+只有两个数时 250 × 350 mm 输出 width_mm=250、length_mm=350。
+print_colors 必须是 0-12 的整数（单色印刷=1、双色=2），不要输出文字或单位。
 只输出 JSON，不要解释。"""
 
 
@@ -161,10 +198,34 @@ def _extract_json(text: str) -> str:
     return text[start:end + 1]
 
 
+def _normalize_print_colors(value: Any) -> int:
+    """Accept integer strings, Chinese color words and compact forms like 1色."""
+    text = str(value or "").strip().lower()
+    if re.fullmatch(r"\d+", text):
+        return int(text)
+    cleaned = re.sub(r"[\s_\-]+", "", text)
+    mapping = {
+        "单色": 1, "一色": 1, "单色印刷": 1, "一色印刷": 1,
+        "双色": 2, "二色": 2, "双色印刷": 2, "二色印刷": 2,
+        "onecolor": 1, "onecolour": 1, "twocolors": 2, "twocolour": 2,
+    }
+    if cleaned in mapping:
+        return mapping[cleaned]
+    match = re.fullmatch(r"(\d+)\s*色", cleaned)
+    if match:
+        return int(match.group(1))
+    match = re.fullmatch(r"(one|two|single|double)\s*colou?rs?", text)
+    if match:
+        return 1 if match.group(1) in {"one", "single"} else 2
+    raise ValueError(f"模型返回印刷色数无效: {value!r}")
+
+
 def _coerce_requirement(data: dict[str, Any], message: str) -> dict[str, Any]:
     if not isinstance(data, dict) or not data.get("item_name"):
         raise ValueError("模型返回缺少 item_name")
     specs = {str(k): v for k, v in (data.get("specifications") or {}).items() if v not in (None, "")}
+    if "print_colors" in specs:
+        specs["print_colors"] = _normalize_print_colors(specs["print_colors"])
     raw_constraints = data.get("constraints") or {}
     constraints: dict[str, Any] = {
         "base_currency": str(raw_constraints.get("base_currency") or "CNY").upper(),
@@ -308,7 +369,7 @@ class RpcClient:
     def __init__(self, config: dict[str, str], hmac_key: str) -> None:
         self.config = config
         self.hmac_key = hmac_key
-        self._futures: dict[str, Future] = {}
+        self._futures: dict[str, tuple[Future, str]] = {}
         self._lock = threading.Lock()
         self.producer = None
         self.consumer = None
@@ -357,9 +418,19 @@ class RpcClient:
                 break
             value = record.value
             correlation_id = str(value.get("correlation_id") or "")
+            if not _verify_envelope(self.hmac_key, value):
+                logger.warning("RPC 响应签名校验失败：%s", correlation_id)
+                continue
             with self._lock:
-                future = self._futures.pop(correlation_id, None)
-            if future is not None and not future.done():
+                pending = self._futures.get(correlation_id)
+                if pending is None:
+                    continue
+                future, expected_sha = pending
+                if value.get("request_sha256") != expected_sha:
+                    logger.warning("RPC 响应 request_sha256 不匹配：%s", correlation_id)
+                    continue
+                self._futures.pop(correlation_id, None)
+            if not future.done():
                 future.set_result(value)
 
     def call(self, kind: str, payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
@@ -368,15 +439,15 @@ class RpcClient:
             request_sha = _sha256(payload)
             future: Future = Future()
             with self._lock:
-                self._futures[correlation_id] = future
+                self._futures[correlation_id] = (future, request_sha)
             request = {
                 "correlation_id": correlation_id,
                 "kind": kind,
                 "payload": payload,
                 "reply_to": RPC_RESPONSES_TOPIC,
                 "request_sha256": request_sha,
-                "signature": _hmac_sign(self.hmac_key, "rpc", correlation_id, request_sha),
             }
+            request["signature"] = _sign_envelope(self.hmac_key, request)
             assert self.producer is not None
             self.producer.send(RPC_REQUESTS_TOPIC, key=correlation_id, value=request)
             self.producer.flush()
@@ -413,9 +484,13 @@ class AgentService:
             )
         }
         self.hmac_key = self.config["AGENT_INTERNAL_HMAC_KEY"]
-        if not self.hmac_key:
-            raise ValueError("AGENT_INTERNAL_HMAC_KEY 必须配置")
-        self._db_kwargs = _parse_database_url(self.config["AGENTHARNESS_DATABASE_URL"])
+        if len(self.hmac_key.encode("utf-8")) < 32:
+            raise ValueError("AGENT_INTERNAL_HMAC_KEY 必须至少 32 字节")
+        database_url = self.config.get("AGENTHARNESS_DATABASE_URL") or ""
+        if not database_url:
+            raise ValueError(
+                "AGENTHARNESS_DATABASE_URL 未配置（本地开发示例见 .env.example，Docker Compose 自动注入）")
+        self._db_kwargs = _parse_database_url(database_url)
         self._ensure_schema()
         self._seq_lock = threading.Lock()
         self._global_seq = max(self._max_global_seq(), self._topic_max_global_seq())
@@ -596,23 +671,40 @@ class AgentService:
         operation_id = str(envelope.get("operation_id") or "")
         operation_type = str(envelope.get("operation_type") or "")
         payload_sha256 = str(envelope.get("payload_sha256") or "")
-        signature = str(envelope.get("signature") or "")
         if not operation_id or not operation_type:
             logger.warning("命令缺少 operation_id/operation_type")
             return
-        if not _hmac_verify(self.hmac_key, "command", operation_id, payload_sha256, signature):
+        if not _verify_envelope(self.hmac_key, envelope):
             logger.warning("命令签名校验失败：%s", operation_id)
             return
         if operation_type not in SUPPORTED_OPERATIONS:
             logger.warning("暂不支持的命令类型 %s（2a 最小切片仅 analyze）", operation_type)
             return
+        if operation_type == "analyze" and envelope.get("message_type") == "ai_task.command":
+            if not self._valid_ai_command(envelope):
+                logger.warning("AI 任务命令字段无效：%s", operation_id)
+                return
         payload = envelope.get("payload") or {}
         actual_sha = _sha256(payload)
+        if payload_sha256 != actual_sha:
+            logger.warning("命令 payload_sha256 不匹配：%s", operation_id)
+            return
         existing = self._load_operation(operation_id)
         if existing is not None:
             if existing["payload_sha256"] != actual_sha:
                 logger.warning("命令 payload 冲突（409）：%s", operation_id)
-                self._publish_result(operation_id, envelope, "failed", None, "operation_payload_conflict")
+                self._publish_result(
+                    operation_id,
+                    envelope,
+                    "failed",
+                    {
+                        "error_category": "VALIDATION",
+                        "error_code": "OPERATION_PAYLOAD_CONFLICT",
+                        "error_message": "operation_payload_conflict",
+                        "retryable": False,
+                    },
+                    "operation_payload_conflict",
+                )
                 return
             if existing["result_published_at"] is not None:
                 return  # 已发布，幂等跳过
@@ -630,7 +722,9 @@ class AgentService:
             result, status, error = self._execute(operation_id, operation_type, envelope, payload, actual_sha)
         except Exception as exc:  # noqa: BLE001 - processing failures must surface, never leave a stuck command
             logger.exception("命令处理失败：%s", operation_id)
-            result, status, error = None, "failed", f"{type(exc).__name__}: {exc}"
+            failure = _failure_details(exc)
+            result, status = failure, "failed"
+            error = f"{failure['error_code']}: {failure['error_message']}"
         self._publish_result(operation_id, envelope, status, result, error)
         self._persist_result(
             {
@@ -692,14 +786,172 @@ class AgentService:
         if operation_type in ("reopen_task", "resume_run"):
             return {"run_id": run_id}, "completed", None
         if operation_type == "analyze":
-            self.cache.put_run(run_id, {"task_id": task_id, "operation_id": operation_id, "status": "running"})
-            self._emit("run_started", task_id, run_id, {"operation_id": operation_id})
-            self._emit("tool_call_start", task_id, run_id, {"tool": "deterministic_analysis"})
-            self._emit("tool_result", task_id, run_id, {"tool": "deterministic_analysis", "status": "ok"})
-            self._emit("run_completed", task_id, run_id, {"operation_id": operation_id})
+            self.cache.put_run(
+                run_id,
+                {
+                    "task_id": task_id,
+                    "ai_task_id": envelope.get("ai_task_id"),
+                    "operation_id": operation_id,
+                    "status": "running",
+                },
+            )
+            result = self._analyze_ai_task(operation_id, envelope, payload, task_id, run_id)
             self.cache.put_run(run_id, {"task_id": task_id, "operation_id": operation_id, "status": "completed"})
-            return {"run_id": run_id}, "completed", None
+            return result, "completed", None
         return {}, "completed", None
+
+    def _valid_ai_command(self, envelope: dict[str, Any]) -> bool:
+        business_id = str(envelope.get("business_id") or "")
+        aggregate_id = str(envelope.get("aggregate_id") or "")
+        file_ids = envelope.get("file_ids")
+        return bool(
+            re.fullmatch(r"[0-9a-f]{32}", str(envelope.get("ai_task_id") or ""))
+            and re.fullmatch(r"[0-9a-f]{32}", business_id)
+            and business_id == aggregate_id
+            and re.fullmatch(r"[0-9a-f]{32}", str(envelope.get("trace_id") or ""))
+            and envelope.get("task_type") == "QUOTE_ANALYSIS"
+            and isinstance(file_ids, list)
+            and all(re.fullmatch(r"jb[0-9a-f]{32}", str(item)) for item in file_ids)
+        )
+
+    def _analyze_ai_task(
+        self,
+        operation_id: str,
+        envelope: dict[str, Any],
+        payload: dict[str, Any],
+        task_id: str,
+        run_id: str,
+    ) -> dict[str, Any]:
+        steps = (
+            ("INPUT_VALIDATE", 0.02, 0.10, "校验任务版本、输入指纹和报价集合"),
+            ("ARTIFACT_FETCH", 0.12, 0.22, "读取 Java-owned 报价上下文与 Artifact 引用"),
+            ("QUOTE_PARSE", 0.25, 0.45, "核对已持久化的结构化报价字段和来源"),
+            ("RULE_ANALYSIS", 0.48, 0.70, "准备确定性规则分析输入，金额与排名仍由 Java 计算"),
+            ("EXPLANATION", 0.75, 0.92, "生成解释摘要、风险标记和来源清单"),
+            ("RESULT_PUBLISH", 0.95, 1.00, "发布结构化 AI 结果供 Java 幂等落库"),
+        )
+        self._emit("run_started", task_id, run_id, {
+            "operation_id": operation_id,
+            "ai_task_id": envelope.get("ai_task_id"),
+            "trace_id": envelope.get("trace_id"),
+        })
+        sequence = 1
+        context: dict[str, Any] = {}
+        for step, started_progress, finished_progress, summary in steps:
+            self._emit_ai_step(
+                envelope, task_id, run_id, step, "RUNNING", started_progress, sequence, summary
+            )
+            sequence += 1
+            if step == "ARTIFACT_FETCH":
+                fetched = self.rpc.call("get_task_context", {"task_id": task_id})
+                context = fetched if isinstance(fetched, dict) else {}
+            self._emit_ai_step(
+                envelope, task_id, run_id, step, "SUCCEEDED", finished_progress, sequence, summary
+            )
+            sequence += 1
+        result = self._explanation_result(envelope, payload, context, run_id)
+        self._emit("run_completed", task_id, run_id, {
+            "operation_id": operation_id,
+            "ai_task_id": envelope.get("ai_task_id"),
+            "trace_id": envelope.get("trace_id"),
+        })
+        return result
+
+    def _explanation_result(
+        self,
+        envelope: dict[str, Any],
+        payload: dict[str, Any],
+        context: dict[str, Any],
+        run_id: str,
+    ) -> dict[str, Any]:
+        from agentharness.procurement.parsing import PARSER_VERSION
+
+        quotes = context.get("quotes") if isinstance(context.get("quotes"), list) else []
+        unresolved = sum(
+            len(quote.get("review_fields") or [])
+            for quote in quotes
+            if isinstance(quote, dict)
+        )
+        risk_flags: list[str] = []
+        if unresolved:
+            risk_flags.append("UNRESOLVED_FIELDS")
+        if len(quotes) < 2:
+            risk_flags.append("INSUFFICIENT_QUOTES")
+        sources = self._analysis_sources(quotes)
+        provider = (
+            self.config.get("AGENTHARNESS_PROCUREMENT_PROVIDER")
+            or os.environ.get("AGENTHARNESS_PROCUREMENT_PROVIDER")
+            or "procurement_fake"
+        )
+        model = (
+            self.config.get("AGENTHARNESS_PROCUREMENT_MODEL")
+            or self.config.get("OPENAI_MODEL")
+            or os.environ.get("AGENTHARNESS_PROCUREMENT_MODEL")
+            or os.environ.get("OPENAI_MODEL")
+            or "deterministic"
+        )
+        return {
+            "run_id": run_id,
+            "ai_task_id": envelope.get("ai_task_id"),
+            "business_id": envelope.get("business_id") or envelope.get("aggregate_id"),
+            "generation": envelope.get("generation"),
+            "input_sha256": payload.get("input_sha256"),
+            "raw_result": {
+                "quote_count": len(quotes),
+                "source_count": len(sources),
+                "unresolved_field_count": unresolved,
+            },
+            "structured_result": {
+                "schema_version": 1,
+                "summary": (
+                    f"已核对 {len(quotes)} 份报价的结构化输入与来源；"
+                    "金额、资格与排序由 Java 确定性规则计算。"
+                ),
+                "risk_flags": risk_flags,
+                "quote_count": len(quotes),
+                "unresolved_field_count": unresolved,
+            },
+            "sources": sources,
+            "provider": provider,
+            "model": model,
+            "prompt_version": "quote-analysis-v1",
+            "parser_version": PARSER_VERSION,
+        }
+
+    def _analysis_sources(self, quotes: list[Any]) -> list[dict[str, Any]]:
+        sources: list[dict[str, Any]] = []
+        for quote in quotes:
+            if not isinstance(quote, dict):
+                continue
+            artifact_id = str(quote.get("source_artifact_id") or "")
+            if not re.fullmatch(r"jb[0-9a-f]{32}", artifact_id):
+                continue
+            locator = str(quote.get("source_filename") or "原始报价")
+            excerpt = str(quote.get("supplier_name") or "")
+            confidence = 1.0
+            method = str(quote.get("parser_version") or "structured_quote")
+            fields = (quote.get("extracted") or {}).get("fields")
+            if isinstance(fields, dict):
+                for raw in fields.values():
+                    if not isinstance(raw, dict) or not isinstance(raw.get("source"), dict):
+                        continue
+                    source = raw["source"]
+                    locator = str(source.get("locator") or locator)
+                    excerpt = str(source.get("excerpt") or excerpt)
+                    method = str(source.get("method") or method)
+                    try:
+                        confidence = max(0.0, min(1.0, float(raw.get("confidence", 1))))
+                    except (TypeError, ValueError):
+                        confidence = 0.0
+                    break
+            sources.append({
+                "artifact_id": artifact_id,
+                "locator": locator,
+                "excerpt": excerpt,
+                "confidence": confidence,
+                "method": method,
+            })
+        return sources
 
     def _import_quote(self, payload: dict[str, Any], task_id: str, run_id: str) -> dict[str, Any]:
         artifact_id = str(payload.get("artifact_id") or "")
@@ -737,9 +989,18 @@ class AgentService:
     def _publish_result(self, operation_id: str, envelope: dict[str, Any], status: str,
                         result: dict[str, Any] | None, error: str | None) -> None:
         payload_sha256 = str(envelope.get("payload_sha256") or "")
+        failure = result if status == "failed" and isinstance(result, dict) else {}
+        if status == "failed" and not failure.get("error_category"):
+            failure = _failure_details(error or "Agent execution failed")
         message = {
+            "schema_version": 1,
+            "message_type": "ai_task.result" if envelope.get("ai_task_id") else "agent.result",
             "operation_id": operation_id,
             "aggregate_id": envelope.get("aggregate_id"),
+            "ai_task_id": envelope.get("ai_task_id"),
+            "business_id": envelope.get("business_id") or envelope.get("aggregate_id"),
+            "trace_id": envelope.get("trace_id"),
+            "task_type": envelope.get("task_type"),
             "generation": envelope.get("generation"),
             "expected_task_version": envelope.get("expected_task_version"),
             "payload_sha256": payload_sha256,
@@ -747,11 +1008,83 @@ class AgentService:
             "result": result or {},
             "error": error,
             "processed_at": _utcnow().isoformat() + "Z",
-            "signature": _hmac_sign(self.hmac_key, "result", operation_id, payload_sha256),
         }
+        if status == "failed":
+            message.update({
+                "error_category": failure["error_category"],
+                "error_code": failure["error_code"],
+                "error_message": failure["error_message"],
+                "retryable": bool(failure["retryable"]),
+            })
+        message["signature"] = _sign_envelope(self.hmac_key, message)
         assert self.producer is not None
         self.producer.send(RESULTS_TOPIC, key=operation_id, value=message)
         self.producer.flush()
+
+    def _emit_ai_step(
+        self,
+        command: dict[str, Any],
+        task_id: str,
+        run_id: str,
+        step: str,
+        step_status: str,
+        progress: float,
+        sequence: int,
+        summary: str,
+    ) -> None:
+        payload = {
+            "step": step,
+            "step_status": step_status,
+            "progress": progress,
+            "summary": summary,
+        }
+        occurred_at = _utcnow().isoformat() + "Z"
+        message = {
+            "schema_version": 1,
+            "message_type": "ai_task.event",
+            "type": "ai_task.step",
+            "event_id": _new_id(),
+            "operation_id": command.get("operation_id"),
+            "ai_task_id": command.get("ai_task_id"),
+            "business_id": command.get("business_id") or command.get("aggregate_id"),
+            "trace_id": command.get("trace_id"),
+            "generation": command.get("generation"),
+            "event_type": "STEP_STARTED" if step_status == "RUNNING" else "STEP_SUCCEEDED",
+            "step": step,
+            "step_status": step_status,
+            "status": "RUNNING",
+            "progress": progress,
+            "attempt": 1,
+            "sequence": sequence,
+            "summary": summary,
+            "payload": payload,
+            "occurred_at": occurred_at,
+            "global_seq": self._next_global_seq(),
+            "task_id": task_id,
+            "run_id": run_id,
+            "payload_sha256": _sha256(payload),
+        }
+        message["signature"] = _sign_envelope(self.hmac_key, message)
+        assert self.producer is not None
+        self.producer.send(EVENTS_TOPIC, key=task_id, value=message)
+        conn = self._connect()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO runtime_event (global_seq, task_id, run_id, type, payload, occurred_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    (
+                        message["global_seq"],
+                        task_id,
+                        run_id,
+                        "ai_task.step",
+                        json.dumps(payload, ensure_ascii=False),
+                        _utcnow(),
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
 
     def _emit(self, event_type: str, task_id: str, run_id: str, payload: dict[str, Any]) -> None:
         global_seq = self._next_global_seq()
@@ -764,9 +1097,8 @@ class AgentService:
             "payload": payload,
             "occurred_at": _utcnow().isoformat() + "Z",
             "payload_sha256": payload_sha256,
-            "signature": _hmac_sign(
-                self.hmac_key, "event", f"{task_id}:{run_id}:{event_type}", payload_sha256),
         }
+        message["signature"] = _sign_envelope(self.hmac_key, message)
         assert self.producer is not None
         self.producer.send(EVENTS_TOPIC, key=task_id, value=message)
         conn = self._connect()
@@ -816,21 +1148,17 @@ class AgentService:
                 if self.producer is not None:
                     payload = {"agent": "python-agent", "service": "procurement_agent"}
                     payload_sha256 = _sha256(payload)
-                    self.producer.send(
-                        EVENTS_TOPIC,
-                        key="agent",
-                        value={
-                            "type": "heartbeat.ping",
-                            "task_id": "",
-                            "run_id": "",
-                            "global_seq": self._next_global_seq(),
-                            "payload": payload,
-                            "occurred_at": _utcnow().isoformat() + "Z",
-                            "payload_sha256": payload_sha256,
-                            "signature": _hmac_sign(
-                                self.hmac_key, "event", "::heartbeat.ping", payload_sha256),
-                        },
-                    )
+                    heartbeat = {
+                        "type": "heartbeat.ping",
+                        "task_id": "",
+                        "run_id": "",
+                        "global_seq": self._next_global_seq(),
+                        "payload": payload,
+                        "occurred_at": _utcnow().isoformat() + "Z",
+                        "payload_sha256": payload_sha256,
+                    }
+                    heartbeat["signature"] = _sign_envelope(self.hmac_key, heartbeat)
+                    self.producer.send(EVENTS_TOPIC, key="agent", value=heartbeat)
                     self.producer.flush()
             except Exception:  # noqa: BLE001
                 logger.exception("心跳发布失败")
@@ -897,6 +1225,10 @@ class AgentService:
 
 
 def main() -> None:
+    # Local dev (README): `uv run python -m agentharness.agent_service` relies on the
+    # repository .env for AGENTHARNESS_DATABASE_URL / AGENT_INTERNAL_HMAC_KEY / Kafka.
+    # Docker Compose sets the same variables explicitly and wins via setdefault.
+    load_project_env()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     service = AgentService()
     service.start()

@@ -1,7 +1,6 @@
 package com.caijiatai.procurement.artifact;
 
 import com.caijiatai.procurement.api.ApiException;
-import com.caijiatai.procurement.agent.RuntimeProxyService;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.springframework.core.io.FileSystemResource;
@@ -18,30 +17,21 @@ import org.springframework.web.bind.annotation.RestController;
 public final class ArtifactController {
     private final BusinessArtifactRepository artifacts;
     private final ArtifactStore store;
-    private final RuntimeProxyService runtime;
 
     public ArtifactController(
             BusinessArtifactRepository artifacts,
-            ArtifactStore store,
-            RuntimeProxyService runtime) {
+            ArtifactStore store) {
         this.artifacts = artifacts;
         this.store = store;
-        this.runtime = runtime;
     }
 
     @GetMapping("/api/artifacts/{artifactId}")
     public ResponseEntity<?> metadata(@PathVariable String artifactId) {
-        if (artifactId.matches("py[0-9a-f]{32}")) {
-            return runtime.get("/api/artifacts/" + artifactId.substring(2));
-        }
         return ResponseEntity.ok(metadata(load(artifactId)));
     }
 
     @GetMapping("/api/artifacts/{artifactId}/raw")
     public ResponseEntity<?> raw(@PathVariable String artifactId) {
-        if (artifactId.matches("py[0-9a-f]{32}")) {
-            return runtime.get("/api/artifacts/" + artifactId.substring(2) + "/raw");
-        }
         return rawResponse(load(artifactId));
     }
 

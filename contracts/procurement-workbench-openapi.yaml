@@ -1,0 +1,228 @@
+openapi: 3.1.0
+info:
+  title: Caijiatai Procurement Workbench API
+  version: 1.0.0
+  description: Public workbench API. Java is the owner of every resource in this contract.
+servers:
+  - url: http://127.0.0.1:8741
+paths:
+  /api/procurement/requests/{businessId}/ai-tasks:
+    post:
+      operationId: createAiTask
+      parameters: [{$ref: '#/components/parameters/BusinessId'}]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateAiTaskRequest'}
+      responses:
+        '202':
+          description: Durable AI task and outbox command were created atomically.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/AiTaskView'}
+        '409': {description: Idempotency conflict, stale generation, or invalid task state.}
+        '409': {description: Quotes or confirmed requirements are incomplete, or the idempotency key conflicts.}
+  /api/procurement/ai-tasks:
+    get:
+      operationId: listAiTasks
+      parameters:
+        - {$ref: '#/components/parameters/AiStatus'}
+        - {$ref: '#/components/parameters/AiTaskType'}
+        - {$ref: '#/components/parameters/BusinessIdQuery'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Filtered AI task page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AiTaskPage'
+  /api/procurement/ai-tasks/{aiTaskId}:
+    get:
+      operationId: getAiTask
+      parameters: [{$ref: '#/components/parameters/AiTaskId'}]
+      responses:
+        '200':
+          description: AI task with stable ordered step records and current result.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AiTaskDetail'}
+        '404': {description: Unknown AI task.}
+  /api/procurement/ai-tasks/{aiTaskId}/retry:
+    post:
+      operationId: retryAiTask
+      parameters:
+        - {$ref: '#/components/parameters/AiTaskId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '202':
+          description: The same AI task was scheduled for its next bounded attempt.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/AiTaskView'}
+        '409': {description: Non-retryable, stale, terminal, or idempotency conflict.}
+  /api/procurement/ai-tasks/{aiTaskId}/cancel:
+    post:
+      operationId: cancelAiTask
+      parameters:
+        - {$ref: '#/components/parameters/AiTaskId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200':
+          description: Pending or running task was marked cancelled.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/AiTaskView'}
+        '409': {description: Task can no longer be cancelled.}
+  /api/procurement/reviews:
+    get:
+      operationId: listReviews
+      parameters:
+        - name: status
+          in: query
+          schema: {$ref: './procurement-workbench.schema.json#/$defs/ReviewStatus'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Human review queue.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReviewPage'}
+  /api/procurement/reviews/{reviewId}:
+    get:
+      operationId: getReview
+      parameters: [{$ref: '#/components/parameters/ReviewId'}]
+      responses:
+        '200':
+          description: Review, AI result, quote evidence and immutable history.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReviewDetail'}
+        '404': {description: Unknown review.}
+  /api/procurement/reviews/{reviewId}/actions:
+    post:
+      operationId: submitReviewAction
+      parameters:
+        - {$ref: '#/components/parameters/ReviewId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: './procurement-workbench.schema.json#/$defs/ReviewActionRequest'}
+      responses:
+        '200':
+          description: Existing or newly applied idempotent review result.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReviewDetail'}
+        '409': {description: Evidence, version, generation, or idempotency conflict.}
+        '422': {description: Required reason or revised value is missing.}
+components:
+  parameters:
+    BusinessId:
+      name: businessId
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+    BusinessIdQuery:
+      name: business_id
+      in: query
+      schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+    AiTaskId:
+      name: aiTaskId
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+    ReviewId:
+      name: reviewId
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+    AiStatus:
+      name: status
+      in: query
+      schema: {$ref: './procurement-workbench.schema.json#/$defs/AiTaskStatus'}
+    AiTaskType:
+      name: task_type
+      in: query
+      schema: {$ref: './procurement-workbench.schema.json#/$defs/AiTaskType'}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, minLength: 8, maxLength: 128}
+    Page:
+      name: page
+      in: query
+      schema: {type: integer, minimum: 0, default: 0}
+    PageSize:
+      name: size
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+  schemas:
+    CreateAiTaskRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        task_type: {$ref: './procurement-workbench.schema.json#/$defs/AiTaskType'}
+        idempotency_key: {type: string, minLength: 8, maxLength: 128}
+      required: [task_type, idempotency_key]
+    AiTaskPage:
+      type: object
+      required: [items, page, size, total]
+      properties:
+        items:
+          type: array
+          items: {$ref: './procurement-workbench.schema.json#/$defs/AiTaskView'}
+        page: {type: integer, minimum: 0}
+        size: {type: integer, minimum: 1}
+        total: {type: integer, minimum: 0}
+    AiTaskDetail:
+      allOf:
+        - {$ref: './procurement-workbench.schema.json#/$defs/AiTaskView'}
+        - type: object
+          required: [records]
+          properties:
+            records:
+              type: array
+              items: {$ref: './procurement-workbench.schema.json#/$defs/AiTaskRecordView'}
+            result:
+              oneOf:
+                - {$ref: './procurement-workbench.schema.json#/$defs/AiResultView'}
+                - {type: 'null'}
+    ReviewPage:
+      type: object
+      required: [items, page, size, total]
+      properties:
+        items:
+          type: array
+          items: {$ref: './procurement-workbench.schema.json#/$defs/ReviewView'}
+        page: {type: integer, minimum: 0}
+        size: {type: integer, minimum: 1}
+        total: {type: integer, minimum: 0}
+    ReviewDetail:
+      allOf:
+        - {$ref: './procurement-workbench.schema.json#/$defs/ReviewView'}
+        - type: object
+          required: [ai_result, comparison, history]
+          properties:
+            ai_result: {$ref: './procurement-workbench.schema.json#/$defs/AiResultView'}
+            comparison:
+              type: object
+              required: [id, request_id, run_id, version, input_sha256, result, artifact_id, created_at]
+              properties:
+                id: {type: string}
+                request_id: {type: string}
+                run_id: {type: string}
+                version: {type: integer, minimum: 1}
+                input_sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+                result: {type: object}
+                artifact_id: {type: string}
+                created_at: {type: string, format: date-time}
+            history:
+              type: array
+              items: {$ref: './procurement-workbench.schema.json#/$defs/ReviewView'}

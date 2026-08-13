@@ -28,7 +28,8 @@ import tools.jackson.databind.ObjectMapper;
 
 @Testcontainers
 @SpringBootTest(properties = {
-        "app.agent-internal-token=test-internal-token",
+        "app.agent-mode=demo",
+        "app.internal-hmac-key=test-hmac-key-for-spring-context-0123456789abcdef",
         "app.artifact-root=target/test-artifacts-demo",
         "app.outbox.enabled=false"
 })
@@ -175,8 +176,8 @@ class DemoSeedIntegrationTest {
         Files.write(scenario.resolve("沪上包装-报价.xlsx"), new byte[] {4, 5, 6});
 
         var demoProperties = new AppProperties(
-                properties.localOperator(), properties.artifactRoot(), properties.agentBaseUrl(),
-                properties.agentInternalToken(), properties.allowedViteOrigin(), properties.developmentMode(),
+                properties.localOperator(), properties.artifactRoot(),
+                properties.allowedViteOrigin(), properties.developmentMode(),
                 properties.outbox(), properties.agentMode(), new AppProperties.DemoSeed(true, root), properties.internalHmacKey());
         var runner = new DemoSeedRunner(
                 demoProperties, taskService, tasks, quotes, artifactStore, audit, jdbc, mapper);

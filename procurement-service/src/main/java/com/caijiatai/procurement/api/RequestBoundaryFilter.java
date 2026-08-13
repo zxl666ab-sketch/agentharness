@@ -33,6 +33,12 @@ public final class RequestBoundaryFilter extends OncePerRequestFilter {
         request.setAttribute(ApiExceptionHandler.REQUEST_ID_ATTRIBUTE, requestId);
         response.setHeader("X-Request-Id", requestId);
 
+        if (request.getHeader("Forwarded") != null
+                || request.getHeader("X-Forwarded-Host") != null
+                || request.getHeader("X-Forwarded-Proto") != null) {
+            response.sendError(HttpServletResponse.SC_BAD_REQUEST, "forwarded_headers_not_allowed");
+            return;
+        }
         var host = request.getServerName().toLowerCase(Locale.ROOT);
         if (!LOCAL_HOSTS.contains(host)) {
             response.sendError(HttpServletResponse.SC_BAD_REQUEST, "invalid_host");

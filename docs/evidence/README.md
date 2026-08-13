@@ -24,7 +24,8 @@ uv run python scripts/evaluate_procurement.py verify --input output/procurement-
 
 ```powershell
 uv run python scripts/generate_procurement_demo.py --output output/procurement-demo-v3
-docker compose up -d --build
+docker compose build
+docker compose up -d --no-build
 ```
 
 打开 `http://127.0.0.1:8741`，提交包含单色印刷约束的采购目标和 `q-alpha`、`q-beta`、`q-theta` 三份报价。在报价复核面板将 `q-theta.supplier_name` 人工修正为“星河包装”，点击“开始比价”，核对当前快照后正式选定“华东优包”。

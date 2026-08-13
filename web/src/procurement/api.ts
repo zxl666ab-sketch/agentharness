@@ -1,4 +1,7 @@
 import type {
+  AiTaskDetail,
+  AiTaskPage,
+  AiTaskView,
   CreateProcurementRequest,
   EvaluationResult,
   ProcurementAuditReport,
@@ -10,6 +13,10 @@ import type {
   ProcurementRequest,
   ProcurementRequestSummary,
   ProcurementRunAccepted,
+  ReviewActionInput,
+  ReviewDetail,
+  ReviewPage,
+  ReviewStatus,
 } from "./types";
 
 const FIELD_LABELS: Record<string, string> = {
@@ -128,6 +135,36 @@ export const procurementApi = {
   requests: () => requestJson<ProcurementRequestSummary[]>("/api/procurement/requests?limit=200"),
   request: (requestId: string) =>
     requestJson<ProcurementRequest>(`/api/procurement/requests/${requestId}`),
+  aiTasks: (businessId?: string) => {
+    const query = new URLSearchParams({ page: "0", size: "100" });
+    if (businessId) query.set("business_id", businessId);
+    return requestJson<AiTaskPage>(`/api/procurement/ai-tasks?${query}`);
+  },
+  aiTask: (aiTaskId: string) =>
+    requestJson<AiTaskDetail>(`/api/procurement/ai-tasks/${aiTaskId}`),
+  retryAiTask: (aiTaskId: string) =>
+    requestJson<AiTaskView>(`/api/procurement/ai-tasks/${aiTaskId}/retry`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey() },
+    }),
+  cancelAiTask: (aiTaskId: string) =>
+    requestJson<AiTaskView>(`/api/procurement/ai-tasks/${aiTaskId}/cancel`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey() },
+    }),
+  reviews: (status?: ReviewStatus, page = 0, size = 100) => {
+    const query = new URLSearchParams({ page: String(page), size: String(size) });
+    if (status) query.set("status", status);
+    return requestJson<ReviewPage>(`/api/procurement/reviews?${query}`);
+  },
+  review: (reviewId: string) =>
+    requestJson<ReviewDetail>(`/api/procurement/reviews/${reviewId}`),
+  submitReview: (reviewId: string, input: ReviewActionInput) =>
+    requestJson<ReviewDetail>(`/api/procurement/reviews/${reviewId}/actions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey() },
+      body: JSON.stringify(input),
+    }),
   deleteRequest: (requestId: string) =>
     requestJson<{ request_id: string; reference: string; deleted: boolean }>(
       `/api/procurement/requests/${requestId}`,
@@ -200,7 +237,9 @@ export const procurementApi = {
       note?: string;
     }
   ) => (async () => {
-    const accepted = await requestJson<ProcurementRunAccepted>(
+    const accepted = await requestJson<
+      ProcurementRunAccepted | { request_id: string; decision_id: string; status: string }
+    >(
       `/api/procurement/requests/${requestId}/decision`,
       {
         method: "POST",
@@ -208,7 +247,11 @@ export const procurementApi = {
         body: JSON.stringify(input),
       }
     );
-    await waitForOperation(accepted.operation_id);
+    // 已存在正式决定时 Java 直接返回 {decision_id,status}，无需等待操作；
+    // 否则等待 202 OperationAccepted 完成。
+    if ("operation_id" in accepted && accepted.operation_id) {
+      await waitForOperation(accepted.operation_id);
+    }
     return requestJson<ProcurementRequest>(`/api/procurement/requests/${requestId}`);
   })(),
   reopen: (requestId: string, copyQuotes: boolean) =>

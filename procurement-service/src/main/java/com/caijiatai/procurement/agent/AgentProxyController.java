@@ -1,10 +1,9 @@
 package com.caijiatai.procurement.agent;
 
-import com.caijiatai.procurement.config.AppProperties;
 import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
+import com.caijiatai.procurement.config.AppProperties;
+import org.springframework.core.io.ClassPathResource;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.springframework.http.ResponseEntity;
@@ -16,42 +15,45 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 public final class AgentProxyController {
-    private final RuntimeProxyService proxy;
-    private final AppProperties properties;
     private final tools.jackson.databind.ObjectMapper mapper;
     private final com.caijiatai.procurement.api.EventStreamService eventStream;
     private final RuntimeQueryService runtimeQuery;
+    private final AppProperties properties;
+    private final byte[] frozenEvaluation;
 
-    public AgentProxyController(RuntimeProxyService proxy, AppProperties properties,
-            tools.jackson.databind.ObjectMapper mapper,
+    public AgentProxyController(tools.jackson.databind.ObjectMapper mapper,
             com.caijiatai.procurement.api.EventStreamService eventStream,
-            RuntimeQueryService runtimeQuery) {
-        this.proxy = proxy;
-        this.properties = properties;
+            RuntimeQueryService runtimeQuery,
+            AppProperties properties) {
         this.mapper = mapper;
         this.eventStream = eventStream;
         this.runtimeQuery = runtimeQuery;
+        this.properties = properties;
+        try {
+            this.frozenEvaluation = new ClassPathResource("frozen/frozen-evaluation.json")
+                    .getInputStream().readAllBytes();
+        } catch (IOException error) {
+            throw new IllegalStateException("frozen evaluation bundle missing from classpath", error);
+        }
     }
 
     @GetMapping("/api/runtime")
-    ResponseEntity<byte[]> runtime() { return proxy.get("/api/runtime"); }
+    Map<String, Object> runtime() {
+        if ("demo".equals(properties.agentMode())) {
+            return Map.of("status", "available", "source", "synthetic_demo");
+        }
+        return runtimeQuery.runtime();
+    }
 
     @GetMapping("/api/procurement/config")
     ResponseEntity<byte[]> procurementConfig() {
-        if ("demo".equals(properties.agentMode()) || "kafka".equals(properties.agentMode())) {
-            return json(envConfig());
-        }
-        return proxy.get("/internal/v1/config");
+        return json(envConfig());
     }
 
     @PostMapping("/api/procurement/config")
     ResponseEntity<byte[]> updateProcurementConfig(@RequestBody byte[] body) {
-        if ("demo".equals(properties.agentMode()) || "kafka".equals(properties.agentMode())) {
-            // 0.5.0：模型配置以 .env / 环境变量为唯一真源（AGENTHARNESS_PROCUREMENT_PROVIDER、
-            // OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL），修改后重启 agent/procurement 生效。
-            return json(envConfig());
-        }
-        return proxy.post("/internal/v1/config", body);
+        // 模型配置以 .env / 环境变量为唯一真源，修改后重启 agent/procurement 生效。
+        return json(envConfig());
     }
 
     private Map<String, Object> envConfig() {
@@ -83,103 +85,82 @@ public final class AgentProxyController {
     }
 
     @GetMapping("/api/procurement/evaluation")
-    ResponseEntity<byte[]> procurementEvaluation() { return proxy.get("/internal/v1/evaluation"); }
-
-    @GetMapping("/api/sessions")
-    ResponseEntity<byte[]> sessions() { return proxy.get("/api/sessions"); }
-
-    @GetMapping("/api/sessions/{sessionId}/transcript")
-    ResponseEntity<byte[]> transcript(@PathVariable String sessionId) {
-        return proxy.get("/api/sessions/" + id(sessionId) + "/transcript");
+    ResponseEntity<byte[]> procurementEvaluation() {
+        return ResponseEntity.ok()
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .body(frozenEvaluation);
     }
 
     @GetMapping("/api/runs")
-    ResponseEntity<byte[]> runs(HttpServletRequest request) {
-        if ("kafka".equals(properties.agentMode())) {
-            return json(Map.of("runs", java.util.List.of(), "source", "runtime_event_projection"));
-        }
-        return proxy.get(withQuery("/api/runs", request));
+    ResponseEntity<byte[]> runs() {
+        return json(Map.of("runs", runtimeQuery.runs(), "source", "runtime_event_projection"));
     }
 
     @GetMapping("/api/runs/{runId}")
     Object run(@PathVariable String runId) {
         var safe = id(runId);
-        if ("kafka".equals(properties.agentMode())) {
-            return runtimeQuery.run(safe);
-        }
-        return proxy.get("/api/runs/" + safe);
+        return runtimeQuery.run(safe);
     }
 
     @GetMapping("/api/runs/{runId}/report")
     Object report(@PathVariable String runId) {
         var safe = id(runId);
-        if ("kafka".equals(properties.agentMode())) {
-            return json(Map.of("run_id", safe, "source", "runtime_event_projection"));
-        }
-        return proxy.get("/api/runs/" + safe + "/report");
+        return runtimeQuery.report(safe);
     }
 
     @GetMapping("/api/runs/{runId}/messages")
     Object messages(@PathVariable String runId) {
         var safe = id(runId);
-        if ("kafka".equals(properties.agentMode())) {
-            return json(runtimeQuery.messages(safe));
-        }
-        return proxy.get("/api/runs/" + safe + "/messages");
+        return json(runtimeQuery.messages(safe));
     }
 
     @GetMapping("/api/runs/{runId}/events")
     Object events(@PathVariable String runId) {
         var safe = id(runId);
-        if ("kafka".equals(properties.agentMode())) {
-            return json(runtimeQuery.events(safe));
-        }
-        return proxy.get("/api/runs/" + safe + "/events");
+        return json(runtimeQuery.events(safe));
     }
 
     @GetMapping("/api/runs/{runId}/approvals")
     Object approvals(@PathVariable String runId) {
         var safe = id(runId);
-        if ("kafka".equals(properties.agentMode())) {
-            return json(runtimeQuery.approvals(safe));
-        }
-        return proxy.get("/api/runs/" + safe + "/approvals");
+        return json(runtimeQuery.approvals(safe));
     }
 
     @GetMapping("/api/runs/{runId}/tool-invocations")
     Object invocations(@PathVariable String runId) {
         var safe = id(runId);
-        if ("kafka".equals(properties.agentMode())) {
-            return json(runtimeQuery.toolInvocations(safe));
-        }
-        return proxy.get("/api/runs/" + safe + "/tool-invocations");
+        return json(runtimeQuery.toolInvocations(safe));
     }
 
     @GetMapping("/api/runs/{runId}/checkpoint")
     Object checkpoint(@PathVariable String runId) {
         var safe = id(runId);
-        if ("kafka".equals(properties.agentMode())) {
-            return runtimeQuery.checkpoint(safe);
-        }
-        return proxy.get("/api/runs/" + safe + "/checkpoint");
-    }
-
-    @GetMapping("/api/tool-invocations/{invocationId}")
-    ResponseEntity<byte[]> invocation(@PathVariable String invocationId) {
-        return proxy.get("/api/tool-invocations/" + id(invocationId));
+        return runtimeQuery.checkpoint(safe);
     }
 
     @GetMapping("/api/stream")
-    Object stream(HttpServletRequest request, HttpServletResponse response) {
-        if ("kafka".equals(properties.agentMode())) {
-            var after = 0L;
-            if (request.getParameter("after") != null) {
-                after = Long.parseLong(request.getParameter("after"));
-            }
-            return eventStream.stream(after);
+    Object stream(HttpServletRequest request) {
+        return eventStream.stream(streamCursor(
+                request.getParameter("after"), request.getHeader("Last-Event-ID")));
+    }
+
+    static long streamCursor(String after, String lastEventId) {
+        var raw = after != null && !after.isBlank() ? after : lastEventId;
+        if (raw == null || raw.isBlank()) {
+            return 0L;
         }
-        proxy.stream(request.getQueryString(), request.getHeader("Last-Event-ID"), response);
-        return null;
+        try {
+            var cursor = Long.parseLong(raw);
+            if (cursor < 0) {
+                throw new NumberFormatException("negative cursor");
+            }
+            return cursor;
+        } catch (NumberFormatException error) {
+            throw new com.caijiatai.procurement.api.ApiException(
+                    org.springframework.http.HttpStatus.BAD_REQUEST,
+                    "invalid_event_cursor",
+                    "事件游标必须是非负整数");
+        }
     }
 
     private String id(String value) {
@@ -190,7 +171,4 @@ public final class AgentProxyController {
         return value;
     }
 
-    private String withQuery(String path, HttpServletRequest request) {
-        return request.getQueryString() == null ? path : path + "?" + request.getQueryString();
-    }
 }

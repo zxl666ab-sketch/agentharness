@@ -14,6 +14,9 @@ public interface ProcurementTaskRepository extends JpaRepository<ProcurementTask
     Optional<ProcurementTask> lockById(String id);
 
     java.util.List<ProcurementTask> findAllByOrderByUpdatedAtDesc(Pageable pageable);
+    java.util.List<ProcurementTask> findByStatusOrderByUpdatedAtDesc(String status);
+
+    Optional<ProcurementTask> findFirstByAnalysisRunId(String analysisRunId);
 
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("update ProcurementTask task set task.retryable = true, task.retryMessage = :message "

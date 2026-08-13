@@ -1,6 +1,7 @@
 package com.caijiatai.procurement.agent;
 
 import com.caijiatai.procurement.config.AppProperties;
+import com.caijiatai.procurement.ai.AiTaskService;
 import java.time.Instant;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
@@ -11,16 +12,21 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 @Component
-@ConditionalOnProperty(prefix = "app.agent", name = "mode", havingValue = "kafka")
+@ConditionalOnProperty(prefix = "app", name = "agent-mode", havingValue = "kafka")
 public class KafkaEventConsumer {
     private static final Logger log = LoggerFactory.getLogger(KafkaEventConsumer.class);
 
     private final RuntimeEventRepository events;
     private final String hmacKey;
+    private final AiTaskService aiTasks;
 
-    public KafkaEventConsumer(RuntimeEventRepository events, AppProperties properties) {
+    public KafkaEventConsumer(
+            RuntimeEventRepository events,
+            AppProperties properties,
+            AiTaskService aiTasks) {
         this.events = events;
         this.hmacKey = properties.internalHmacKey();
+        this.aiTasks = aiTasks;
     }
 
     @KafkaListener(topics = "caijiatai.events", groupId = "java-svc-events")
@@ -36,9 +42,8 @@ public class KafkaEventConsumer {
             @SuppressWarnings("unchecked")
             var payloadMap = (java.util.Map<String, Object>) raw;
             var payloadSha = text(envelope.get("payload_sha256"));
-            var signature = text(envelope.get("signature"));
-            if (!MessageCodec.verify(hmacKey, taskId + ":" + runId + ":" + eventType,
-                    payloadSha == null ? "" : payloadSha, "event", signature)) {
+            if (!MessageCodec.verifyEnvelope(hmacKey, envelope)
+                    || !payloadSha.equals(CanonicalJson.sha256(payloadMap))) {
                 log.warn("事件签名校验失败：{}", eventType);
                 return;
             }
@@ -52,6 +57,9 @@ public class KafkaEventConsumer {
                     eventType,
                     payloadMap,
                     Instant.parse(text(envelope.getOrDefault("occurred_at", Instant.now().toString())))));
+            if ("ai_task.step".equals(eventType)) {
+                aiTasks.applyStepEvent(envelope);
+            }
         }
     }
 

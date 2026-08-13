@@ -51,8 +51,8 @@ MODEL_REQUIREMENT_SYSTEM_PROMPT = """你是采购需求结构化助手。把用�
 
 提取规则：
 - “交期不超过 20 天”“最多 20 天”“20 天内”都应写为 max_lead_days=20。
-- specifications 对包装类常见字段必须使用规范键：width、length、thickness、material、color、print_colors、layers。print_colors 必须为数值色数（单色印刷为 "1"），layers 必须为数值层数（五层为 "5"）。
-- 400 × 300 mm 应拆为 width 和 length；材质、颜色、单色印刷、容差和送货地点都要保留。尺寸容差只能写入 constraints.size_tolerance_mm，厚度容差只能写入 constraints.thickness_tolerance_um；不要在 specifications 中再输出容差字段。
+- specifications 对包装类常见字段必须使用规范键：width、length、height、thickness、material、color、print_colors、layers。print_colors 必须为数值色数（单色印刷为 "1"），layers 必须为数值层数（五层为 "5"）。
+- 尺寸按“宽×长×高”顺序拆分：400 × 300 × 250 mm 应输出 width=400、length=300、height=250；只有两个数时 250 × 350 mm 应输出 width=250、length=350。材质、颜色、单色印刷、容差和送货地点都要保留。尺寸容差只能写入 constraints.size_tolerance_mm，厚度容差只能写入 constraints.thickness_tolerance_um；不要在 specifications 中再输出容差字段。
 - 不要编造汇率、价格、报价或供应商信息；附件报价由另一个受控步骤解析。
 - 用户明确给出的硬性条件使用 priority=hard。"""
 

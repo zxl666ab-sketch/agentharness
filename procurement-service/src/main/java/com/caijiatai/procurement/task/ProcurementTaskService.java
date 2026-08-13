@@ -6,6 +6,8 @@ import com.caijiatai.procurement.agent.CanonicalJson;
 import com.caijiatai.procurement.agent.IdempotencyRecord;
 import com.caijiatai.procurement.agent.IdempotencyRecordRepository;
 import com.caijiatai.procurement.api.ApiException;
+import com.caijiatai.procurement.ai.AiTaskService;
+import com.caijiatai.procurement.ai.AiTaskType;
 import com.caijiatai.procurement.approval.PendingDecision;
 import com.caijiatai.procurement.approval.PendingDecisionRepository;
 import com.caijiatai.procurement.approval.ProcurementDecisionRepository;
@@ -21,6 +23,7 @@ import com.caijiatai.procurement.quote.QuoteCorrection;
 import com.caijiatai.procurement.quote.QuoteCorrectionRepository;
 import com.caijiatai.procurement.report.AuditEvent;
 import com.caijiatai.procurement.report.AuditEventRepository;
+import com.caijiatai.procurement.review.ReviewService;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -60,6 +63,8 @@ public class ProcurementTaskService {
     private final BusinessArtifactRepository businessArtifacts;
     private final TaskViewMapper views;
     private final TaskContextCache contextCache;
+    private final AiTaskService aiTasks;
+    private final ReviewService reviews;
     private final String operator;
 
     public ProcurementTaskService(
@@ -77,6 +82,8 @@ public class ProcurementTaskService {
             BusinessArtifactRepository businessArtifacts,
             TaskViewMapper views,
             TaskContextCache contextCache,
+            AiTaskService aiTasks,
+            ReviewService reviews,
             AppProperties properties) {
         this.tasks = tasks;
         this.attachments = attachments;
@@ -92,6 +99,8 @@ public class ProcurementTaskService {
         this.businessArtifacts = businessArtifacts;
         this.views = views;
         this.contextCache = contextCache;
+        this.aiTasks = aiTasks;
+        this.reviews = reviews;
         this.operator = properties.localOperator();
     }
 
@@ -266,39 +275,9 @@ public class ProcurementTaskService {
 
     @Transactional
     public ProcurementDtos.OperationAccepted analyze(String taskId, String idempotencyKey) {
-        var task = lockTask(taskId);
         contextCache.evict(taskId);
-        if (!task.isRequirementConfirmed()) {
-            throw conflict("requirement_review_required", "采购需求必须先由采购员保存确认");
-        }
-        var taskQuotes = quotes.findByTaskIdOrderByCreatedAtAsc(taskId);
-        if (taskQuotes.size() < 2) {
-            throw conflict("insufficient_quotes", "至少需要两份报价才能比价");
-        }
-        if (taskQuotes.stream().anyMatch(item -> !item.reviewFields().isEmpty())) {
-            throw conflict("quote_review_required", "报价字段尚未全部复核");
-        }
-        // Quote source hashes and the accepted task version bind the durable command.
-        var payload = Map.<String, Object>of(
-                "task_id", taskId,
-                "task_version", task.getVersion(),
-                "quote_sha256", taskQuotes.stream().map(item -> item.getSourceSha256()).sorted().toList());
-        var explicitKey = idempotencyKey != null && !idempotencyKey.isBlank();
-        var requestSha = CanonicalJson.sha256(explicitKey ? Map.of("task_id", taskId) : payload);
-        var key = normalizeIdempotencyKey(idempotencyKey, requestSha);
-        var existing = idempotency.findById(new IdempotencyRecord.Key("analyze", key));
-        if (existing.isPresent()) {
-            return existingAccepted(existing.get(), requestSha);
-        }
-        task.setStatus(TaskStatus.ANALYZING);
-        var command = commands.save(AgentCommand.accept(
-                "analyze", taskId, task.getGeneration(), task.getVersion(), payload));
-            commands.alignTimestampsToDbClock(command.getOperationId());
-        idempotency.save(IdempotencyRecord.reserve("analyze", key, requestSha, command.getOperationId()));
-        audit.save(AuditEvent.create(
-                taskId, null, task.getAnalysisRunId(), "analysis_accepted", operator,
-                Map.of("operation_id", command.getOperationId())));
-        return accepted(command, task);
+        var launch = aiTasks.create(taskId, AiTaskType.QUOTE_ANALYSIS, idempotencyKey);
+        return accepted(launch.command(), launch.businessTask());
     }
 
     @Transactional
@@ -422,6 +401,8 @@ public class ProcurementTaskService {
     }
 
     private void invalidate(ProcurementTask task) {
+        aiTasks.markBusinessStale(task.getId(), "INPUT_GENERATION_CHANGED");
+        reviews.markBusinessStale(task.getId(), "INPUT_GENERATION_CHANGED");
         task.invalidateAnalysis();
         pendingDecisions.findByTaskIdAndStatusIn(task.getId(), List.of("pending", "approved"))
                 .forEach(PendingDecision::stale);
@@ -515,100 +496,9 @@ public class ProcurementTaskService {
     }
 
     private void validateRequirement(ProcurementDtos.Requirement value) {
-        if (value.schemaVersion() == 1) {
-            var required = List.of("width_mm", "length_mm", "thickness_um", "material", "color", "print_colors");
-            if (!value.specifications().keySet().containsAll(required)) {
-                throw bad("invalid_v1_specifications", "V1 包装需求缺少固定规格字段");
-            }
-        }
-        if (value.schemaVersion() == 2) {
-            value.specifications().forEach((key, raw) -> {
-                var spec = map(raw);
-                if (!List.of("number", "text", "boolean").contains(String.valueOf(spec.get("type")))) {
-                    throw bad("invalid_dynamic_spec", "动态规格类型无效：" + key);
-                }
-                if (!List.of("exact", "tolerance", "range", "gte", "lte")
-                        .contains(String.valueOf(spec.get("match")))) {
-                    throw bad("invalid_dynamic_spec", "动态规格匹配方式无效：" + key);
-                }
-            });
-        }
-        if (!"ecommerce_packaging".equals(value.category())) {
-            throw bad("invalid_category", "当前采购域仅支持 ecommerce_packaging");
-        }
-        if (!"piece".equals(value.unit())) {
-            throw bad("invalid_unit", "当前采购域仅支持 piece 计价单位");
-        }
-        if (value.quantity().compareTo(new BigDecimal("100000000")) > 0) {
-            throw bad("invalid_quantity", "采购数量不得超过 1 亿");
-        }
-        var specs = value.specifications();
-        positiveDecimal(specs.get("width_mm"), "宽度", new BigDecimal("10000"));
-        positiveDecimal(specs.get("length_mm"), "长度", new BigDecimal("10000000"));
-        positiveDecimal(specs.get("thickness_um"), "厚度", new BigDecimal("5000"));
-        if (specs.get("print_colors") != null) {
-            int printColors = integerValue(specs.get("print_colors"), "印刷色数");
-            if (printColors < 0 || printColors > 12) {
-                throw bad("invalid_print_colors", "印刷色数必须在 0 到 12 之间");
-            }
-        }
-        if (specs.containsKey("height_mm")) {
-            positiveDecimal(specs.get("height_mm"), "高度", new BigDecimal("10000"));
-        } else if (requiresHeight(value.itemName())) {
-            throw bad("invalid_specifications", "纸箱采购规格必须提供高度 height_mm");
-        }
-        var constraints = value.constraints();
-        if (constraints.sizeToleranceMm() != null) {
-            rangeDecimal(constraints.sizeToleranceMm(), "尺寸公差", BigDecimal.ZERO, new BigDecimal("100"));
-        }
-        if (constraints.thicknessToleranceUm() != null) {
-            rangeDecimal(constraints.thicknessToleranceUm(), "厚度公差", BigDecimal.ZERO, new BigDecimal("5000"));
-        }
-        if (constraints.maxLandedUnitCost() != null && constraints.maxLandedUnitCost().signum() <= 0) {
-            throw bad("invalid_constraints", "到货单价上限必须大于 0");
-        }
-    }
-
-    private void positiveDecimal(Object value, String label, BigDecimal max) {
-        if (value == null || String.valueOf(value).isBlank()) {
-            throw bad("invalid_specifications", "缺少规格字段：" + label);
-        }
-        try {
-            var number = new BigDecimal(String.valueOf(value));
-            if (number.signum() <= 0) {
-                throw bad("invalid_specifications", label + "必须大于 0");
-            }
-            if (number.compareTo(max) > 0) {
-                throw bad("invalid_specifications", label + "超过上限 " + max.toPlainString());
-            }
-        } catch (NumberFormatException error) {
-            throw bad("invalid_specifications", label + "不是有效数值");
-        }
-    }
-
-    private void rangeDecimal(BigDecimal value, String label, BigDecimal min, BigDecimal max) {
-        if (value.compareTo(min) < 0 || value.compareTo(max) > 0) {
-            throw bad("invalid_constraints", label + "必须在 " + min.toPlainString() + " 到 " + max.toPlainString() + " 之间");
-        }
-    }
-
-    private int integerValue(Object value, String label) {
-        try {
-            return new BigDecimal(String.valueOf(value)).intValueExact();
-        } catch (RuntimeException error) {
-            throw bad("invalid_" + label, label + "必须是整数");
-        }
-    }
-
-    private boolean requiresHeight(String itemName) {
-        var text = itemName == null ? "" : itemName.toLowerCase(Locale.ROOT);
-        if (text.contains("胶带") || text.matches(".*\\btape\\b.*")) {
-            return false;
-        }
-        if (List.of("纸箱", "包装箱", "carton", "corrugated").stream().anyMatch(text::contains)) {
-            return true;
-        }
-        return text.matches(".*\\bbox(?:es)?\\b.*") && !text.contains("tape");
+        RequirementValidator.validate(value.schemaVersion(), value.category(), value.itemName(), value.quantity(),
+                value.unit(), value.specifications(), value.constraints().sizeToleranceMm(),
+                value.constraints().thicknessToleranceUm(), value.constraints().maxLandedUnitCost());
     }
 
     private void putDecimal(Map<String, Object> result, String key, BigDecimal value) {

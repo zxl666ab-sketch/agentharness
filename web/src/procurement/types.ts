@@ -1,13 +1,206 @@
-export type ProcurementStatus =
-  | "draft"
-  | "collecting"
-  | "review"
-  | "ready"
-  | "analyzing"
-  | "analyzed"
-  | "approval_pending"
-  | "approved"
-  | "no_award";
+export const PROCUREMENT_STATUSES = [
+  "draft",
+  "collecting",
+  "review",
+  "ready",
+  "analyzed",
+  "approval_pending",
+  "approved",
+  "no_award",
+  "cancelled",
+] as const;
+
+export type ProcurementBusinessStatus = (typeof PROCUREMENT_STATUSES)[number];
+
+// Compatibility only: new execution state belongs to AiTaskStatus, not procurement status.
+export type ProcurementStatus = ProcurementBusinessStatus | "analyzing";
+
+export const AI_TASK_STATUSES = [
+  "PENDING",
+  "DISPATCHING",
+  "RUNNING",
+  "SUCCEEDED",
+  "FAILED",
+  "RETRYING",
+  "CANCELLED",
+] as const;
+
+export type AiTaskStatus = (typeof AI_TASK_STATUSES)[number];
+
+export const AI_STATUS_TRANSITIONS: Record<AiTaskStatus, readonly AiTaskStatus[]> = {
+  PENDING: ["DISPATCHING", "CANCELLED"],
+  DISPATCHING: ["RUNNING", "FAILED", "CANCELLED"],
+  RUNNING: ["SUCCEEDED", "FAILED", "CANCELLED"],
+  SUCCEEDED: [],
+  FAILED: ["RETRYING", "CANCELLED"],
+  RETRYING: ["RUNNING", "FAILED", "CANCELLED"],
+  CANCELLED: [],
+};
+
+export const AI_TASK_TYPES = ["QUOTE_ANALYSIS"] as const;
+export type AiTaskType = (typeof AI_TASK_TYPES)[number];
+
+export const AI_TASK_STEPS = [
+  "INPUT_VALIDATE",
+  "ARTIFACT_FETCH",
+  "QUOTE_PARSE",
+  "RULE_ANALYSIS",
+  "EXPLANATION",
+  "RESULT_PUBLISH",
+] as const;
+export type AiTaskStep = (typeof AI_TASK_STEPS)[number];
+
+export type AiErrorCategory =
+  | "VALIDATION"
+  | "BUSINESS"
+  | "PROVIDER"
+  | "TRANSPORT"
+  | "INTERNAL";
+
+export type AiTaskView = {
+  ai_task_id: string;
+  business_id: string;
+  generation: number;
+  status: AiTaskStatus;
+  task_type: AiTaskType;
+  trace_id: string;
+  current_step: AiTaskStep | null;
+  progress: number;
+  retry_count: number;
+  max_retries?: number;
+  retryable: boolean;
+  operation_id?: string | null;
+  result_id?: string | null;
+  stale: boolean;
+  stale_reason?: string | null;
+  error_category?: AiErrorCategory | null;
+  error_code: string | null;
+  error_message?: string | null;
+  assignee?: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+};
+
+export type AiStepStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "SKIPPED";
+
+export type AiTaskRecordView = {
+  record_id: string;
+  ai_task_id: string;
+  operation_id: string;
+  attempt: number;
+  sequence: number;
+  step: AiTaskStep;
+  status: AiStepStatus;
+  summary?: string | null;
+  error_category?: AiErrorCategory | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  created_at: string;
+};
+
+export type AiResultView = {
+  ai_result_id: string;
+  ai_task_id: string;
+  business_id: string;
+  generation: number;
+  input_sha256: string;
+  result_sha256: string;
+  raw_result?: Record<string, unknown> | null;
+  structured_result: Record<string, unknown>;
+  sources: Array<{
+    artifact_id: string;
+    locator: string;
+    excerpt: string;
+    confidence: number;
+    method: string;
+  }>;
+  provider?: string | null;
+  model?: string | null;
+  prompt_version: string;
+  parser_version?: string | null;
+  stale: boolean;
+  stale_reason?: string | null;
+  created_at: string;
+};
+
+export type AiTaskDetail = AiTaskView & {
+  records: AiTaskRecordView[];
+  result: AiResultView | null;
+};
+
+export type AiTaskPage = {
+  items: AiTaskView[];
+  page: number;
+  size: number;
+  total: number;
+};
+
+export const REVIEW_STATUSES = ["PENDING", "APPROVED", "REJECTED", "NO_AWARD", "STALE"] as const;
+export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
+
+export const REVIEW_ACTIONS = [
+  "APPROVE_SUGGESTION",
+  "REVISE_AND_APPROVE",
+  "REJECT_AND_RETRY",
+  "NO_AWARD",
+] as const;
+export type ReviewAction = (typeof REVIEW_ACTIONS)[number];
+
+export type ReviewView = {
+  review_id: string;
+  business_id: string;
+  ai_task_id: string;
+  ai_result_id: string;
+  status: ReviewStatus;
+  priority: number;
+  risk_flags: string[];
+  waiting_since: string;
+  version: number;
+  generation?: number;
+  task_version?: number;
+  snapshot_id?: string;
+  input_sha256?: string;
+  suggested_quote_id?: string | null;
+  final_quote_id?: string | null;
+  action?: ReviewAction | null;
+  reason?: string | null;
+  actor?: string | null;
+  revisions?: Record<string, unknown> | null;
+  evidence_sha256?: string | null;
+  pending_decision_id?: string | null;
+  decision_id?: string | null;
+  stale_reason?: string | null;
+  acted_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ReviewPage = {
+  items: ReviewView[];
+  page: number;
+  size: number;
+  total: number;
+};
+
+export type ReviewDetail = ReviewView & {
+  ai_result: AiResultView;
+  comparison: ComparisonSnapshot;
+  history: ReviewView[];
+};
+
+export type ReviewActionInput = {
+  action: ReviewAction;
+  expected_version: number;
+  actor: string;
+  final_quote_id?: string | null;
+  revisions?: Record<string, unknown>;
+  reason?: string | null;
+};
 
 export type RequirementSpecification = {
   label: string;

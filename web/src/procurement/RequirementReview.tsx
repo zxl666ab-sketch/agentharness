@@ -17,6 +17,7 @@ type FormState = {
   quantity: string;
   width: string;
   length: string;
+  height: string;
   thickness: string;
   material: string;
   color: string;
@@ -47,6 +48,13 @@ type DynamicSpecForm = {
 
 function asText(value: unknown) {
   return value == null ? "" : String(value);
+}
+
+function printColorsText(value: unknown) {
+  const text = asText(value).trim();
+  if (/^(单色|一色|one[- ]?color)$/i.test(text)) return "1";
+  if (/^(双色|二色|two[- ]?colors?)$/i.test(text)) return "2";
+  return text;
 }
 
 function datePart(value: unknown) {
@@ -81,10 +89,11 @@ function initialState(request: ProcurementRequest): FormState {
     quantity: asText(request.quantity),
     width: asText(specifications.width_mm),
     length: asText(specifications.length_mm),
+    height: asText(specifications.height_mm),
     thickness: asText(specifications.thickness_um),
     material: asText(specifications.material),
     color: asText(specifications.color),
-    printColors: asText(specifications.print_colors),
+    printColors: printColorsText(specifications.print_colors),
     maxLeadDays,
     invoiceRequired: constraints.invoice_required !== false,
     sizeTolerance: asText(constraints.size_tolerance_mm),
@@ -262,6 +271,7 @@ export function RequirementReview({ request, busy, error, onSave }: Props) {
             specifications: {
               width_mm: numberValue(form.width, "宽度"),
               length_mm: numberValue(form.length, "长度"),
+              ...(form.height.trim() ? { height_mm: numberValue(form.height, "高度") } : {}),
               thickness_um: numberValue(form.thickness, "厚度"),
               material: form.material.trim(),
               color: form.color.trim(),
@@ -342,6 +352,7 @@ export function RequirementReview({ request, busy, error, onSave }: Props) {
               <label className="proc-field"><span>宽度（mm）</span><input type="number" min="0" step="any" value={form.width} onChange={(event) => update("width", event.target.value)} disabled={terminal || busy} /></label>
               <label className="proc-field"><span>长度（mm）</span><input type="number" min="0" step="any" value={form.length} onChange={(event) => update("length", event.target.value)} disabled={terminal || busy} /></label>
               <label className="proc-field"><span>厚度（µm）</span><input type="number" min="0" step="any" value={form.thickness} onChange={(event) => update("thickness", event.target.value)} disabled={terminal || busy} /></label>
+              <label className="proc-field"><span>高度（mm）</span><input type="number" min="0" step="any" value={form.height} onChange={(event) => update("height", event.target.value)} disabled={terminal || busy} /></label>
               <label className="proc-field"><span>材质</span><input value={form.material} onChange={(event) => update("material", event.target.value)} disabled={terminal || busy} /></label>
               <label className="proc-field"><span>颜色</span><input value={form.color} onChange={(event) => update("color", event.target.value)} disabled={terminal || busy} /></label>
               <label className="proc-field"><span>印刷色数</span><input type="number" min="0" max="12" step="1" value={form.printColors} onChange={(event) => update("printColors", event.target.value)} disabled={terminal || busy} /></label>
