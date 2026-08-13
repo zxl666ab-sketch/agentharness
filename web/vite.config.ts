@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-const apiSchemaVersion = 13;
+const apiSchemaVersion = 14;
 const webRoot = dirname(fileURLToPath(import.meta.url));
 
 function sourceFiles(path: string): string[] {

@@ -56,6 +56,83 @@
       "type": "string",
       "enum": ["ACTIVE", "PAUSED", "BLACKLISTED"]
     },
+    "CostSavings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["budget_total", "landed_total", "savings", "included_tasks"],
+      "properties": {
+        "budget_total": { "type": "string" },
+        "landed_total": { "type": "string" },
+        "savings": { "type": "string" },
+        "rate": { "type": ["string", "null"] },
+        "included_tasks": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "InsightsOverview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status_funnel", "cost_savings", "counts"],
+      "properties": {
+        "status_funnel": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status", "count"],
+            "properties": {
+              "status": { "type": "string" },
+              "count": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "cost_savings": { "$ref": "#/$defs/CostSavings" },
+        "counts": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "InsightTrendRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["month", "task_count", "approved_amount"],
+      "properties": {
+        "month": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}$" },
+        "task_count": { "type": "integer", "minimum": 0 },
+        "approved_amount": { "type": "string" }
+      }
+    },
+    "AuditEventView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "event_type", "actor", "payload", "created_at"],
+      "properties": {
+        "id": { "$ref": "#/$defs/Id32" },
+        "task_id": { "type": ["string", "null"] },
+        "task_reference": { "type": ["string", "null"] },
+        "quote_id": { "type": ["string", "null"] },
+        "run_id": { "type": ["string", "null"] },
+        "business_type": { "type": ["string", "null"] },
+        "business_id": { "type": ["string", "null"] },
+        "event_type": { "type": "string" },
+        "actor": { "type": "string" },
+        "payload": { "type": "object" },
+        "created_at": { "$ref": "#/$defs/DateTime" }
+      }
+    },
+    "PlatformInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service", "backend_version", "api_schema_version", "components", "parsers", "rulesets", "model", "db", "capabilities"],
+      "properties": {
+        "service": { "type": "string" },
+        "backend_version": { "type": "string" },
+        "api_schema_version": { "type": "integer" },
+        "components": { "type": "object", "additionalProperties": true },
+        "parsers": { "type": "object", "additionalProperties": true },
+        "rulesets": { "type": "object", "additionalProperties": true },
+        "model": { "type": "object", "additionalProperties": true },
+        "db": { "type": "object", "additionalProperties": true },
+        "capabilities": { "type": "array", "items": { "type": "string" } }
+      }
+    },
     "OrderStatus": {
       "type": "string",
       "enum": ["PENDING_SHIPMENT", "SHIPPED", "RECEIVED", "CLOSED"]

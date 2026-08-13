@@ -28,4 +28,6 @@ public interface SupplierRepository extends JpaRepository<Supplier, String> {
     Page<Supplier> search(@Param("q") String q, @Param("status") String status, Pageable pageable);
 
     List<Supplier> findAllByOrderByNameAsc();
+
+    long countByStatus(String status);
 }

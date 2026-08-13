@@ -22,4 +22,6 @@ public interface OrderRepository extends JpaRepository<PurchaseOrder, String> {
     Page<PurchaseOrder> findByStatusOrderByCreatedAtDesc(String status, Pageable pageable);
 
     List<PurchaseOrder> findByStatusAndUpdatedAtBefore(String status, java.time.Instant before);
+
+    long countByStatus(String status);
 }

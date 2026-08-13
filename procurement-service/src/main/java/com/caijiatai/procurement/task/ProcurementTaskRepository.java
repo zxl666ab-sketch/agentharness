@@ -18,6 +18,10 @@ public interface ProcurementTaskRepository extends JpaRepository<ProcurementTask
 
     Optional<ProcurementTask> findFirstByAnalysisRunId(String analysisRunId);
 
+    long countByStatus(String status);
+
+    java.util.List<ProcurementTask> findByCreatedAtGreaterThanEqualOrderByCreatedAtAsc(java.time.Instant from);
+
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("update ProcurementTask task set task.retryable = true, task.retryMessage = :message "
             + "where task.id = :id")

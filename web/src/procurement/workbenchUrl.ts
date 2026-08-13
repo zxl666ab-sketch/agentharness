@@ -1,4 +1,14 @@
-export const WORKBENCH_VIEWS = ["workbench", "tasks", "ai", "reviews", "suppliers", "orders"] as const;
+export const WORKBENCH_VIEWS = [
+  "workbench",
+  "tasks",
+  "ai",
+  "reviews",
+  "suppliers",
+  "orders",
+  "reports",
+  "audit",
+  "system",
+] as const;
 export type WorkbenchView = (typeof WORKBENCH_VIEWS)[number];
 
 export const TASK_TABS = ["quotes", "compare", "report", "audit"] as const;

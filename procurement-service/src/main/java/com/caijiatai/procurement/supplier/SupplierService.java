@@ -5,6 +5,8 @@ import com.caijiatai.procurement.approval.ProcurementDecision;
 import com.caijiatai.procurement.approval.ProcurementDecisionRepository;
 import com.caijiatai.procurement.quote.ProcurementQuote;
 import com.caijiatai.procurement.quote.ProcurementQuoteRepository;
+import com.caijiatai.procurement.report.AuditEvent;
+import com.caijiatai.procurement.report.AuditEventRepository;
 import com.caijiatai.procurement.task.ProcurementTask;
 import com.caijiatai.procurement.task.ProcurementTaskRepository;
 import java.math.BigDecimal;
@@ -44,16 +46,19 @@ public class SupplierService {
     private final ProcurementQuoteRepository quotes;
     private final ProcurementTaskRepository tasks;
     private final ProcurementDecisionRepository decisions;
+    private final AuditEventRepository audit;
 
     public SupplierService(
             SupplierRepository suppliers,
             ProcurementQuoteRepository quotes,
             ProcurementTaskRepository tasks,
-            ProcurementDecisionRepository decisions) {
+            ProcurementDecisionRepository decisions,
+            AuditEventRepository audit) {
         this.suppliers = suppliers;
         this.quotes = quotes;
         this.tasks = tasks;
         this.decisions = decisions;
+        this.audit = audit;
     }
 
     @Transactional(readOnly = true)
@@ -99,6 +104,10 @@ public class SupplierService {
             supplier.changeStatus(body.status());
             suppliers.save(supplier);
         }
+        audit.save(AuditEvent.forBusiness(
+                "supplier", supplier.getId(), "supplier_created", "system",
+                Map.of("supplier_id", supplier.getId(), "name", supplier.getName(),
+                        "status", supplier.getStatus())));
         return view(supplier, quoteAggregate(supplier.getName()));
     }
 
@@ -115,7 +124,12 @@ public class SupplierService {
                 throw bad("invalid_supplier_status", "供应商状态只能是 ACTIVE / PAUSED / BLACKLISTED");
             }
             if (!Objects.equals(supplier.getStatus(), body.status())) {
+                var from = supplier.getStatus();
                 supplier.changeStatus(body.status());
+                audit.save(AuditEvent.forBusiness(
+                        "supplier", supplier.getId(), "supplier_status_changed", "system",
+                        Map.of("supplier_id", supplier.getId(), "name", supplier.getName(),
+                                "from", from, "to", supplier.getStatus())));
             }
         }
         supplier.updateProfile(
@@ -126,6 +140,10 @@ public class SupplierService {
                 body.mainCategories(),
                 body.notes());
         suppliers.save(supplier);
+        audit.save(AuditEvent.forBusiness(
+                "supplier", supplier.getId(), "supplier_updated", "system",
+                Map.of("supplier_id", supplier.getId(), "name", supplier.getName(),
+                        "status", supplier.getStatus())));
         return view(supplier, quoteAggregate(supplier.getName()));
     }
 
@@ -137,6 +155,9 @@ public class SupplierService {
             throw conflict("supplier_has_quotes",
                     "该供应商存在报价历史，禁止删除；可将状态改为暂停或黑名单");
         }
+        audit.save(AuditEvent.forBusiness(
+                "supplier", supplier.getId(), "supplier_deleted", "system",
+                Map.of("supplier_id", supplier.getId(), "name", supplier.getName())));
         suppliers.delete(supplier);
     }
 
@@ -191,6 +212,25 @@ public class SupplierService {
     }
 
     // ---------- 视图与聚合 ----------
+
+    /** K3 供应商中标排行：按中标次数/中标率排序，附带绩效分（冻结 4.8）。 */
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> ranking(int limit) {
+        var result = new ArrayList<Map<String, Object>>();
+        for (var supplier : suppliers.findAll()) {
+            var aggregation = quoteAggregate(supplier.getName());
+            if (aggregation.quoteCount() == 0) {
+                continue;
+            }
+            var value = view(supplier, aggregation);
+            result.add(value);
+        }
+        result.sort(Comparator
+                .comparingInt((Map<String, Object> entry) -> (int) entry.get("win_count")).reversed()
+                .thenComparing(entry -> new BigDecimal(String.valueOf(entry.get("win_rate"))).negate())
+                .thenComparing(entry -> String.valueOf(entry.get("name"))));
+        return result.stream().limit(Math.min(50, Math.max(1, limit))).toList();
+    }
 
     private Map<String, Object> view(Supplier supplier, Aggregation aggregation) {
         var value = new LinkedHashMap<String, Object>();

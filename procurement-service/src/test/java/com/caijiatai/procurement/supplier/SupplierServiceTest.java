@@ -13,6 +13,7 @@ import com.caijiatai.procurement.approval.ProcurementDecision;
 import com.caijiatai.procurement.approval.ProcurementDecisionRepository;
 import com.caijiatai.procurement.quote.ProcurementQuote;
 import com.caijiatai.procurement.quote.ProcurementQuoteRepository;
+import com.caijiatai.procurement.report.AuditEventRepository;
 import com.caijiatai.procurement.task.ProcurementTask;
 import com.caijiatai.procurement.task.ProcurementTaskRepository;
 import java.time.Instant;
@@ -29,7 +30,8 @@ class SupplierServiceTest {
     private final ProcurementQuoteRepository quotes = mock(ProcurementQuoteRepository.class);
     private final ProcurementTaskRepository tasks = mock(ProcurementTaskRepository.class);
     private final ProcurementDecisionRepository decisions = mock(ProcurementDecisionRepository.class);
-    private final SupplierService service = new SupplierService(suppliers, quotes, tasks, decisions);
+    private final AuditEventRepository audit = mock(AuditEventRepository.class);
+    private final SupplierService service = new SupplierService(suppliers, quotes, tasks, decisions, audit);
 
     private Supplier supplier(String name, String status) {
         var supplier = Supplier.create(name, "联系人", "13800000000", "a@b.c", "地址", "包装", "备注");

@@ -268,6 +268,104 @@ paths:
         '400': {description: Missing paid_at or invalid action.}
         '404': {description: Unknown settlement.}
         '409': {description: Illegal transition or version conflict.}
+  /api/procurement/insights/overview:
+    get:
+      operationId: insightsOverview
+      responses:
+        '200':
+          description: Cockpit overview (status funnel, cost savings, domain counts).
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/InsightsOverview'}
+  /api/procurement/insights/trend:
+    get:
+      operationId: insightsTrend
+      parameters:
+        - name: months
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 24, default: 6}
+      responses:
+        '200':
+          description: Monthly task counts and approved amounts.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: './procurement-workbench.schema.json#/$defs/InsightTrendRow'}
+  /api/procurement/insights/supplier-ranking:
+    get:
+      operationId: insightsSupplierRanking
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 50, default: 10}
+      responses:
+        '200':
+          description: Supplier ranking by wins and performance score.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: './procurement-workbench.schema.json#/$defs/SupplierView'}
+  /api/procurement/insights/categories:
+    get:
+      operationId: insightsCategories
+      responses:
+        '200':
+          description: Task counts grouped by category.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [category, count]
+                  properties:
+                    category: {type: string}
+                    count: {type: integer, minimum: 0}
+  /api/procurement/audit-events:
+    get:
+      operationId: listAuditEvents
+      parameters:
+        - name: type
+          in: query
+          schema: {type: string, maxLength: 100}
+        - name: actor
+          in: query
+          schema: {type: string, maxLength: 100}
+        - name: business_type
+          in: query
+          schema: {type: string, maxLength: 30}
+        - name: task_id
+          in: query
+          schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Filtered global audit event page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, page, size, total]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: './procurement-workbench.schema.json#/$defs/AuditEventView'}
+                  page: {type: integer, minimum: 0}
+                  size: {type: integer, minimum: 1}
+                  total: {type: integer, minimum: 0}
+  /api/procurement/platform:
+    get:
+      operationId: platformInfo
+      responses:
+        '200':
+          description: System information (version, components, parsers, rulesets, model status).
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/PlatformInfo'}
 components:
   parameters:
     BusinessId:

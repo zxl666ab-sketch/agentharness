@@ -22,4 +22,6 @@ public interface SettlementRepository extends JpaRepository<PurchaseSettlement, 
     Page<PurchaseSettlement> findByStatusOrderByCreatedAtDesc(String status, Pageable pageable);
 
     List<PurchaseSettlement> findByStatusAndUpdatedAtBefore(String status, java.time.Instant before);
+
+    long countByStatus(String status);
 }

@@ -24,22 +24,25 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useAgentStream } from "../useAgentStream";
+import { AuditLogCenter } from "./AuditLogCenter";
 import { AuditView } from "./AuditView";
 import { AiTaskCenter } from "./AiTaskCenter";
 import { AiTaskRecovery } from "./AiTaskRecovery";
 import { procurementApi } from "./api";
 import { ComparisonView } from "./ComparisonView";
+import { OrderCenter } from "./OrderCenter";
 import {
   NewProcurementConversation,
   ProcurementConversation,
 } from "./ProcurementConversation";
 import { QuoteWorkspace } from "./QuoteWorkspace";
+import { ReportsCenter } from "./ReportsCenter";
 import { ReportView } from "./ReportView";
 import { ReviewCenter } from "./ReviewCenter";
 import { RequirementReview } from "./RequirementReview";
 import { readRole, ROLE_LABELS, type DemoRole, writeRole } from "./roles";
-import { OrderCenter } from "./OrderCenter";
 import { SupplierCenter } from "./SupplierCenter";
+import { SystemInfo } from "./SystemInfo";
 import { WorkbenchHome } from "./WorkbenchHome";
 import { WorkbenchNavigation } from "./WorkbenchNavigation";
 import {
@@ -752,6 +755,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
         <section className="proc-main">
           {view === "workbench" ? (
             <WorkbenchHome
+              role={role}
               requests={requests}
               aiTasks={allAiTasks}
               reviews={reviews}
@@ -760,6 +764,9 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
               onOpenTask={openTask}
               onOpenTasks={openTaskFilter}
               onOpenView={openView}
+              onOpenOrders={() => openView("orders")}
+              onOpenSuppliers={() => openView("suppliers")}
+              onOpenReports={() => openView("reports")}
             />
           ) : view === "ai" ? (
             <AiTaskCenter
@@ -785,6 +792,12 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
             <SupplierCenter onOpenTask={openTask} />
           ) : view === "orders" ? (
             <OrderCenter />
+          ) : view === "reports" ? (
+            <ReportsCenter />
+          ) : view === "audit" ? (
+            <AuditLogCenter />
+          ) : view === "system" ? (
+            <SystemInfo />
           ) : showCreate || (!selectedId && !detail) ? (
             <NewProcurementConversation
               busy={busy === "conversation"}

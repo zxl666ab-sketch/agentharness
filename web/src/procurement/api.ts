@@ -2,8 +2,16 @@ import type {
   AiTaskDetail,
   AiTaskPage,
   AiTaskView,
+  AuditEventPage,
+  CategoryDistribution,
   CreateProcurementRequest,
   EvaluationResult,
+  InsightTrendRow,
+  InsightsOverview,
+  OrderPage,
+  OrderStatus,
+  OrderView,
+  PlatformInfo,
   ProcurementAuditReport,
   ProcurementMeta,
   ProcurementModelConfig,
@@ -17,14 +25,12 @@ import type {
   ReviewDetail,
   ReviewPage,
   ReviewStatus,
-  OrderPage,
-  OrderStatus,
-  OrderView,
   SettlementPage,
   SettlementStatus,
   SettlementView,
   SupplierPage,
   SupplierProfile,
+  SupplierRankingRow,
   SupplierSaveRequest,
   SupplierStatus,
   SupplierView,
@@ -316,4 +322,26 @@ export const procurementApi = {
     id: string,
     input: { action: "settle" | "pay"; paid_at?: string | null; notes?: string | null }
   ) => postJson<SettlementView>(`/api/procurement/settlements/${id}/transition`, input),
+  insightsOverview: () => requestJson<InsightsOverview>("/api/procurement/insights/overview"),
+  insightsTrend: (months = 6) =>
+    requestJson<InsightTrendRow[]>(`/api/procurement/insights/trend?months=${months}`),
+  insightsSupplierRanking: (limit = 10) =>
+    requestJson<SupplierRankingRow[]>(`/api/procurement/insights/supplier-ranking?limit=${limit}`),
+  insightsCategories: () => requestJson<CategoryDistribution>("/api/procurement/insights/categories"),
+  auditEvents: (filters: {
+    type?: string;
+    actor?: string;
+    business_type?: string;
+    task_id?: string;
+    page?: number;
+    size?: number;
+  }) => {
+    const query = new URLSearchParams({ page: String(filters.page ?? 0), size: String(filters.size ?? 50) });
+    if (filters.type?.trim()) query.set("type", filters.type.trim());
+    if (filters.actor?.trim()) query.set("actor", filters.actor.trim());
+    if (filters.business_type?.trim()) query.set("business_type", filters.business_type.trim());
+    if (filters.task_id?.trim()) query.set("task_id", filters.task_id.trim());
+    return requestJson<AuditEventPage>(`/api/procurement/audit-events?${query}`);
+  },
+  platform: () => requestJson<PlatformInfo>("/api/procurement/platform"),
 };

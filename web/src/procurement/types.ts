@@ -638,6 +638,84 @@ export type SettlementPage = {
   total: number;
 };
 
+export type InsightsOverview = {
+  status_funnel: Array<{ status: string; count: number }>;
+  cost_savings: {
+    budget_total: string;
+    landed_total: string;
+    savings: string;
+    rate: string | null;
+    included_tasks: number;
+  };
+  counts: {
+    tasks: number;
+    approved_tasks: number;
+    orders: number;
+    orders_pending_shipment: number;
+    orders_shipped: number;
+    orders_received: number;
+    orders_closed: number;
+    settlements_unsettled: number;
+    settlements_settled: number;
+    settlements_paid: number;
+    suppliers: number;
+    suppliers_blacklisted: number;
+    reviews_pending: number;
+    ai_tasks_failed: number;
+    overdue_orders: number;
+    overdue_payments: number;
+  };
+};
+
+export type InsightTrendRow = {
+  month: string;
+  task_count: number;
+  approved_amount: string;
+};
+
+export type SupplierRankingRow = SupplierView;
+
+export type CategoryDistribution = Array<{ category: string; count: number }>;
+
+export type AuditEventView = {
+  id: string;
+  task_id: string | null;
+  task_reference: string | null;
+  quote_id: string | null;
+  run_id: string | null;
+  business_type: string | null;
+  business_id: string | null;
+  event_type: string;
+  actor: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+};
+
+export type AuditEventPage = {
+  items: AuditEventView[];
+  page: number;
+  size: number;
+  total: number;
+};
+
+export type PlatformInfo = {
+  service: string;
+  backend_version: string;
+  api_schema_version: number;
+  components: Record<string, string>;
+  parsers: { quote_parser_versions: string[] };
+  rulesets: { comparison_rulesets: string[] };
+  model: {
+    provider: string;
+    model: string;
+    api_key_configured: boolean;
+    api_key_preview: string | null;
+    reasoning_effort: string;
+  };
+  db: Record<string, unknown>;
+  capabilities: string[];
+};
+
 export type ProcurementAuditReport = {
   schema_version: number;
   evidence_sha256: string;

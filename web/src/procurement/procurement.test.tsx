@@ -209,25 +209,34 @@ function allExcluded(): ProcurementRequest {
 describe("procurement workflow views", () => {
   it("renders workbench metrics as actionable filters and only real navigation", () => {
     const home = renderToString(
-      <WorkbenchHome
-        requests={[request]}
-        aiTasks={[]}
-        reviews={[]}
-        loading={false}
-        onCreate={() => undefined}
-        onOpenTask={() => undefined}
-        onOpenTasks={() => undefined}
-        onOpenView={() => undefined}
-      />
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <WorkbenchHome
+          role="admin"
+          requests={[request]}
+          aiTasks={[]}
+          reviews={[]}
+          loading={false}
+          onCreate={() => undefined}
+          onOpenTask={() => undefined}
+          onOpenTasks={() => undefined}
+          onOpenView={() => undefined}
+          onOpenOrders={() => undefined}
+          onOpenSuppliers={() => undefined}
+          onOpenReports={() => undefined}
+        />
+      </QueryClientProvider>
     );
     const navigation = renderToString(
       <WorkbenchNavigation active="workbench" role="admin" aiAttention={0} reviewAttention={0} onChange={() => undefined} />
     );
 
-    expect(home).toContain("今日采购工作");
+    expect(home).toContain("管理驾驶舱");
+    expect(home).toContain("成本节约率");
+    expect(home).toContain("待我审批");
+    expect(home).toContain("待收货订单");
     expect(home).toMatch(/<button[^>]*><[^>]+>.*采购任务/s);
     expect(home).toContain("待处理");
-    expect(home).toContain("待审核");
+    expect(home).toContain("等待人工审核");
     expect(navigation).toContain("工作台");
     expect(navigation).toContain("AI 任务");
     expect(navigation).toContain("供应商管理");

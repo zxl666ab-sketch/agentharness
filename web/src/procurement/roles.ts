@@ -28,9 +28,19 @@ export function writeRole(role: DemoRole) {
  * 管理员：全部 + 系统管理（审计日志/系统信息）
  */
 const VISIBLE_VIEWS: Record<DemoRole, WorkbenchView[]> = {
-  buyer: ["workbench", "tasks", "ai", "reviews", "suppliers", "orders"],
+  buyer: ["workbench", "tasks", "ai", "reviews", "suppliers", "orders", "reports"],
   approver: ["workbench", "ai", "reviews"],
-  admin: ["workbench", "tasks", "ai", "reviews", "suppliers", "orders"],
+  admin: [
+    "workbench",
+    "tasks",
+    "ai",
+    "reviews",
+    "suppliers",
+    "orders",
+    "reports",
+    "audit",
+    "system",
+  ],
 };
 
 export function visibleViews(role: DemoRole): WorkbenchView[] {

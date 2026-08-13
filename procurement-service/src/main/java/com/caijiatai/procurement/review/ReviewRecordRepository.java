@@ -15,6 +15,8 @@ public interface ReviewRecordRepository
     List<ReviewRecord> findByBusinessIdOrderByCreatedAtAsc(String businessId);
     List<ReviewRecord> findByBusinessIdAndStatus(String businessId, ReviewStatus status);
 
+    long countByStatus(ReviewStatus status);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select review from ReviewRecord review where review.id = :id")
     Optional<ReviewRecord> lockById(String id);

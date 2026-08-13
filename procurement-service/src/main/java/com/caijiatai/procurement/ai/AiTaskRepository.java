@@ -28,4 +28,8 @@ public interface AiTaskRepository extends JpaRepository<AiTask, String>, JpaSpec
     List<AiTask> findByBusinessIdOrderByCreatedAtDesc(String businessId);
 
     List<AiTask> findByBusinessIdAndStaleFalse(String businessId);
+
+    long countByStatus(AiTaskStatus status);
+
+    long countByStaleTrue();
 }

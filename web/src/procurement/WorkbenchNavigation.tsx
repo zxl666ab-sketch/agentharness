@@ -1,8 +1,11 @@
 import {
+  BarChart3,
   Bot,
   ClipboardCheck,
   LayoutDashboard,
   ListTodo,
+  ScrollText,
+  Server,
   ShoppingCart,
   Users,
 } from "lucide-react";
@@ -23,11 +26,15 @@ const PROCUREMENT_ITEMS = [
   { id: "tasks" as const, label: "采购任务", icon: ListTodo },
   { id: "suppliers" as const, label: "供应商管理", icon: Users },
   { id: "orders" as const, label: "采购订单", icon: ShoppingCart },
+  { id: "reports" as const, label: "统计报表", icon: BarChart3 },
   { id: "ai" as const, label: "AI 任务", icon: Bot },
   { id: "reviews" as const, label: "人工审核", icon: ClipboardCheck },
 ];
 
-const SYSTEM_ITEMS: Array<{ id: WorkbenchView; label: string; icon: typeof Users }> = [];
+const SYSTEM_ITEMS: Array<{ id: WorkbenchView; label: string; icon: typeof Users }> = [
+  { id: "audit", label: "审计日志", icon: ScrollText },
+  { id: "system", label: "系统信息", icon: Server },
+];
 
 function countFor(id: WorkbenchView, aiAttention: number, reviewAttention: number) {
   return id === "ai" ? aiAttention : id === "reviews" ? reviewAttention : 0;
