@@ -3,7 +3,10 @@ package com.caijiatai.procurement;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.caijiatai.procurement.agent.AgentCommandRepository;
+import com.caijiatai.procurement.approval.PendingDecisionRepository;
+import com.caijiatai.procurement.approval.ProcurementDecisionRepository;
 import com.caijiatai.procurement.artifact.ArtifactStore;
+import com.caijiatai.procurement.comparison.ComparisonService;
 import com.caijiatai.procurement.config.AppProperties;
 import com.caijiatai.procurement.demo.DemoSeedRunner;
 import com.caijiatai.procurement.quote.ProcurementQuoteRepository;
@@ -54,6 +57,9 @@ class DemoSeedIntegrationTest {
     @Autowired AuditEventRepository audit;
     @Autowired ProcurementTaskService taskService;
     @Autowired ArtifactStore artifactStore;
+    @Autowired ComparisonService comparison;
+    @Autowired PendingDecisionRepository pendingDecisions;
+    @Autowired ProcurementDecisionRepository decisions;
     @Autowired AppProperties properties;
     @Autowired ObjectMapper mapper;
 
@@ -180,15 +186,18 @@ class DemoSeedIntegrationTest {
                 properties.allowedViteOrigin(), properties.developmentMode(),
                 properties.outbox(), properties.agentMode(), new AppProperties.DemoSeed(true, root), properties.internalHmacKey());
         var runner = new DemoSeedRunner(
-                demoProperties, taskService, tasks, quotes, artifactStore, audit, jdbc, mapper);
+                demoProperties, taskService, tasks, quotes, artifactStore, audit,
+                comparison, pendingDecisions, decisions, jdbc, mapper);
         runner.run(null);
 
-        assertThat(tasks.count()).isEqualTo(1);
-        var task = tasks.findAll().getFirst();
+        assertThat(tasks.count()).isEqualTo(4);
+        var task = tasks.findAll().stream()
+                .filter(item -> item.getStatus().equals(TaskStatus.READY.wireValue()))
+                .findFirst().orElseThrow();
         assertThat(task.getStatus()).isEqualTo(TaskStatus.READY.wireValue());
         assertThat(task.getSessionId()).matches("[0-9a-f]{32}");
         assertThat(task.getAnalysisRunId()).matches("[0-9a-f]{32}");
-        assertThat(quotes.count()).isEqualTo(2);
+        assertThat(quotes.count()).isEqualTo(11);
         assertThat(quotes.findAll()).allSatisfy(quote -> {
             assertThat(quote.getStatus()).isEqualTo("ready");
             assertThat(quote.reviewFields()).isEmpty();
@@ -201,12 +210,88 @@ class DemoSeedIntegrationTest {
         });
         var artifactRows = jdbc.queryForList(
                 "select metadata from business_artifact where kind = 'procurement_original'");
-        assertThat(artifactRows).hasSize(2);
+        assertThat(artifactRows).hasSize(11);
         assertThat(artifactRows).allSatisfy(row ->
                 assertThat(String.valueOf(row.get("metadata"))).contains("\"synthetic\": true"));
 
         runner.run(null);
-        assertThat(tasks.count()).isEqualTo(1);
-        assertThat(quotes.count()).isEqualTo(2);
+        assertThat(tasks.count()).isEqualTo(4);
+        assertThat(quotes.count()).isEqualTo(11);
+    }
+
+    @Test
+    void seedsClosedLoopSyntheticHistoriesWithApprovedDecisionsAndOrderArtifacts() throws Exception {
+        var root = Path.of("target", "test-demo-scenarios").toAbsolutePath().normalize();
+        var scenario = root.resolve("01-测试演示");
+        Files.createDirectories(scenario);
+        Files.writeString(scenario.resolve("request.json"), """
+                {
+                  "title": "测试演示采购",
+                  "category": "ecommerce_packaging",
+                  "item_name": "快递袋",
+                  "quantity": 10000,
+                  "unit": "piece",
+                  "specifications": {
+                    "width_mm": "250",
+                    "length_mm": "350",
+                    "thickness_um": "60",
+                    "material": "PE",
+                    "color": "白色",
+                    "print_colors": 1
+                  },
+                  "constraints": {
+                    "base_currency": "CNY",
+                    "fx_rates": {"CNY": "1"},
+                    "max_lead_days": 15,
+                    "invoice_required": true,
+                    "size_tolerance_mm": "2",
+                    "thickness_tolerance_um": "3",
+                    "max_landed_unit_cost": "0.70",
+                    "destination": "华东仓"
+                  }
+                }
+                """, StandardCharsets.UTF_8);
+        Files.writeString(scenario.resolve("quotes.json"), "{\"quotes\": []}", StandardCharsets.UTF_8);
+
+        var demoProperties = new AppProperties(
+                properties.localOperator(), properties.artifactRoot(),
+                properties.allowedViteOrigin(), properties.developmentMode(),
+                properties.outbox(), properties.agentMode(), new AppProperties.DemoSeed(true, root), properties.internalHmacKey());
+        var runner = new DemoSeedRunner(
+                demoProperties, taskService, tasks, quotes, artifactStore, audit,
+                comparison, pendingDecisions, decisions, jdbc, mapper);
+        runner.run(null);
+
+        var approved = tasks.findAll().stream()
+                .filter(item -> item.getStatus().equals(TaskStatus.APPROVED.wireValue()))
+                .toList();
+        assertThat(approved).hasSize(3);
+        assertThat(approved).allSatisfy(task -> {
+            assertThat(task.getCurrentSnapshotId()).isNotBlank();
+            assertThat(task.getApprovedQuoteId()).isNotBlank();
+            var decision = decisions.findByTaskId(task.getId()).orElseThrow();
+            assertThat(decision.getDecision()).isEqualTo("approved");
+            assertThat(decision.getActor()).isEqualTo("demo-seed");
+            assertThat(decision.getQuoteId()).isEqualTo(task.getApprovedQuoteId());
+        });
+        assertThat(decisions.count()).isEqualTo(3);
+        assertThat(pendingDecisions.count()).isEqualTo(3);
+        assertThat(audit.findAll()).anySatisfy(event -> {
+            assertThat(event.getEventType()).isEqualTo("demo_seed_approved");
+            assertThat(event.getActor()).isEqualTo("demo-seed");
+            assertThat(event.getPayload().get("synthetic")).isEqualTo(true);
+            assertThat(event.getPayload().get("landed_total_base")).isNotNull();
+        });
+        // 订单视图数据：已批准任务必须带有订单草稿与供应商确认邮件工件（synthetic）
+        var orderArtifacts = jdbc.queryForList(
+                "select kind, metadata from business_artifact "
+                        + "where kind in ('purchase_order_draft', 'supplier_confirmation_email')");
+        assertThat(orderArtifacts).hasSize(6);
+        assertThat(orderArtifacts).allSatisfy(row ->
+                assertThat(String.valueOf(row.get("metadata"))).contains("\"synthetic\": true"));
+        // 幂等：重复运行不产生重复的历史业务
+        runner.run(null);
+        assertThat(tasks.count()).isEqualTo(4);
+        assertThat(decisions.count()).isEqualTo(3);
     }
 }
