@@ -483,6 +483,84 @@ export type CreateProcurementRequest = {
   };
 };
 
+export type SupplierStatus = "ACTIVE" | "PAUSED" | "BLACKLISTED";
+
+export type SupplierPerformance = {
+  level: string;
+  score: string;
+  win_rate_score: string;
+  activity_score: string;
+  status_score: string;
+  base_score: string;
+};
+
+export type SupplierView = {
+  id: string;
+  name: string;
+  contact_person: string | null;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+  main_categories: string | null;
+  status: SupplierStatus;
+  notes: string | null;
+  cooperation_status: string;
+  quote_count: number;
+  win_count: number;
+  win_rate: string;
+  performance: SupplierPerformance;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SupplierSaveRequest = {
+  name?: string;
+  contact_person?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  address?: string | null;
+  main_categories?: string | null;
+  status?: SupplierStatus | null;
+  notes?: string | null;
+};
+
+export type SupplierPage = {
+  items: SupplierView[];
+  page: number;
+  size: number;
+  total: number;
+};
+
+export type SupplierProfileQuote = {
+  quote_id: string;
+  task_id: string;
+  task_reference: string | null;
+  item_name: string | null;
+  source_filename: string;
+  created_at: string;
+};
+
+export type SupplierProfile = {
+  id: string;
+  name: string;
+  contact_person: string | null;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+  main_categories: string | null;
+  status: SupplierStatus;
+  notes: string | null;
+  cooperation_status: string;
+  quote_count: string;
+  win_count: string;
+  win_rate: string;
+  performance: SupplierPerformance;
+  items: string[];
+  recent_quotes: SupplierProfileQuote[];
+  created_at: string;
+  updated_at: string;
+};
+
 export type ProcurementAuditReport = {
   schema_version: number;
   evidence_sha256: string;

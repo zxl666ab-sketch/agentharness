@@ -121,6 +121,76 @@ paths:
               schema: {$ref: '#/components/schemas/ReviewDetail'}
         '409': {description: Evidence, version, generation, or idempotency conflict.}
         '422': {description: Required reason or revised value is missing.}
+  /api/procurement/suppliers:
+    get:
+      operationId: listSuppliers
+      parameters:
+        - name: q
+          in: query
+          schema: {type: string, maxLength: 200}
+        - name: status
+          in: query
+          schema: {$ref: './procurement-workbench.schema.json#/$defs/SupplierStatus'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Paged supplier list with derived quote/win counts and performance score.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupplierPage'
+    post:
+      operationId: createSupplier
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: './procurement-workbench.schema.json#/$defs/SupplierSaveRequest'}
+      responses:
+        '200':
+          description: Created supplier view.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/SupplierView'}
+        '400': {description: Invalid name or status.}
+        '409': {description: Duplicate supplier name.}
+  /api/procurement/suppliers/{supplierId}:
+    put:
+      operationId: updateSupplier
+      parameters: [{$ref: '#/components/parameters/SupplierId'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: './procurement-workbench.schema.json#/$defs/SupplierSaveRequest'}
+      responses:
+        '200':
+          description: Updated supplier view.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/SupplierView'}
+        '400': {description: Name is immutable or status invalid.}
+        '404': {description: Unknown supplier.}
+    delete:
+      operationId: deleteSupplier
+      parameters: [{$ref: '#/components/parameters/SupplierId'}]
+      responses:
+        '204':
+          description: Supplier physically deleted (only when no quote history exists).
+        '404': {description: Unknown supplier.}
+        '409': {description: Supplier has quote history; suspend or blacklist instead.}
+  /api/procurement/suppliers/{supplierId}/profile:
+    get:
+      operationId: getSupplierProfile
+      parameters: [{$ref: '#/components/parameters/SupplierId'}]
+      responses:
+        '200':
+          description: Supplier profile aggregation (quotes, wins, performance, items, recent quotes).
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/SupplierProfileView'}
+        '404': {description: Unknown supplier.}
 components:
   parameters:
     BusinessId:
@@ -163,7 +233,22 @@ components:
       name: size
       in: query
       schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+    SupplierId:
+      name: supplierId
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[0-9a-f]{32}$'}
   schemas:
+    SupplierPage:
+      type: object
+      required: [items, page, size, total]
+      properties:
+        items:
+          type: array
+          items: {$ref: './procurement-workbench.schema.json#/$defs/SupplierView'}
+        page: {type: integer, minimum: 0}
+        size: {type: integer, minimum: 1}
+        total: {type: integer, minimum: 0}
     CreateAiTaskRequest:
       type: object
       additionalProperties: false

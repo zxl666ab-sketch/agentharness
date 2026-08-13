@@ -52,6 +52,133 @@
         "cancelled"
       ]
     },
+    "SupplierStatus": {
+      "type": "string",
+      "enum": ["ACTIVE", "PAUSED", "BLACKLISTED"]
+    },
+    "SupplierPerformance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "level",
+        "score",
+        "win_rate_score",
+        "activity_score",
+        "status_score",
+        "base_score"
+      ],
+      "properties": {
+        "level": { "type": "string" },
+        "score": { "type": "string" },
+        "win_rate_score": { "type": "string" },
+        "activity_score": { "type": "string" },
+        "status_score": { "type": "string" },
+        "base_score": { "type": "string" }
+      }
+    },
+    "SupplierView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "status",
+        "quote_count",
+        "win_count",
+        "win_rate",
+        "performance",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/Id32" },
+        "name": { "type": "string", "minLength": 1 },
+        "contact_person": { "type": ["string", "null"] },
+        "phone": { "type": ["string", "null"] },
+        "email": { "type": ["string", "null"] },
+        "address": { "type": ["string", "null"] },
+        "main_categories": { "type": ["string", "null"] },
+        "status": { "$ref": "#/$defs/SupplierStatus" },
+        "notes": { "type": ["string", "null"] },
+        "cooperation_status": { "type": "string" },
+        "quote_count": { "type": "integer", "minimum": 0 },
+        "win_count": { "type": "integer", "minimum": 0 },
+        "win_rate": { "type": "string" },
+        "performance": { "$ref": "#/$defs/SupplierPerformance" },
+        "created_at": { "$ref": "#/$defs/DateTime" },
+        "updated_at": { "$ref": "#/$defs/DateTime" }
+      }
+    },
+    "SupplierSaveRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "contact_person": { "type": ["string", "null"] },
+        "phone": { "type": ["string", "null"] },
+        "email": { "type": ["string", "null"] },
+        "address": { "type": ["string", "null"] },
+        "main_categories": { "type": ["string", "null"] },
+        "status": {
+          "oneOf": [{ "$ref": "#/$defs/SupplierStatus" }, { "type": "null" }]
+        },
+        "notes": { "type": ["string", "null"] }
+      }
+    },
+    "SupplierProfileQuote": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quote_id", "task_id", "source_filename", "created_at"],
+      "properties": {
+        "quote_id": { "$ref": "#/$defs/Id32" },
+        "task_id": { "$ref": "#/$defs/Id32" },
+        "task_reference": { "type": ["string", "null"] },
+        "item_name": { "type": ["string", "null"] },
+        "source_filename": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "SupplierProfileView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "status",
+        "cooperation_status",
+        "quote_count",
+        "win_count",
+        "win_rate",
+        "performance",
+        "items",
+        "recent_quotes",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/Id32" },
+        "name": { "type": "string", "minLength": 1 },
+        "contact_person": { "type": ["string", "null"] },
+        "phone": { "type": ["string", "null"] },
+        "email": { "type": ["string", "null"] },
+        "address": { "type": ["string", "null"] },
+        "main_categories": { "type": ["string", "null"] },
+        "status": { "$ref": "#/$defs/SupplierStatus" },
+        "notes": { "type": ["string", "null"] },
+        "cooperation_status": { "type": "string" },
+        "quote_count": { "type": "string" },
+        "win_count": { "type": "string" },
+        "win_rate": { "type": "string" },
+        "performance": { "$ref": "#/$defs/SupplierPerformance" },
+        "items": { "type": "array", "items": { "type": "string" } },
+        "recent_quotes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SupplierProfileQuote" }
+        },
+        "created_at": { "$ref": "#/$defs/DateTime" },
+        "updated_at": { "$ref": "#/$defs/DateTime" }
+      }
+    },
     "AiTaskStatus": {
       "type": "string",
       "enum": [

@@ -17,6 +17,11 @@ import type {
   ReviewDetail,
   ReviewPage,
   ReviewStatus,
+  SupplierPage,
+  SupplierProfile,
+  SupplierSaveRequest,
+  SupplierStatus,
+  SupplierView,
 } from "./types";
 
 const FIELD_LABELS: Record<string, string> = {
@@ -261,4 +266,24 @@ export const procurementApi = {
   report: (requestId: string) =>
     requestJson<ProcurementAuditReport>(`/api/procurement/requests/${requestId}/report`),
   evaluation: () => requestJson<EvaluationResult>("/api/procurement/evaluation"),
+  suppliers: (q?: string, status?: SupplierStatus, page = 0, size = 50) => {
+    const query = new URLSearchParams({ page: String(page), size: String(size) });
+    if (q?.trim()) query.set("q", q.trim());
+    if (status) query.set("status", status);
+    return requestJson<SupplierPage>(`/api/procurement/suppliers?${query}`);
+  },
+  createSupplier: (input: SupplierSaveRequest) =>
+    postJson<SupplierView>("/api/procurement/suppliers", input),
+  updateSupplier: (id: string, input: SupplierSaveRequest) =>
+    requestJson<SupplierView>(`/api/procurement/suppliers/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  deleteSupplier: (id: string) =>
+    requestJson<{ deleted: boolean }>(`/api/procurement/suppliers/${id}`, {
+      method: "DELETE",
+    }),
+  supplierProfile: (id: string) =>
+    requestJson<SupplierProfile>(`/api/procurement/suppliers/${id}/profile`),
 };

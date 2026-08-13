@@ -37,6 +37,8 @@ import { QuoteWorkspace } from "./QuoteWorkspace";
 import { ReportView } from "./ReportView";
 import { ReviewCenter } from "./ReviewCenter";
 import { RequirementReview } from "./RequirementReview";
+import { readRole, ROLE_LABELS, type DemoRole, writeRole } from "./roles";
+import { SupplierCenter } from "./SupplierCenter";
 import { WorkbenchHome } from "./WorkbenchHome";
 import { WorkbenchNavigation } from "./WorkbenchNavigation";
 import {
@@ -157,6 +159,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [aiActionBusy, setAiActionBusy] = useState<"retry" | "cancel" | null>(null);
   const [aiActionError, setAiActionError] = useState<string | null>(null);
+  const [role, setRole] = useState<DemoRole>(() => readRole());
 
   const metaQuery = useQuery({ queryKey: ["procurement-meta"], queryFn: procurementApi.meta });
   const configQuery = useQuery({ queryKey: ["procurement-config"], queryFn: procurementApi.config });
@@ -639,6 +642,22 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
           <div><strong>采价台</strong><small>采购询价与供应商比价</small></div>
         </div>
         <div className="proc-topbar-meta">
+          <label className="proc-role-selector" title="演示角色切换（K9，纯前端视角控制）">
+            <span>角色</span>
+            <select
+              aria-label="演示角色"
+              value={role}
+              onChange={(event) => {
+                const next = event.target.value as DemoRole;
+                setRole(next);
+                writeRole(next);
+              }}
+            >
+              {(Object.keys(ROLE_LABELS) as DemoRole[]).map((value) => (
+                <option key={value} value={value}>{ROLE_LABELS[value]}</option>
+              ))}
+            </select>
+          </label>
           <span className="proc-runtime-state"><Wifi size={14} />采购服务 {backendVersion}</span>
           <button className="proc-icon-button" type="button" title="API / 模型配置" aria-label="API / 模型配置" onClick={openConfig}>
             <Settings size={16} />
@@ -653,6 +672,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
         <aside className="proc-rail">
           <WorkbenchNavigation
             active={view}
+            role={role}
             aiAttention={allAiTasks.filter((task) => task.status === "FAILED" || task.stale).length}
             reviewAttention={reviews.filter((review) => review.status === "PENDING").length}
             onChange={openView}
@@ -760,6 +780,8 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
               onSelect={selectReview}
               onOpenTask={openTask}
             />
+          ) : view === "suppliers" ? (
+            <SupplierCenter onOpenTask={openTask} />
           ) : showCreate || (!selectedId && !detail) ? (
             <NewProcurementConversation
               busy={busy === "conversation"}
