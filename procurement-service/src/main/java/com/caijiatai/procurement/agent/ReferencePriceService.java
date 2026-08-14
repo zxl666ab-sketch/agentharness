@@ -44,7 +44,7 @@ public final class ReferencePriceService {
             if (task == null || order.getLandedTotal() == null) {
                 continue;
             }
-            var sameItem = !wantedItem.isBlank() && wantedItem.equals(normalize(task.getItemName()));
+            var sameItem = isSimilarItem(wantedItem, normalize(task.getItemName()));
             var sameCategory = wantedItem.isBlank() && !wantedCategory.isBlank()
                     && wantedCategory.equalsIgnoreCase(task.getCategory());
             if (!sameItem && !sameCategory) {
@@ -100,6 +100,19 @@ public final class ReferencePriceService {
     private BigDecimal percentile(List<BigDecimal> sorted, double quantile, int scale) {
         var index = (int) Math.floor((sorted.size() - 1) * quantile);
         return sorted.get(index).setScale(scale, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * 物料名相似度（确定性规则，冻结设计 4.10）：归一化后相等，或一方包含另一方
+     * （如 "PE快递袋" ↔ "快递袋"、规格前缀差异）。双方均需 ≥2 字符避免过度放宽。
+     */
+    static boolean isSimilarItem(String wanted, String candidate) {
+        if (wanted.isBlank() || candidate.isBlank() || wanted.length() < 2 || candidate.length() < 2) {
+            return false;
+        }
+        return wanted.equals(candidate)
+                || wanted.contains(candidate)
+                || candidate.contains(wanted);
     }
 
     static String normalize(String value) {

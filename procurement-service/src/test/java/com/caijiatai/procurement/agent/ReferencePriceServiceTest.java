@@ -113,6 +113,33 @@ class ReferencePriceServiceTest {
     }
 
     @Test
+    void similarityMatchesNormalizedEqualityAndContainment() {
+        assertThat(ReferencePriceService.isSimilarItem("快递袋", "快递袋")).isTrue();
+        assertThat(ReferencePriceService.isSimilarItem("pe快递袋", "快递袋")).isTrue();
+        assertThat(ReferencePriceService.isSimilarItem("快递袋", "pe快递袋")).isTrue();
+        assertThat(ReferencePriceService.isSimilarItem("快递袋", "垃圾袋")).isFalse();
+        assertThat(ReferencePriceService.isSimilarItem("快递袋", "")).isFalse();
+        assertThat(ReferencePriceService.isSimilarItem("a", "ab")).isFalse();
+    }
+
+    @Test
+    void prefixVariantItemMatchesHistoryForReferencePrices() {
+        var taskA = task("快递袋", "ecommerce_packaging");
+        var taskB = task("气泡膜", "ecommerce_packaging");
+        when(tasks.findById(taskA.getId())).thenReturn(Optional.of(taskA));
+        when(tasks.findById(taskB.getId())).thenReturn(Optional.of(taskB));
+        when(orders.findAllByLandedTotalNotNullOrderByCreatedAtDesc()).thenReturn(List.of(
+                order(taskA.getId(), "华东优包", "7500.00"),
+                order(taskB.getId(), "华南气泡包装", "9600.00")));
+
+        // 对话流程抽取的物料名可能是 "PE快递袋"，历史成交记为 "快递袋"（相似度匹配）
+        var result = service.referencePrices("t-ref", "PE快递袋", "ecommerce_packaging");
+
+        assertThat(result.get("records")).asList().hasSize(1);
+        assertThat(result.get("interval")).isNull(); // 仍不足 3 条 → 不下结论
+    }
+
+    @Test
     void recordsCarrySupplierAndReference() {
         var taskA = task("快递袋", "ecommerce_packaging");
         when(tasks.findById(taskA.getId())).thenReturn(Optional.of(taskA));
