@@ -96,6 +96,7 @@ export function AiTaskCenter({
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState<"retry" | "cancel" | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [confirmCancel, setConfirmCancel] = useState(false);
   const requestMap = useMemo(() => new Map(requests.map((item) => [item.id, item])), [requests]);
   const assignees = useMemo(() => [...new Set(tasks.map((item) => item.assignee).filter(Boolean))] as string[], [tasks]);
   const filtered = useMemo(() => {
@@ -145,10 +146,17 @@ export function AiTaskCenter({
     && !["SUCCEEDED", "CANCELLED"].includes(detail.status)
     && !detail.stale);
 
+  useEffect(() => {
+    if (!confirmCancel) return;
+    const timer = window.setTimeout(() => setConfirmCancel(false), 4_000);
+    return () => window.clearTimeout(timer);
+  }, [confirmCancel]);
+
   async function runAction(action: "retry" | "cancel") {
     if (!detail || busy) return;
     setBusy(action);
     setActionError(null);
+    setConfirmCancel(false);
     try {
       if (action === "retry") await procurementApi.retryAiTask(detail.ai_task_id);
       else await procurementApi.cancelAiTask(detail.ai_task_id);
@@ -221,7 +229,10 @@ export function AiTaskCenter({
                 {detail.error_code || detail.stale_reason ? <p role="alert">{detail.error_category ? `${detail.error_category} · ` : ""}{detail.error_code || detail.stale_reason}</p> : null}
                 <footer>
                   <button className="proc-button secondary" type="button" disabled={!retryAllowed || busy !== null} title={!retryAllowed ? "仅可重试未过期的可重试失败任务" : "重试任务"} onClick={() => void runAction("retry")}>{busy === "retry" ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}重试</button>
-                  <button className="proc-button secondary danger-text" type="button" disabled={!cancelAllowed || busy !== null} onClick={() => void runAction("cancel")}>{busy === "cancel" ? <LoaderCircle className="spin" size={15} /> : <Ban size={15} />}取消</button>
+                  <button className="proc-button secondary danger-text" type="button" disabled={!cancelAllowed || busy !== null} onClick={() => {
+                    if (!confirmCancel) { setConfirmCancel(true); return; }
+                    void runAction("cancel");
+                  }}>{busy === "cancel" ? <LoaderCircle className="spin" size={15} /> : confirmCancel ? <AlertTriangle size={15} /> : <Ban size={15} />}{confirmCancel ? "再次点击确认取消" : "取消"}</button>
                 </footer>
                 {actionError ? <p className="proc-inline-error" role="alert">{actionError}</p> : null}
               </section>

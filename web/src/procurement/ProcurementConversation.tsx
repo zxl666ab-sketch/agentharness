@@ -300,6 +300,9 @@ export function ProcurementConversation({
       await onResume(value);
       setReply("");
       await Promise.all([runQuery.refetch(), messagesQuery.refetch(), toolsQuery.refetch()]);
+    } catch {
+      // The workbench surfaces the failure via the actionError banner; the
+      // reply text is preserved so the user can retry.
     } finally {
       setSending(false);
     }

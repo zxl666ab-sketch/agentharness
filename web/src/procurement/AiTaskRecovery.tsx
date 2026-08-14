@@ -9,7 +9,7 @@ import {
   RefreshCw,
   ScrollText,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import type { AiTaskDetail, AiTaskStatus } from "./types";
 
@@ -48,6 +48,12 @@ function timeText(value?: string | null) {
 
 export function AiTaskRecovery({ task, busy, error, onRetry, onCancel, onSupplement }: Props) {
   const [logsOpen, setLogsOpen] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(false);
+  useEffect(() => {
+    if (!confirmCancel) return;
+    const timer = window.setTimeout(() => setConfirmCancel(false), 4_000);
+    return () => window.clearTimeout(timer);
+  }, [confirmCancel]);
   const active = ["PENDING", "DISPATCHING", "RUNNING", "RETRYING"].includes(task.status);
   const failed = task.status === "FAILED";
   const retryDisabled = !failed || !task.retryable || task.stale || busy !== null;
@@ -81,8 +87,11 @@ export function AiTaskRecovery({ task, busy, error, onRetry, onCancel, onSupplem
           <FilePlus2 size={15} />补充资料
         </button>
         {active ? (
-          <button className="proc-button secondary danger" type="button" disabled={busy !== null} onClick={() => void onCancel()}>
-            {busy === "cancel" ? <LoaderCircle className="spin" size={15} /> : <Ban size={15} />}取消任务
+          <button className="proc-button secondary danger" type="button" disabled={busy !== null} onClick={() => {
+            if (!confirmCancel) { setConfirmCancel(true); return; }
+            void onCancel();
+          }}>
+            {busy === "cancel" ? <LoaderCircle className="spin" size={15} /> : confirmCancel ? <AlertTriangle size={15} /> : <Ban size={15} />}{confirmCancel ? "再次点击确认取消" : "取消任务"}
           </button>
         ) : null}
         <button className="proc-button ghost" type="button" aria-expanded={logsOpen} onClick={() => setLogsOpen((value) => !value)}>

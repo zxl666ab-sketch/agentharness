@@ -43,6 +43,7 @@ import { RequirementReview } from "./RequirementReview";
 import { readRole, ROLE_LABELS, type DemoRole, writeRole } from "./roles";
 import { SupplierCenter } from "./SupplierCenter";
 import { SystemInfo } from "./SystemInfo";
+import { useEscape } from "./useEscape";
 import { WorkbenchHome } from "./WorkbenchHome";
 import { WorkbenchNavigation } from "./WorkbenchNavigation";
 import {
@@ -528,6 +529,9 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     setDeleteTarget(request);
     setDeleteError(null);
   }
+
+  useEscape(!!deleteTarget, () => setDeleteTarget(null), deleteBusy);
+  useEscape(showConfig, () => setShowConfig(false), configBusy);
 
   async function deleteRequest() {
     if (!deleteTarget) return;

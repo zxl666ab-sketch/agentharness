@@ -224,6 +224,76 @@ describe("AI task center", () => {
     expect(html).toContain("报价明细!B4");
     expect(html).toContain("采购详情");
   });
+
+  it("recovers busy state and shows the error when retry/cancel fails", async () => {
+    const failed: AiTaskDetail = {
+      ...aiTask,
+      status: "FAILED",
+      retryable: true,
+      error_message: "供应商名称缺失",
+      error_code: "QUOTE_PARSE_ERROR",
+      result: null,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/retry") || url.includes("/cancel")) {
+        return new Response(JSON.stringify({ message: "任务状态已变化" }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ items: [], page: 0, size: 100, total: 0 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const queryClient = client();
+    queryClient.setQueryData(["procurement-ai-task", failed.ai_task_id], failed);
+    queryClient.setQueryData(["procurement-ai-tasks"], { items: [failed], page: 0, size: 100, total: 1 });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <AiTaskCenter
+            requests={[request]}
+            tasks={[failed]}
+            loading={false}
+            error={null}
+            selectedId={failed.ai_task_id}
+            onSelect={vi.fn()}
+            onOpenTask={vi.fn()}
+          />
+        </QueryClientProvider>,
+      );
+    });
+
+    const retry = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("重试"));
+    expect(retry).toBeTruthy();
+    await act(async () => { retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(host.querySelector(".proc-inline-error")?.textContent).toContain("任务状态已变化");
+    // busy cleared: the retry button is enabled again and can be clicked once more
+    const retryAfter = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("重试")) as HTMLButtonElement;
+    expect(retryAfter.disabled).toBe(false);
+
+    // cancel requires a second confirmation click
+    const running: AiTaskDetail = { ...failed, status: "RUNNING", error_message: null, retryable: false };
+    queryClient.setQueryData(["procurement-ai-task", running.ai_task_id], running);
+    const cancel = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("取消")) as HTMLButtonElement;
+    await act(async () => { cancel.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    const confirmCancelButton = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("再次点击确认取消"));
+    expect(confirmCancelButton).toBeTruthy();
+    await act(async () => { confirmCancelButton!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(fetchMock.mock.calls.filter((call) => String(call[0]).includes("/cancel"))).toHaveLength(1);
+
+    await act(async () => root.unmount());
+  });
 });
 
 describe("human review center", () => {

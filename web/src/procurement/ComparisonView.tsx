@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { useEscape } from "./useEscape";
 import type { ComparisonQuote, ProcurementRequest } from "./types";
 
 type Props = {
@@ -93,6 +94,9 @@ export function ComparisonView({
   const selected = rows.find((quote) => quote.quote_id === selectedId) || null;
   const allExcluded = Boolean(result && rows.length > 0 && result.eligible_count === 0);
 
+  useEscape(confirmOpen, () => setConfirmOpen(false), busy === "approve");
+  useEscape(noAwardOpen, () => setNoAwardOpen(false), busy === "no_award");
+
   if (!snapshot || !result) {
     return (
       <section className="proc-empty-state">
@@ -103,6 +107,7 @@ export function ComparisonView({
           className="proc-button primary"
           type="button"
           disabled={!request.requirement_confirmed || request.quote_count < 2 || request.unresolved_field_count > 0 || busy === "analyze"}
+          title={!request.requirement_confirmed ? "先保存采购需求的人工确认" : request.quote_count < 2 ? "至少需要 2 家报价" : request.unresolved_field_count > 0 ? "先完成低置信度字段复核" : "生成确定性比价快照"}
           onClick={() => void onAnalyze()}
         >
           {busy === "analyze" ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}

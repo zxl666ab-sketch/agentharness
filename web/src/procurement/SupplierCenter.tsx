@@ -15,6 +15,7 @@ import {
 import { useMemo, useState } from "react";
 
 import { procurementApi } from "./api";
+import { useEscape } from "./useEscape";
 import type {
   SupplierProfile,
   SupplierSaveRequest,
@@ -180,6 +181,10 @@ export function SupplierCenter({ onOpenTask }: Props) {
     () => suppliers.find((item) => item.id === profileId) || null,
     [profileId, suppliers]
   );
+
+  useEscape(!!editing, () => setEditing(null), formBusy);
+  useEscape(!!deleteTarget, () => setDeleteTarget(null), deleteBusy);
+  useEscape(!!profileId, () => setProfileId(null), false);
 
   return (
     <section className="proc-main">

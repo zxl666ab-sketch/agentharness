@@ -1,4 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
@@ -775,6 +777,91 @@ describe("procurement workflow views", () => {
     const html = renderToString(<ReportView request={approved} report={report} loading={false} />);
     expect(html).toContain("已选定");
     expect(html).toContain("Alpha Packaging");
+
+describe("workbench home entries", () => {
+  it("home metric entries carry the correct task filter", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const onOpenTasks = vi.fn();
+    const onOpenView = vi.fn();
+    const onOpenOrders = vi.fn();
+    const onOpenSuppliers = vi.fn();
+    const onOpenReports = vi.fn();
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+          <WorkbenchHome
+            role="admin"
+            requests={[request]}
+            aiTasks={[]}
+            reviews={[]}
+            loading={false}
+            onCreate={vi.fn()}
+            onOpenTask={vi.fn()}
+            onOpenTasks={onOpenTasks}
+            onOpenView={onOpenView}
+            onOpenOrders={onOpenOrders}
+            onOpenSuppliers={onOpenSuppliers}
+            onOpenReports={onOpenReports}
+          />
+        </QueryClientProvider>,
+      );
+    });
+    const clickText = (text: string) => {
+      const button = [...host.querySelectorAll("button")].find((item) => item.textContent?.includes(text))!;
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    };
+    await act(async () => { clickText("待处理"); });
+    expect(onOpenTasks).toHaveBeenCalledWith("attention");
+    await act(async () => { clickText("已结束"); });
+    expect(onOpenTasks).toHaveBeenCalledWith("completed");
+    await act(async () => { clickText("采购订单"); });
+    expect(onOpenOrders).toHaveBeenCalled();
+    await act(async () => { clickText("待我审批"); });
+    expect(onOpenView).toHaveBeenCalledWith("reviews");
+    await act(async () => { clickText("AI 异常"); });
+    expect(onOpenView).toHaveBeenCalledWith("ai");
+    await act(async () => root.unmount());
+  });
+});
+
+describe("comparison approval gate", () => {
+  it("requires an explicit checkbox before the approval can be submitted", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const onApprove = vi.fn(async () => undefined);
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(<ComparisonView request={analyzed()} busy={null} onApprove={onApprove} />);
+    });
+    const submit = [...host.querySelectorAll("button")].find((item) => item.textContent?.includes("提交供应商审批"))!;
+    await act(async () => { submit.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    const dialog = host.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("正式选定供应商");
+    const confirm = [...dialog.querySelectorAll("button")].find((item) => item.textContent?.includes("确认选定")) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    const checkbox = dialog.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    await act(async () => {
+      checkbox.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(confirm.disabled).toBe(false);
+    await act(async () => { confirm.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await Promise.resolve(); });
+    expect(onApprove).toHaveBeenCalledTimes(1);
+    // Escape closes the approval dialog
+    await act(async () => {
+      submit.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(host.querySelector('[role="dialog"]')).toBeTruthy();
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(host.querySelector('[role="dialog"]')).toBeFalsy();
+    await act(async () => root.unmount());
+  });
+});
+
     expect(html).toContain("证据指纹");
     expect(html).toContain("报价原件与字段来源");
     expect(html).toContain("采购审计时间线");

@@ -19,6 +19,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { procurementApi } from "./api";
+import { useEscape } from "./useEscape";
 import type {
   ProcurementRequestSummary,
   ReviewAction,
@@ -191,6 +192,8 @@ export function ReviewCenter({
     setNotice(null);
   }, [detail]);
 
+  useEscape(confirmOpen && !!detail, () => setConfirmOpen(false), busy);
+
   async function submit() {
     if (!detail || !pending || !formValid || busy) return;
     setBusy(true);
@@ -218,8 +221,10 @@ export function ReviewCenter({
       setConfirmed(false);
       setNotice(updated.status === "PENDING" ? "审核动作已提交，正在形成正式决定。" : "审核动作已完成并写入审计记录。");
     } catch (cause) {
+      // Keep the confirmation dialog open so the user can retry after a
+      // transient failure; the detail refetch below updates the panel state
+      // (e.g. to STALE) when the server actually rejected the submission.
       setActionError(errorText(cause));
-      setConfirmOpen(false);
       await queryClient.invalidateQueries({ queryKey: ["procurement-review", detail.review_id] });
     } finally {
       setBusy(false);

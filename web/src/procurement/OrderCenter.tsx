@@ -11,10 +11,10 @@ import {
   Truck,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { procurementApi } from "./api";
-import type { OrderStatus, OrderView, SettlementStatus } from "./types";
+import type { OrderStatus, OrderView, SettlementStatus, SettlementView } from "./types";
 
 const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
   PENDING_SHIPMENT: "待发货",
@@ -59,12 +59,13 @@ export function OrderCenter() {
   const [status, setStatus] = useState<OrderStatus | "">("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [receiveTarget, setReceiveTarget] = useState<OrderView | null>(null);
   const [receiveQuantity, setReceiveQuantity] = useState("");
   const [arrivalDate, setArrivalDate] = useState("");
   const [closeTarget, setCloseTarget] = useState<OrderView | null>(null);
   const [closeNotes, setCloseNotes] = useState("");
-  const [payTarget, setPayTarget] = useState<{ orderId: string; settlementId: string; orderNo: string } | null>(null);
+  const [payTarget, setPayTarget] = useState<{ orderId: string | null; settlementId: string; settlementNo: string; orderNo: string | null } | null>(null);
   const [paidAt, setPaidAt] = useState("");
   const [payNotes, setPayNotes] = useState("");
 
@@ -81,23 +82,49 @@ export function OrderCenter() {
       queryClient.invalidateQueries({ queryKey: ["procurement-settlements"] }),
     ]);
 
-  async function run<T>(key: string, operation: () => Promise<T>) {
+  /** Run an async order/settlement operation; resolves true only on success so
+   *  callers can keep dialogs open with user input intact when the API fails. */
+  async function run<T>(key: string, operation: () => Promise<T>): Promise<boolean> {
     setBusy(key);
     setError(null);
+    setNotice(null);
     try {
       await operation();
       await invalidate();
+      return true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
     } finally {
       setBusy(null);
     }
   }
 
-  const ship = (order: OrderView) =>
-    run(`ship:${order.id}`, () => procurementApi.transitionOrder(order.id, { action: "ship" }));
+  function parseDatePart(value: string) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+    const parsed = new Date(`${value}T00:00:00Z`);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
 
-  const receive = () => {
+  useEffect(() => {
+    if (!receiveTarget && !closeTarget && !payTarget) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (receiveTarget && busy !== `receive:${receiveTarget.id}`) setReceiveTarget(null);
+      if (closeTarget && busy !== `close:${closeTarget.id}`) setCloseTarget(null);
+      if (payTarget && busy !== `pay:${payTarget.settlementId}`) setPayTarget(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, closeTarget, payTarget, receiveTarget]);
+
+  const ship = async (order: OrderView) => {
+    const ok = await run(`ship:${order.id}`, () =>
+      procurementApi.transitionOrder(order.id, { action: "ship" }));
+    if (ok) setNotice(`订单 ${order.order_no} 已标记发货。`);
+  };
+
+  const receive = async () => {
     if (!receiveTarget) return;
     const quantity = receiveQuantity.trim();
     const date = arrivalDate.trim();
@@ -105,44 +132,74 @@ export function OrderCenter() {
       setError("收货必须填写收货数量与到货日期");
       return;
     }
-    void run(`receive:${receiveTarget.id}`, () =>
+    const qty = Number(quantity);
+    const orderQty = Number(receiveTarget.quantity);
+    if (!Number.isFinite(qty) || qty <= 0) {
+      setError("收货数量必须大于 0");
+      return;
+    }
+    if (Number.isFinite(orderQty) && qty > orderQty) {
+      setError(`收货数量不得超过订单数量 ${orderQty.toLocaleString("zh-CN")}`);
+      return;
+    }
+    const parsedDate = parseDatePart(date);
+    if (!parsedDate) {
+      setError("到货日期格式无效");
+      return;
+    }
+    const ok = await run(`receive:${receiveTarget.id}`, () =>
       procurementApi.transitionOrder(receiveTarget.id, {
         action: "receive",
         received_quantity: quantity,
-        arrival_date: new Date(date).toISOString(),
-      })
-    ).then(() => setReceiveTarget(null));
+        arrival_date: parsedDate.toISOString(),
+      }));
+    if (ok) {
+      setReceiveTarget(null);
+      setNotice(`已确认收货 ${qty.toLocaleString("zh-CN")}，对账单已派生。`);
+    }
   };
 
-  const closeOrder = () => {
+  const closeOrder = async () => {
     if (!closeTarget) return;
-    void run(`close:${closeTarget.id}`, () =>
+    const ok = await run(`close:${closeTarget.id}`, () =>
       procurementApi.transitionOrder(closeTarget.id, {
         action: "close",
         notes: closeNotes.trim() || null,
-      })
-    ).then(() => setCloseTarget(null));
+      }));
+    if (ok) {
+      setCloseTarget(null);
+      setNotice(closeTarget.status === "PENDING_SHIPMENT" ? "订单已取消。" : "订单已完成关闭。");
+    }
   };
 
-  const settle = (orderId: string, settlementId: string) =>
-    run(`settle:${settlementId}`, () =>
-      procurementApi.transitionSettlement(settlementId, { action: "settle" })
-    );
+  const settle = async (orderId: string, settlementId: string) => {
+    const ok = await run(`settle:${settlementId}`, () =>
+      procurementApi.transitionSettlement(settlementId, { action: "settle" }));
+    if (ok) setNotice("已确认对账。");
+  };
 
-  const pay = () => {
+  const pay = async () => {
     if (!payTarget) return;
     const date = paidAt.trim();
     if (!date) {
       setError("付款必须填写付款时间");
       return;
     }
-    void run(`pay:${payTarget.settlementId}`, () =>
+    const parsedDate = parseDatePart(date);
+    if (!parsedDate) {
+      setError("付款时间格式无效");
+      return;
+    }
+    const ok = await run(`pay:${payTarget.settlementId}`, () =>
       procurementApi.transitionSettlement(payTarget.settlementId, {
         action: "pay",
-        paid_at: new Date(date).toISOString(),
+        paid_at: parsedDate.toISOString(),
         notes: payNotes.trim() || null,
-      })
-    ).then(() => setPayTarget(null));
+      }));
+    if (ok) {
+      setPayTarget(null);
+      setNotice("已登记付款。");
+    }
   };
 
   return (
@@ -167,6 +224,7 @@ export function OrderCenter() {
           </button>
         ))}
         {error ? <span className="proc-toolbar-error" role="alert">{error}</span> : null}
+        {notice ? <span className="proc-toolbar-success" role="status">{notice}</span> : null}
       </div>
 
       <div className="proc-order-list" aria-busy={ordersQuery.isPending}>
@@ -232,7 +290,7 @@ export function OrderCenter() {
                         </button>
                       ) : null}
                       {order.settlement.status === "SETTLED" ? (
-                        <button className="proc-link-button" type="button" onClick={() => { setPayTarget({ orderId: order.id, settlementId: order.settlement!.id, orderNo: order.order_no }); setPaidAt(new Date().toISOString().slice(0, 10)); setError(null); }}>
+                        <button className="proc-link-button" type="button" onClick={() => { setPayTarget({ orderId: order.id, settlementId: order.settlement!.id, settlementNo: order.settlement!.settlement_no, orderNo: order.order_no }); setPaidAt(new Date().toISOString().slice(0, 10)); setError(null); setNotice(null); }}>
                           登记付款
                         </button>
                       ) : null}
@@ -345,8 +403,8 @@ export function OrderCenter() {
               <button className="proc-icon-button compact" type="button" title="关闭" aria-label="关闭" onClick={() => setPayTarget(null)} disabled={busy === `pay:${payTarget.settlementId}`}><X size={16} /></button>
             </header>
             <div className="proc-delete-target">
-              <strong>{payTarget.orderNo}</strong>
-              <span>对账单 {payTarget.settlementId.slice(0, 8)}…</span>
+              <strong>{payTarget.orderNo || "对账单 " + payTarget.settlementNo}</strong>
+              <span>对账单 {payTarget.settlementNo} · {payTarget.settlementId.slice(0, 8)}…</span>
             </div>
             <div className="proc-supplier-form">
               <label className="proc-field">
@@ -371,13 +429,20 @@ export function OrderCenter() {
 
       <div className="proc-settlement-section">
         <header><div><CalendarCheck2 size={15} /><h3>对账单</h3></div><span>收货自动派生 · 状态机 UNSETTLED → SETTLED → PAID</span></header>
-        <SettlementTable />
+        <SettlementTable
+          onPay={(settlement) => {
+            setPayTarget({ orderId: null, settlementId: settlement.id, settlementNo: settlement.settlement_no, orderNo: null });
+            setPaidAt(new Date().toISOString().slice(0, 10));
+            setError(null);
+            setNotice(null);
+          }}
+        />
       </div>
     </section>
   );
 }
 
-function SettlementTable() {
+function SettlementTable({ onPay }: { onPay: (settlement: SettlementView) => void }) {
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -414,16 +479,9 @@ function SettlementTable() {
           <strong>{settlement.total_amount}</strong>
           <i className={settlementTone(settlement.status)}>{SETTLEMENT_STATUS_LABELS[settlement.status]}</i>
           {settlement.status === "SETTLED" ? (
-            <button className="proc-link-button" type="button" disabled={busy === `row-pay:${settlement.id}`} onClick={() => {
-              const paid = window.prompt("付款时间（YYYY-MM-DD）：", new Date().toISOString().slice(0, 10));
-              if (paid?.trim()) {
-                void run(`row-pay:${settlement.id}`, () =>
-                  procurementApi.transitionSettlement(settlement.id, {
-                    action: "pay",
-                    paid_at: new Date(paid.trim()).toISOString(),
-                  }));
-              }
-            }}>登记付款</button>
+            <button className="proc-link-button" type="button" disabled={busy === `row-pay:${settlement.id}`} onClick={() => onPay(settlement)}>
+              登记付款
+            </button>
           ) : null}
           {settlement.status === "UNSETTLED" ? (
             <button className="proc-link-button" type="button" disabled={busy === `row-settle:${settlement.id}`} onClick={() => void run(`row-settle:${settlement.id}`, () => procurementApi.transitionSettlement(settlement.id, { action: "settle" }))}>

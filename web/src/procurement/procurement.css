@@ -1101,6 +1101,7 @@
 .proc-filter-chip:hover { border-color: var(--border-strong); color: var(--text); }
 .proc-filter-chip.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 700; }
 .proc-toolbar-error { color: var(--danger); font-size: 11px; }
+.proc-toolbar-success { color: var(--success); font-size: 11px; }
 .proc-order-list { min-height: 0; flex: 1; overflow: auto; padding: 16px 22px; }
 .proc-order-card { margin-bottom: 12px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-xs); }
 .proc-order-card > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }

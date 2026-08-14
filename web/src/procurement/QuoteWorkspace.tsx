@@ -329,6 +329,15 @@ export function QuoteWorkspace({
     request.unresolved_field_count === 0 &&
     request.status !== "approved" &&
     request.status !== "no_award";
+  const analyzeDisabledReason = request.status === "approved" || request.status === "no_award"
+    ? "本任务已结束，不能再发起比价"
+    : !request.requirement_confirmed
+      ? "请先保存采购需求的人工确认"
+      : request.quote_count < 2
+        ? "至少需要 2 家报价才能比价"
+        : request.unresolved_field_count > 0
+          ? "还有 " + request.unresolved_field_count + " 项报价字段待复核"
+          : null;
   const reviewSummary = !request.requirement_confirmed
     ? request.unresolved_field_count
       ? `需求待人工确认，${request.unresolved_field_count} 项待复核`
@@ -406,6 +415,7 @@ export function QuoteWorkspace({
             className="proc-button primary"
             type="button"
             disabled={!canAnalyze || busy === "analyze"}
+            title={analyzeDisabledReason || "字段已就绪，开始确定性比价"}
             onClick={() => void onAnalyze()}
           >
             {busy === "analyze" ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}
