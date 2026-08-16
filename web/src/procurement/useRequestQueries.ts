@@ -96,6 +96,15 @@ export function useRequestQueries(state: WorkbenchState) {
     enabled: !!selectedId && detailQuery.data?.status === "approved",
     refetchInterval: 10_000,
   });
+  const taskContractQuery = useQuery({
+    queryKey: ["procurement-task-contract", selectedId],
+    queryFn: async () => {
+      const page = await procurementApi.contracts(undefined, selectedId!, 0, 5);
+      return page.items[0] || null;
+    },
+    enabled: !!selectedId && detailQuery.data?.status === "approved",
+    refetchInterval: 5_000,
+  });
 
   const requests = useMemo(() => requestsQuery.data || [], [requestsQuery.data]);
   const allAiTasks = useMemo(() => allAiTasksQuery.data?.items || [], [allAiTasksQuery.data]);
@@ -188,6 +197,7 @@ export function useRequestQueries(state: WorkbenchState) {
     aiTaskQuery,
     reportQuery,
     taskOrderQuery,
+    taskContractQuery,
     commit,
     requests,
     allAiTasks,

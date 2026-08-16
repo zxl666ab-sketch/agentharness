@@ -479,6 +479,82 @@ paths:
               schema: {$ref: './procurement-workbench.schema.json#/$defs/InvoiceView'}
         '400': {description: Missing required notes/confirmation or unknown action.}
         '409': {description: Invalid transition, concurrent modification, or payment blocked by unmatched invoice.}
+  /api/procurement/contracts:
+    post:
+      operationId: createContractDraft
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [task_id]
+              properties:
+                task_id: {type: string, pattern: '^[0-9a-f]{32}$'}
+      responses:
+        '202':
+          description: Contract draft request accepted; Agent drafts clauses and risks.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/ProcurementRunAccepted'}
+        '409': {description: Task not approved, contract already exists, or cost missing.}
+    get:
+      operationId: listContracts
+      parameters:
+        - name: status
+          in: query
+          schema: {$ref: './procurement-workbench.schema.json#/$defs/ContractStatus'}
+        - name: task_id
+          in: query
+          schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Contract page with draft, clauses and consistency state.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/ContractPage'}
+  /api/procurement/contracts/{contractId}:
+    get:
+      operationId: getContract
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+      responses:
+        '200':
+          description: Contract detail.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/ContractView'}
+        '404': {description: Unknown contract.}
+  /api/procurement/contracts/{contractId}/actions:
+    post:
+      operationId: actOnContract
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+        - name: action
+          in: query
+          required: true
+          schema: {type: string, enum: [submit, approve, reject, execute, close, request_change]}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: './procurement-workbench.schema.json#/$defs/ContractActionInput'}
+      responses:
+        '200':
+          description: Contract after the state-machine-validated action.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/ContractView'}
+        '400': {description: Missing required notes/confirmation or unknown action.}
+        '409': {description: Invalid transition, missing draft, consistency mismatch, or concurrent modification.}
 components:
   parameters:
     BusinessId:

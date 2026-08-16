@@ -1,5 +1,8 @@
 package com.caijiatai.procurement.order;
 
+import com.caijiatai.procurement.contract.ContractEvent;
+import com.caijiatai.procurement.contract.ContractStateMachineConfig;
+import com.caijiatai.procurement.contract.ContractStatus;
 import com.caijiatai.procurement.invoice.InvoiceEvent;
 import com.caijiatai.procurement.invoice.InvoiceStateMachineConfig;
 import com.caijiatai.procurement.invoice.InvoiceStatus;
@@ -42,11 +45,13 @@ public class OrderStateMachineConfig {
     public StateMachineRegistry stateMachineRegistry(
             StateMachine<OrderStatus, OrderEvent> orderMachine,
             StateMachine<SettlementStatus, SettlementEvent> settlementMachine,
-            StateMachine<InvoiceStatus, InvoiceEvent> invoiceMachine) {
+            StateMachine<InvoiceStatus, InvoiceEvent> invoiceMachine,
+            StateMachine<ContractStatus, ContractEvent> contractMachine) {
         var registry = new StateMachineRegistry();
         registry.register(ORDER_MACHINE, orderMachine);
         registry.register(SETTLEMENT_MACHINE, settlementMachine);
         registry.register(InvoiceStateMachineConfig.INVOICE_MACHINE, invoiceMachine);
+        registry.register(ContractStateMachineConfig.CONTRACT_MACHINE, contractMachine);
         return registry;
     }
 }

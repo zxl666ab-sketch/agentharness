@@ -29,6 +29,7 @@ from agentharness.procurement.agent_tools import (
     DeterministicProcurementAdapter,
     ProcurementAgentTools,
 )
+from agentharness.procurement.contract_drafting import build_contract_draft
 from agentharness.procurement.evaluation import evaluate_frozen_cases
 from agentharness.procurement.invoice_parsing import build_diff_explanation, parse_invoice
 from agentharness.procurement.semantic_cache import SemanticCache
@@ -76,6 +77,7 @@ class AgentCommandBody(BaseModel):
         "reopen_task",
         "parse_invoice",
         "explain_invoice_diff",
+        "draft_contract",
     ]
     aggregate_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     generation: int = Field(ge=1)
@@ -157,7 +159,13 @@ class InternalAgentCommands:
             return await self._parse_invoice(body)
         if body.operation_type == "explain_invoice_diff":
             return await self._explain_invoice_diff(body)
+        if body.operation_type == "draft_contract":
+            return self._draft_contract(body)
         raise ValueError(f"unsupported operation type: {body.operation_type}")
+
+    def _draft_contract(self, body: AgentCommandBody) -> dict[str, Any]:
+        """P3-2 合同草拟（模式 B 模板 + 条款库软提示）：金额/交期/供应商只来自注入的定标结果。"""
+        return build_contract_draft(body.payload)
 
     async def _parse_invoice(self, body: AgentCommandBody) -> dict[str, Any]:
         """P3-1：确定性发票字段抽取（Java 侧三单匹配只消费 invoice 键）。"""

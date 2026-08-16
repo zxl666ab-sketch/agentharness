@@ -42,9 +42,34 @@ public final class SyntheticAgentClient implements AgentDispatcher {
                     "run_id", sha256hex(command.getOperationId() + ":run"));
             case "parse_invoice" -> parseInvoice(command);
             case "explain_invoice_diff" -> explainInvoiceDiff(command);
+            case "draft_contract" -> draftContract(command);
             default -> Map.of();
         };
         return new AgentDispatcher.DispatchResult(200, Map.of("status", "completed", "result", result));
+    }
+
+    /** 演示模式：合同草拟由 Java 侧模板合成（真实模式由 Python 确定性模板 + 条款库软提示）。 */
+    private Map<String, Object> draftContract(AgentCommand command) {
+        var payload = command.getPayload();
+        var amount = text(payload.get("amount"));
+        var leadDays = String.valueOf(payload.get("lead_days"));
+        var supplier = text(payload.get("supplier_name"));
+        var item = text(payload.get("item_name"));
+        return Map.of(
+                "draft_text", "采购合同\n\n甲方（采购方）：采购工作台演示企业\n乙方（供应商）：" + supplier
+                        + "\n\n一、合同金额为人民币 " + amount + " 元（价税合计）。\n"
+                        + "二、乙方应于合同生效后 " + leadDays + " 天内交货。\n"
+                        + "三、标的物：" + item + "。质量标准以双方确认的样品为准。\n"
+                        + "四、付款条款：验收合格后 30 日内付款。\n",
+                "clauses", java.util.List.of(
+                        Map.of("title", "金额条款", "content", "合同金额为人民币 " + amount + " 元（价税合计）。",
+                                "risk_level", "提示", "risk_reason", "演示模式草拟"),
+                        Map.of("title", "交期条款", "content", "乙方应于合同生效后 " + leadDays + " 天内交货。",
+                                "risk_level", "低", "risk_reason", "演示模式草拟"),
+                        Map.of("title", "质量标准条款", "content", "质量标准以双方确认的样品为准。",
+                                "risk_level", "提示", "risk_reason", "建议补充书面质量标准附件"),
+                        Map.of("title", "付款条款", "content", "验收合格后 30 日内付款。",
+                                "risk_level", "低", "risk_reason", "演示模式草拟")));
     }
 
     /** 演示模式：发票字段由 Java 侧合成（真实模式由 Python 确定性解析）。 */

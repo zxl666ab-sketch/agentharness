@@ -1,0 +1,82 @@
+{
+  "dataset": "ecommerce-contract-v1",
+  "dataset_label": "合同草拟与条款风险识别（合成数据集）— synthetic，非真实合同",
+  "synthetic": true,
+  "case_count": 8,
+  "clause_extraction": {
+    "precision": 1.0,
+    "recall": 1.0,
+    "true_positive": 48,
+    "false_positive": 0,
+    "false_negative": 0
+  },
+  "risk_level_violations": [],
+  "field_injection_consistency": {
+    "violations": [],
+    "passed": true
+  },
+  "acceptance": {
+    "clause_precision_recall_100pct": true,
+    "field_injection_consistent": true,
+    "risk_levels_correct": true
+  },
+  "per_case": [
+    {
+      "id": "ct-01",
+      "tp": 6,
+      "fp": 0,
+      "fn": 0,
+      "risk_ok": true
+    },
+    {
+      "id": "ct-02",
+      "tp": 6,
+      "fp": 0,
+      "fn": 0,
+      "risk_ok": true
+    },
+    {
+      "id": "ct-03",
+      "tp": 6,
+      "fp": 0,
+      "fn": 0,
+      "risk_ok": true
+    },
+    {
+      "id": "ct-04",
+      "tp": 6,
+      "fp": 0,
+      "fn": 0,
+      "risk_ok": true
+    },
+    {
+      "id": "ct-05",
+      "tp": 6,
+      "fp": 0,
+      "fn": 0,
+      "risk_ok": true
+    },
+    {
+      "id": "ct-06",
+      "tp": 6,
+      "fp": 0,
+      "fn": 0,
+      "risk_ok": true
+    },
+    {
+      "id": "ct-07",
+      "tp": 6,
+      "fp": 0,
+      "fn": 0,
+      "risk_ok": true
+    },
+    {
+      "id": "ct-08",
+      "tp": 6,
+      "fp": 0,
+      "fn": 0,
+      "risk_ok": true
+    }
+  ],
+  "generated_at": "2026-08-16T09:44:57.228924Z"
+}

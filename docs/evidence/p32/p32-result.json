@@ -1,0 +1,45 @@
+{
+  "checks": [
+    {
+      "name": "P3-2 contract list rendered",
+      "ok": true,
+      "detail": "cards=1"
+    },
+    {
+      "name": "P3-2 draft text section",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P3-2 clauses with risk levels",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P3-2 consistency check shown",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P3-2 contract entry on approved task",
+      "ok": true,
+      "detail": "合同 CT-RFQ-20260814-B923DE · 已关闭 | 合同中心 →"
+    },
+    {
+      "name": "P3-2 approved task shows contract entry",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P3-2 closed contract shows history",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P3-2 zero console errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "console_errors": []
+}

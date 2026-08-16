@@ -4,6 +4,10 @@ import type {
   AiTaskView,
   AuditEventPage,
   CategoryDistribution,
+  ContractActionInput,
+  ContractPage,
+  ContractStatus,
+  ContractView,
   CorrectionPage,
   CreateProcurementRequest,
   EvaluationResult,
@@ -256,6 +260,32 @@ export const procurementApi = {
   },
   invoiceAction: (id: string, action: "void" | "correct" | "force_match" | "reconcile", input: InvoiceActionInput) =>
     requestJson<InvoiceView>(`/api/procurement/invoices/${id}/actions?action=${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  contracts: (status?: ContractStatus, taskId?: string, page = 0, size = 50) => {
+    const query = new URLSearchParams({ page: String(page), size: String(size) });
+    if (status) query.set("status", status);
+    if (taskId) query.set("task_id", taskId);
+    return requestJson<ContractPage>(`/api/procurement/contracts?${query}`);
+  },
+  contract: (id: string) => requestJson<ContractView>(`/api/procurement/contracts/${id}`),
+  createContractDraft: async (taskId: string) => {
+    const accepted = await requestJson<ProcurementRunAccepted>("/api/procurement/contracts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey() },
+      body: JSON.stringify({ task_id: taskId }),
+    });
+    await waitForOperation(accepted.operation_id);
+    return accepted;
+  },
+  contractAction: (
+    id: string,
+    action: "submit" | "approve" | "reject" | "execute" | "close" | "request_change",
+    input: ContractActionInput
+  ) =>
+    requestJson<ContractView>(`/api/procurement/contracts/${id}/actions?action=${action}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),

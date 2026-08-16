@@ -52,6 +52,7 @@ SUPPORTED_OPERATIONS = frozenset(
         "reopen_task",
         "parse_invoice",
         "explain_invoice_diff",
+        "draft_contract",
     }
 )
 

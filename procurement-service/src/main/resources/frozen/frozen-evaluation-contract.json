@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "dataset": "ecommerce-contract-v1",
+  "dataset_label": "合同草拟与条款风险识别（合成数据集）— synthetic，非真实合同",
+  "synthetic": true,
+  "generated_at": "2026-08-16T00:00:00Z",
+  "case_count": 8,
+  "cases": [
+    {
+      "id": "ct-01",
+      "inputs": { "contract_no": "CT-RFQ-01", "supplier_name": "华东优包", "item_name": "PE 快递袋", "amount": "7500.00", "lead_days": 15 },
+      "expected_clauses": ["金额条款", "交期条款", "质量标准条款", "付款条款", "违约条款", "争议解决条款"],
+      "expected_risk": { "金额条款": "提示", "交期条款": "低", "质量标准条款": "高风险" }
+    },
+    {
+      "id": "ct-02",
+      "inputs": { "contract_no": "CT-RFQ-02", "supplier_name": "蓝海包装", "item_name": "热敏标签", "amount": "4633.00", "lead_days": 8 },
+      "expected_clauses": ["金额条款", "交期条款", "质量标准条款", "付款条款", "违约条款", "争议解决条款"],
+      "expected_risk": { "金额条款": "低", "交期条款": "提示", "质量标准条款": "高风险" }
+    },
+    {
+      "id": "ct-03",
+      "inputs": { "contract_no": "CT-RFQ-03", "supplier_name": "顺达纸品", "item_name": "瓦楞纸箱", "amount": "1378.00", "lead_days": 20 },
+      "expected_clauses": ["金额条款", "交期条款", "质量标准条款", "付款条款", "违约条款", "争议解决条款"],
+      "expected_risk": { "金额条款": "低", "交期条款": "低", "质量标准条款": "高风险" }
+    },
+    {
+      "id": "ct-04",
+      "inputs": { "contract_no": "CT-RFQ-04", "supplier_name": "绿色供应链", "item_name": "气泡膜", "amount": "4520.00", "lead_days": 12 },
+      "expected_clauses": ["金额条款", "交期条款", "质量标准条款", "付款条款", "违约条款", "争议解决条款"],
+      "expected_risk": { "金额条款": "低", "交期条款": "低", "质量标准条款": "高风险" }
+    },
+    {
+      "id": "ct-05",
+      "inputs": { "contract_no": "CT-RFQ-05", "supplier_name": "宏达包装", "item_name": "封箱胶带", "amount": "5650.00", "lead_days": 7 },
+      "expected_clauses": ["金额条款", "交期条款", "质量标准条款", "付款条款", "违约条款", "争议解决条款"],
+      "expected_risk": { "金额条款": "提示", "交期条款": "提示", "质量标准条款": "高风险" }
+    },
+    {
+      "id": "ct-06",
+      "inputs": { "contract_no": "CT-RFQ-06", "supplier_name": "新艺印刷", "item_name": "彩印礼盒", "amount": "5300.00", "lead_days": 18 },
+      "expected_clauses": ["金额条款", "交期条款", "质量标准条款", "付款条款", "违约条款", "争议解决条款"],
+      "expected_risk": { "金额条款": "提示", "交期条款": "低", "质量标准条款": "高风险" }
+    },
+    {
+      "id": "ct-07",
+      "inputs": { "contract_no": "CT-RFQ-07", "supplier_name": "众合物资", "item_name": "缠绕膜", "amount": "3390.00", "lead_days": 5 },
+      "expected_clauses": ["金额条款", "交期条款", "质量标准条款", "付款条款", "违约条款", "争议解决条款"],
+      "expected_risk": { "金额条款": "低", "交期条款": "提示", "质量标准条款": "高风险" }
+    },
+    {
+      "id": "ct-08",
+      "inputs": { "contract_no": "CT-RFQ-08", "supplier_name": "金泰塑业", "item_name": "塑料托盘", "amount": "6780.00", "lead_days": 25 },
+      "expected_clauses": ["金额条款", "交期条款", "质量标准条款", "付款条款", "违约条款", "争议解决条款"],
+      "expected_risk": { "金额条款": "提示", "交期条款": "低", "质量标准条款": "高风险" }
+    }
+  ]
+}

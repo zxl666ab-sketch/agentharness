@@ -27,6 +27,7 @@ import { AiTaskCenter } from "./AiTaskCenter";
 import { AiTaskRecovery } from "./AiTaskRecovery";
 import { ComparisonView } from "./ComparisonView";
 import { ConfigDrawer } from "./ConfigDrawer";
+import { ContractCenter } from "./ContractCenter";
 import { DeleteDialog } from "./DeleteDialog";
 import { InvoiceCenter } from "./InvoiceCenter";
 import { NextStepBar } from "./NextStepBar";
@@ -96,8 +97,8 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   } = state;
   const {
     metaQuery, configQuery, requestsQuery, allAiTasksQuery, reviewsQuery, detailQuery,
-    aiTaskQuery, reportQuery, taskOrderQuery, requests, allAiTasks, reviews, filtered,
-    visibleRequests, totalTaskPages,
+    aiTaskQuery, reportQuery, taskOrderQuery, taskContractQuery, requests, allAiTasks, reviews,
+    filtered, visibleRequests, totalTaskPages,
   } = queries;
   const {
     busy, aiActionBusy, aiActionError, showConfig, configForm, configBusy, configError,
@@ -113,6 +114,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
 
   const detail = detailQuery.data || null;
   const taskOrder = taskOrderQuery.data ?? null;
+  const taskContract = taskContractQuery.data ?? null;
   const progressDone = detail ? closedLoopProgress(detail.status, taskOrder) : 0;
 
   return (
@@ -270,6 +272,8 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
             <OrderCenter highlightTaskId={orderTask} onBackToTask={(taskId) => openTask(taskId)} />
           ) : view === "invoices" ? (
             <InvoiceCenter />
+          ) : view === "contracts" ? (
+            <ContractCenter />
           ) : view === "reports" ? (
             <ReportsCenter />
           ) : view === "audit" ? (
@@ -312,6 +316,23 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
               </header>
 
               <NextStepBar request={detail} order={taskOrder ?? null} onAction={handleNextStep} />
+
+              {detail.status === "approved" ? (
+                <div className="proc-contract-entry">
+                  {taskContract ? (
+                    <span><FileCheck2 size={14} />合同 {taskContract.contract_no} · {taskContract.status === "EFFECTIVE" ? "已生效" : taskContract.status === "EXECUTING" ? "执行中" : taskContract.status === "CLOSED" ? "已关闭" : taskContract.status === "PENDING_APPROVAL" ? "待审批" : taskContract.status === "CHANGE_REQUEST" ? "变更审批" : "草拟中"}</span>
+                  ) : (
+                    <span><FileCheck2 size={14} />定标完成，可生成合同（金额/交期/供应商自动注入）</span>
+                  )}
+                  <button
+                    type="button"
+                    className="proc-button compact"
+                    onClick={() => openView("contracts")}
+                  >
+                    {taskContract ? "合同中心 →" : "生成合同（AI 草拟）"}
+                  </button>
+                </div>
+              ) : null}
 
               {aiTaskQuery.data ? (
                 <AiTaskRecovery

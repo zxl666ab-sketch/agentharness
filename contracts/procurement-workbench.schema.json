@@ -287,6 +287,68 @@
         "location": { "type": "string" }
       }
     },
+    "ContractStatus": {
+      "type": "string",
+      "enum": ["DRAFT", "PENDING_APPROVAL", "EFFECTIVE", "EXECUTING", "CHANGE_REQUEST", "CLOSED"]
+    },
+    "ContractClause": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "content", "risk_level", "risk_reason"],
+      "properties": {
+        "title": { "type": "string" },
+        "content": { "type": "string" },
+        "risk_level": { "type": "string" },
+        "risk_reason": { "type": "string" }
+      }
+    },
+    "ContractView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "contract_no", "task_id", "supplier_name", "item_name", "amount", "lead_days", "status", "clauses", "version", "created_at", "updated_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "contract_no": { "type": "string" },
+        "task_id": { "type": "string" },
+        "task_reference": { "type": ["string", "null"] },
+        "order_id": { "type": ["string", "null"] },
+        "order_no": { "type": ["string", "null"] },
+        "supplier_name": { "type": "string" },
+        "item_name": { "type": "string" },
+        "amount": { "type": "string" },
+        "lead_days": { "type": "integer", "minimum": 0 },
+        "status": { "$ref": "#/$defs/ContractStatus" },
+        "draft_text": { "type": ["string", "null"] },
+        "clauses": { "type": "array", "items": { "$ref": "#/$defs/ContractClause" } },
+        "consistency": { "type": ["object", "null"], "additionalProperties": true },
+        "clause_validation": { "type": ["object", "null"], "additionalProperties": true },
+        "change_history": { "type": ["array", "null"], "items": { "type": "object", "additionalProperties": true } },
+        "notes": { "type": ["string", "null"] },
+        "version": { "type": "integer", "minimum": 0 },
+        "created_at": { "$ref": "#/$defs/DateTime" },
+        "updated_at": { "$ref": "#/$defs/DateTime" },
+        "approved_at": { "type": ["string", "null"] }
+      }
+    },
+    "ContractPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "page", "size", "total"],
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/$defs/ContractView" } },
+        "page": { "type": "integer", "minimum": 0 },
+        "size": { "type": "integer", "minimum": 1 },
+        "total": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ContractActionInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "confirmed": { "type": "boolean" },
+        "notes": { "type": ["string", "null"], "maxLength": 2000 }
+      }
+    },
     "OrderStatus": {
       "type": "string",
       "enum": ["PENDING_SHIPMENT", "SHIPPED", "RECEIVED", "CLOSED"]

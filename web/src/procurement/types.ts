@@ -788,6 +788,61 @@ export type InvoiceActionInput = {
   notes?: string | null;
 };
 
+export type ContractStatus = "DRAFT" | "PENDING_APPROVAL" | "EFFECTIVE" | "EXECUTING" | "CHANGE_REQUEST" | "CLOSED";
+
+export type ContractClause = {
+  title: string;
+  content: string;
+  risk_level: string;
+  risk_reason: string;
+};
+
+export type ContractView = {
+  id: string;
+  contract_no: string;
+  task_id: string;
+  task_reference: string | null;
+  order_id: string | null;
+  order_no: string | null;
+  supplier_name: string;
+  item_name: string;
+  amount: string;
+  lead_days: number;
+  status: ContractStatus;
+  draft_text: string | null;
+  clauses: ContractClause[];
+  consistency: {
+    amount_in_text: string | null;
+    lead_days_in_text: string | null;
+    amount_matches: boolean;
+    lead_days_matches: boolean;
+    consistent: boolean;
+  } | null;
+  clause_validation: {
+    amount_clause_present: boolean;
+    lead_days_clause_present: boolean;
+    valid: boolean;
+  } | null;
+  change_history: Array<{ captured_at: string; reason: string; clauses: ContractClause[] }> | null;
+  notes: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  approved_at: string | null;
+};
+
+export type ContractPage = {
+  items: ContractView[];
+  page: number;
+  size: number;
+  total: number;
+};
+
+export type ContractActionInput = {
+  confirmed?: boolean;
+  notes?: string | null;
+};
+
 export type PlatformInfo = {
   service: string;
   backend_version: string;

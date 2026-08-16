@@ -7,6 +7,7 @@ import com.caijiatai.procurement.approval.ApprovalService;
 import com.caijiatai.procurement.artifact.BusinessArtifactRepository;
 import com.caijiatai.procurement.cache.TaskContextCache;
 import com.caijiatai.procurement.comparison.ComparisonService;
+import com.caijiatai.procurement.contract.ContractService;
 import com.caijiatai.procurement.invoice.InvoiceService;
 import com.caijiatai.procurement.quote.ProcurementQuote;
 import com.caijiatai.procurement.quote.ProcurementQuoteRepository;
@@ -40,6 +41,7 @@ public final class AgentResultApplication {
     private final ReviewService reviews;
     private final TaskContextCache contextCache;
     private final InvoiceService invoices;
+    private final ContractService contracts;
 
     public AgentResultApplication(
             ProcurementTaskRepository tasks,
@@ -52,7 +54,8 @@ public final class AgentResultApplication {
             AiTaskService aiTasks,
             ReviewService reviews,
             TaskContextCache contextCache,
-            InvoiceService invoices) {
+            InvoiceService invoices,
+            ContractService contracts) {
         this.tasks = tasks;
         this.quotes = quotes;
         this.artifacts = artifacts;
@@ -64,6 +67,7 @@ public final class AgentResultApplication {
         this.reviews = reviews;
         this.contextCache = contextCache;
         this.invoices = invoices;
+        this.contracts = contracts;
     }
 
     public void apply(AgentCommand command, Map<String, Object> envelope) {
@@ -85,6 +89,7 @@ public final class AgentResultApplication {
                 case "create_structured", "reopen_task" -> bind(command, result);
                 case "parse_invoice" -> invoices.applyParseResult(command, result);
                 case "explain_invoice_diff" -> invoices.applyExplanation(command, result);
+                case "draft_contract" -> contracts.applyDraftResult(command, result);
                 default -> throw new ApiException(
                         HttpStatus.CONFLICT, "unknown_agent_operation", "Agent 命令类型不受支持");
             }
