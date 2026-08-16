@@ -21,12 +21,13 @@ from agentharness.contracts import (
     Usage,
     new_id,
 )
-from agentharness.procurement.parsing import fields_requiring_review, parse_quote
+from agentharness.procurement.parsing import PARSER_VERSION, fields_requiring_review, parse_quote
 from agentharness.procurement.requirements import (
     RequirementModelError,
     _validate_model_requirement,
     extract_requirement,
 )
+from agentharness.procurement.semantic_cache import SemanticCache
 from agentharness.storage.sqlite import Storage
 from agentharness.tools.base import FunctionTool
 
@@ -84,10 +85,12 @@ class ProcurementAgentTools:
         *,
         fetch_context: JsonFetcher,
         fetch_artifact: BytesFetcher,
+        semantic_cache: SemanticCache | None = None,
     ) -> None:
         self.storage = storage
         self.fetch_context = fetch_context
         self.fetch_artifact = fetch_artifact
+        self.semantic_cache = semantic_cache or SemanticCache()
         self.tools = {
             "procurement_capture_requirement": FunctionTool(
                 "procurement_capture_requirement",
@@ -163,8 +166,18 @@ class ProcurementAgentTools:
             message = str(metadata.get("procurement_source_message") or "").strip()
             if not message:
                 raise ValueError("procurement source message is missing")
-            requirement = extract_requirement([Message(role=MessageRole.user, content=message)])
-            source = "deterministic_offline_adapter"
+            # P2-3 语义缓存：相同需求消息（精确 SHA-256 + schema 版本）→ 确定性复用
+            message_sha = hashlib.sha256(message.encode("utf-8")).hexdigest()
+            cached = self.semantic_cache.get_requirement(message_sha, 2)
+            if cached is not None:
+                requirement = cached
+                source = "semantic_cache"
+            else:
+                requirement = extract_requirement(
+                    [Message(role=MessageRole.user, content=message)]
+                )
+                self.semantic_cache.put_requirement(message_sha, 2, requirement)
+                source = "deterministic_offline_adapter"
         else:
             try:
                 requirement = _validate_model_requirement(proposed)
@@ -273,9 +286,22 @@ class ProcurementAgentTools:
         expected_sha = str(attachment.get("sha256") or "")
         if expected_sha and hashlib.sha256(content).hexdigest() != expected_sha:
             raise ValueError("business artifact SHA-256 mismatch")
-        extracted = await asyncio.to_thread(parse_quote, filename, content)
-        review_fields = fields_requiring_review(extracted)
-        extracted = {**extracted, "review_fields": review_fields}
+        # P2-3 语义缓存：精确层命中（原件 SHA-256 + 解析器版本）→ 确定性复用，不重新解析
+        cached = (
+            self.semantic_cache.get_quote_parse(expected_sha, PARSER_VERSION)
+            if expected_sha
+            else None
+        )
+        if cached is not None:
+            extracted = {**cached, "cache_hit": True, "processing_ms": 0}
+        else:
+            extracted = await asyncio.to_thread(parse_quote, filename, content)
+            review_fields = fields_requiring_review(extracted)
+            extracted = {**extracted, "review_fields": review_fields}
+            if expected_sha:
+                # 只缓存工具成功路径的解析结果（已通过字段校验）
+                self.semantic_cache.put_quote_parse(expected_sha, PARSER_VERSION, extracted)
+        review_fields = extracted.get("review_fields") or fields_requiring_review(extracted)
         supplier = str(
             ((extracted.get("fields") or {}).get("supplier_name") or {}).get("value")
             or filename.rsplit(".", 1)[0]
@@ -284,8 +310,9 @@ class ProcurementAgentTools:
             "artifact_id": artifact_id,
             "supplier_name": supplier,
             "status": "needs_review" if review_fields else "ready",
-            "parser_version": str(extracted.get("parser_version") or "packaging-quote-v3"),
+            "parser_version": str(extracted.get("parser_version") or PARSER_VERSION),
             "processing_ms": str(extracted.get("processing_ms") or "0"),
+            "cache_hit": bool(cached is not None),
             "extracted": extracted,
         }
 

@@ -30,6 +30,7 @@ from agentharness.procurement.agent_tools import (
     ProcurementAgentTools,
 )
 from agentharness.procurement.evaluation import evaluate_frozen_cases
+from agentharness.procurement.semantic_cache import SemanticCache
 from agentharness.providers.gateway import GatewayAdapter
 from agentharness.providers.openai_adapter import OpenAIResponsesAdapter
 
@@ -97,10 +98,13 @@ class InternalAgentCommands:
         )
         self._fetch_context = fetch_context or self._http_json
         self._fetch_artifact = fetch_artifact or self._http_bytes
+        # P2-3 语义缓存：Redis 可用则启用（AGENT_REDIS_URL），否则 no-op
+        self.semantic_cache = SemanticCache.from_env()
         self.procurement_tools = ProcurementAgentTools(
             harness.storage,
             fetch_context=lambda path: self._java_json(path),
             fetch_artifact=lambda path: self._java_bytes(path),
+            semantic_cache=self.semantic_cache,
         )
         for tool in self.procurement_tools.tools.values():
             harness.register_tool(tool)

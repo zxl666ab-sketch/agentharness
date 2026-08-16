@@ -90,6 +90,8 @@ flowchart LR
 - **供应商档案（K1）**：与报价/中标按名称自动关联；删除保护（有报价历史 409）；绩效评分实时派生（口径见上）。
 - **历史报价 RAG（K5）**：比价分析时经 Kafka RPC 获取同物料历史成交参考区间，注入解释文本与风险 flag（软提示，不参与比价）。
 - **LLM 网关（P2-1）**：Python Agent 侧按 provider 叠加并发配额（Semaphore）、QPS 令牌桶、失败率熔断（30s 窗口 >50% → 熔断 60s，半开探测恢复）与降级（熔断期间解释类请求返回注明「模型不可用」的确定性摘要，解析类请求结构化失败走 AiTask 恢复）；事件写 Kafka runtime 事件，`/api/procurement/platform` 暴露脱敏网关状态，系统信息页展示熔断/降级标识。
+- **冲突裁决与修正回灌（P2-2）**：冲突字段在复核界面提供候选值单选（来自字段 `conflicts`），点击即提交修正并在 `quote_correction` 落库 `chosen_from_conflicts` 标记（服务端校验所选值确属候选）；`GET /api/procurement/corrections` 只读接口 + `scripts/export_corrections_to_eval.py` 把人工修正导出为评测扩展候选 `frozen-evaluation-corrections.json`（新文件，冻结资源不动，审核后启用；脚本幂等可重跑，README 如实标注 synthetic）。
+- **语义缓存（P2-3）**：Python Agent 直连 Redis（`AGENT_REDIS_URL`，独立 DB），缓存报价解析结果与需求结构化结果；key = `semantic:v1:{scope}:{sha256}:{version}`（原件 SHA-256 + 解析器/schema 版本参与 key，原件更新或版本升级即失效），TTL 默认 24h；只缓存已通过校验的结果，命中为确定性返回、不产生审计事件，Redis 不可用自动 no-op。
 - Java 采购报告与已投影的 Run 审计在 Python 不可用时仍可读取；实时 `/api/runtime` 可用性检查在心跳过期时返回结构化 503。
 - kafka/demo 模式下冻结评测面板由 Java 自带资源提供（`frozen-evaluation.json`，与 Python 冻结真值集同步，见 `scripts/export_frozen_evaluation.py`）；K5 扩展用例在独立的 `frozen-evaluation-ext.json`（冻结资源一个字节不动）。
 

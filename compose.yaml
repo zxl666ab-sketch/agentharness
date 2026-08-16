@@ -94,6 +94,8 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-}
+      # P2-3 语义缓存：独立 DB index 2，避免与 Java（DB 0）互相干扰
+      AGENT_REDIS_URL: redis://redis:6379/2
     volumes:
       - caijiatai-agent-runtime:/data/runtime
     healthcheck:
