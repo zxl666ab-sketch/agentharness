@@ -1001,3 +1001,54 @@ describe("comparison approval gate", () => {
     await act(async () => root.unmount());
     host.remove();
   });
+
+  it("lets conflict candidates be chosen with a single click and submits the chosen flag (P2-2)", async () => {
+    const conflictRequest: ProcurementRequest = {
+      ...request,
+      quotes: [{
+        ...request.quotes[0],
+        extracted: {
+          ...request.quotes[0].extracted,
+          fields: {
+            ...request.quotes[0].extracted.fields,
+            supplier_name: {
+              value: "Alpha Packaging",
+              confidence: 0.45,
+              status: "needs_review",
+              source: { document_kind: "xlsx", locator: "filename", excerpt: "Alpha.xlsx", method: "filename_fallback" },
+              conflicts: [
+                { value: "Beta Packaging", confidence: 0.8, source: { document_kind: "xlsx", locator: "报价单!B1", excerpt: "供应商：Beta Packaging", method: "key_value_cell" } },
+                { value: "Gamma Packaging", confidence: 0.7, source: { document_kind: "xlsx", locator: "报价单!D1", excerpt: "Beta Packaging Co", method: "key_value_cell" } },
+              ],
+            },
+          },
+        },
+      }],
+    };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onCorrect = vi.fn(async () => undefined);
+    await act(async () => {
+      root.render(
+        <QuoteWorkspace
+          request={conflictRequest}
+          meta={meta}
+          busy={null}
+          onUpload={async () => undefined}
+          onCorrect={onCorrect}
+          onAnalyze={async () => undefined}
+        />
+      );
+    });
+    const candidates = host.querySelectorAll(".proc-conflict-chip");
+    expect(candidates.length).toBe(2);
+    expect(candidates[0].textContent).toContain("Beta Packaging");
+    await act(async () => {
+      (candidates[0] as HTMLButtonElement).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(onCorrect).toHaveBeenCalledWith("quote-alpha", "supplier_name", "Beta Packaging", true);
+    await act(async () => root.unmount());
+    host.remove();
+  });

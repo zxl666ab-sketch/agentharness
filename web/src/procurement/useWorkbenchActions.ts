@@ -102,13 +102,14 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
   async function correctField(
     quoteId: string,
     field: string,
-    value: string | number | boolean | null
+    value: string | number | boolean | null,
+    chosenFromConflicts = false,
   ) {
     if (!selectedId) return;
     setBusy(`field:${quoteId}:${field}`);
     state.setActionError(null);
     try {
-      await procurementApi.correctField(selectedId, quoteId, field, value);
+      await procurementApi.correctField(selectedId, quoteId, field, value, chosenFromConflicts);
       await commit(await procurementApi.request(selectedId));
     } catch (error) {
       state.setActionError(errorText(error));

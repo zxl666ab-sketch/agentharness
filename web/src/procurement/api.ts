@@ -4,6 +4,7 @@ import type {
   AiTaskView,
   AuditEventPage,
   CategoryDistribution,
+  CorrectionPage,
   CreateProcurementRequest,
   EvaluationResult,
   InsightTrendRow,
@@ -219,12 +220,17 @@ export const procurementApi = {
     requestId: string,
     quoteId: string,
     field: string,
-    value: string | number | boolean | null
+    value: string | number | boolean | null,
+    chosenFromConflicts?: boolean,
   ) =>
     postJson<ProcurementQuote>(
       `/api/procurement/requests/${requestId}/quotes/${quoteId}/corrections`,
-      { field, value }
+      { field, value, chosen_from_conflicts: chosenFromConflicts ?? false }
     ),
+  corrections: (page = 0, size = 50) => {
+    const query = new URLSearchParams({ page: String(page), size: String(size) });
+    return requestJson<CorrectionPage>(`/api/procurement/corrections?${query}`);
+  },
   correctRequirement: (requestId: string, input: CreateProcurementRequest) =>
     requestJson<ProcurementRequest>(
       `/api/procurement/requests/${requestId}/requirement`,

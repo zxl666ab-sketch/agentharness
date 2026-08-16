@@ -698,6 +698,27 @@ export type AuditEventPage = {
   total: number;
 };
 
+export type CorrectionView = {
+  id: string;
+  task_id: string;
+  task_reference: string | null;
+  quote_id: string;
+  supplier_name: string | null;
+  field: string;
+  old_value: unknown;
+  new_value: unknown;
+  chosen_from_conflicts: boolean;
+  actor: string;
+  created_at: string;
+};
+
+export type CorrectionPage = {
+  items: CorrectionView[];
+  page: number;
+  size: number;
+  total: number;
+};
+
 export type PlatformInfo = {
   service: string;
   backend_version: string;

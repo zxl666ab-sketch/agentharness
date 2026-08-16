@@ -158,6 +158,45 @@
         "capabilities": { "type": "array", "items": { "type": "string" } }
       }
     },
+    "QuoteCorrectionInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "value"],
+      "properties": {
+        "field": { "type": "string", "maxLength": 100 },
+        "value": {},
+        "chosen_from_conflicts": { "type": "boolean" }
+      }
+    },
+    "CorrectionView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "task_id", "task_reference", "quote_id", "supplier_name", "field", "old_value", "new_value", "chosen_from_conflicts", "actor", "created_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "task_id": { "type": "string" },
+        "task_reference": { "type": ["string", "null"] },
+        "quote_id": { "type": "string" },
+        "supplier_name": { "type": ["string", "null"] },
+        "field": { "type": "string" },
+        "old_value": {},
+        "new_value": {},
+        "chosen_from_conflicts": { "type": "boolean" },
+        "actor": { "type": "string" },
+        "created_at": { "$ref": "#/$defs/DateTime" }
+      }
+    },
+    "CorrectionPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "page", "size", "total"],
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/$defs/CorrectionView" } },
+        "page": { "type": "integer", "minimum": 0 },
+        "size": { "type": "integer", "minimum": 1 },
+        "total": { "type": "integer", "minimum": 0 }
+      }
+    },
     "OrderStatus": {
       "type": "string",
       "enum": ["PENDING_SHIPMENT", "SHIPPED", "RECEIVED", "CLOSED"]

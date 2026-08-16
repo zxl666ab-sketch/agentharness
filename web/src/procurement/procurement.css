@@ -578,10 +578,12 @@
 .proc-field-editor select { padding: 0 7px; font-size: var(--text-xs); }
 .proc-field-editor select:focus, .proc-edit-input:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .proc-field-evidence { display: grid; align-items: center; gap: 2px 7px; grid-template-columns: max-content minmax(0, 1fr); }
-.proc-field-conflicts { display: grid; grid-column: 1 / -1; gap: 3px; margin: 4px 0 0; padding: 0; list-style: none; }
-.proc-field-conflicts li { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: 8px; padding: 4px 6px; border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border)); border-radius: 4px; background: var(--warning-soft); }
-.proc-field-conflicts strong { color: var(--warning); font-size: 10px; }
-.proc-field-conflicts span { overflow: hidden; color: var(--text-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.proc-conflict-candidates { display: flex; grid-column: 1 / -1; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 2px; }
+.proc-conflict-candidates > span { color: var(--text-muted); font-size: 9px; }
+.proc-conflict-chip { display: inline-flex; max-width: 260px; align-items: center; gap: 6px; padding: 3px 8px; border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border)); border-radius: 99px; background: var(--warning-soft); color: var(--text); cursor: pointer; font: inherit; font-size: 10px; }
+.proc-conflict-chip:hover { border-color: var(--warning); }
+.proc-conflict-chip.selected { border-color: var(--accent); background: var(--accent-soft); }
+.proc-conflict-chip small { overflow: hidden; color: var(--text-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .proc-field-evidence > span:nth-child(2) { overflow: hidden; color: var(--text-secondary); font-family: var(--mono); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .proc-field-evidence small { overflow: hidden; grid-column: 1 / -1; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .proc-confidence { display: inline-flex; min-height: 19px; align-items: center; padding: 0 6px; border-radius: 4px; font-size: 9px; font-weight: 750; }

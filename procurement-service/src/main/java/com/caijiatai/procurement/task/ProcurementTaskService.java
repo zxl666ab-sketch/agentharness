@@ -18,6 +18,7 @@ import com.caijiatai.procurement.artifact.ProcurementAttachment;
 import com.caijiatai.procurement.artifact.ProcurementAttachmentRepository;
 import com.caijiatai.procurement.comparison.ComparisonSnapshotRepository;
 import com.caijiatai.procurement.config.AppProperties;
+import com.caijiatai.procurement.quote.CorrectionConflictPolicy;
 import com.caijiatai.procurement.quote.ProcurementQuoteRepository;
 import com.caijiatai.procurement.quote.QuoteCorrection;
 import com.caijiatai.procurement.quote.QuoteCorrectionRepository;
@@ -258,14 +259,48 @@ public class ProcurementTaskService {
             throw bad("unknown_quote_field", "报价字段不存在");
         }
         var oldValue = entry.get("value");
+        // P2-2 冲突裁决：候选值单选落库标记 chosen_from_conflicts，服务端校验候选值归属
+        boolean chosenFromConflicts = Boolean.TRUE.equals(body.chosenFromConflicts());
+        if (chosenFromConflicts && !CorrectionConflictPolicy.chosenValueMatchesConflicts(entry, body.value())) {
+            throw bad("chosen_value_not_in_conflicts", "选中的修正值不在该字段的冲突候选中");
+        }
         quote.correct(body.field(), body.value());
-        corrections.save(QuoteCorrection.create(taskId, quoteId, body.field(), oldValue, body.value(), operator));
+        corrections.save(QuoteCorrection.create(
+                taskId, quoteId, body.field(), oldValue, body.value(), chosenFromConflicts, operator));
         invalidate(task);
         refreshReviewStatus(task);
         audit.save(AuditEvent.create(
                 taskId, quoteId, task.getAnalysisRunId(), "quote_field_corrected", operator,
-                Map.of("field", body.field())));
+                Map.of("field", body.field(), "chosen_from_conflicts", chosenFromConflicts)));
         return views.quote(quote);
+    }
+
+    @Transactional(readOnly = true)
+    public Map<String, Object> listCorrections(int page, int size) {
+        var pageable = PageRequest.of(Math.max(0, page), Math.min(100, Math.max(1, size)));
+        var rows = corrections.findAllByOrderByCreatedAtDesc(pageable);
+        var items = rows.stream().map(correction -> {
+            var task = tasks.findById(correction.getTaskId()).orElse(null);
+            var quote = quotes.findById(correction.getQuoteId()).orElse(null);
+            return new ProcurementDtos.CorrectionView(
+                    correction.getId(),
+                    correction.getTaskId(),
+                    task == null ? null : task.getReference(),
+                    correction.getQuoteId(),
+                    quote == null ? null : quote.getSupplierName(),
+                    correction.getFieldName(),
+                    correction.getOldValue(),
+                    correction.getNewValue(),
+                    correction.isChosenFromConflicts(),
+                    correction.getActor(),
+                    correction.getCreatedAt().toString());
+        }).toList();
+        var value = new LinkedHashMap<String, Object>();
+        value.put("items", items);
+        value.put("page", pageable.getPageNumber());
+        value.put("size", pageable.getPageSize());
+        value.put("total", rows.getTotalElements());
+        return value;
     }
 
     @Transactional

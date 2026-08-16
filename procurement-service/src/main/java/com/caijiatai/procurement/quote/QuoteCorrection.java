@@ -27,6 +27,8 @@ public class QuoteCorrection {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "new_value", columnDefinition = "json")
     private Object newValue;
+    @Column(name = "chosen_from_conflicts", nullable = false)
+    private boolean chosenFromConflicts;
     @Column(nullable = false, length = 100)
     private String actor;
     @Column(name = "created_at", nullable = false)
@@ -35,7 +37,8 @@ public class QuoteCorrection {
     protected QuoteCorrection() {}
 
     public static QuoteCorrection create(
-            String taskId, String quoteId, String field, Object oldValue, Object newValue, String actor) {
+            String taskId, String quoteId, String field, Object oldValue, Object newValue,
+            boolean chosenFromConflicts, String actor) {
         var correction = new QuoteCorrection();
         correction.id = java.util.UUID.randomUUID().toString().replace("-", "");
         correction.taskId = taskId;
@@ -43,8 +46,22 @@ public class QuoteCorrection {
         correction.fieldName = field;
         correction.oldValue = oldValue;
         correction.newValue = newValue;
+        correction.chosenFromConflicts = chosenFromConflicts;
         correction.actor = actor;
         correction.createdAt = Instant.now();
         return correction;
     }
+
+    public boolean isChosenFromConflicts() {
+        return chosenFromConflicts;
+    }
+
+    public String getId() { return id; }
+    public String getTaskId() { return taskId; }
+    public String getQuoteId() { return quoteId; }
+    public String getFieldName() { return fieldName; }
+    public Object getOldValue() { return oldValue; }
+    public Object getNewValue() { return newValue; }
+    public String getActor() { return actor; }
+    public Instant getCreatedAt() { return createdAt; }
 }

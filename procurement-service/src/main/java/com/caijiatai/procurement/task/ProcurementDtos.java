@@ -39,7 +39,24 @@ public final class ProcurementDtos {
             @Size(max = 300) String destination,
             String requiredDeliveryDate) {}
 
-    public record QuoteCorrection(@NotBlank @Size(max = 100) String field, Object value) {}
+    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
+    public record QuoteCorrection(
+            @NotBlank @Size(max = 100) String field,
+            Object value,
+            Boolean chosenFromConflicts) {}
+
+    public record CorrectionView(
+            String id,
+            String taskId,
+            String taskReference,
+            String quoteId,
+            String supplierName,
+            String field,
+            Object oldValue,
+            Object newValue,
+            boolean chosenFromConflicts,
+            String actor,
+            String createdAt) {}
 
     public record Resume(@NotBlank @Size(max = 20_000) String message) {}
 

@@ -366,10 +366,46 @@ paths:
           content:
             application/json:
               schema: {$ref: './procurement-workbench.schema.json#/$defs/PlatformInfo'}
+  /api/procurement/requests/{businessId}/quotes/{quoteId}/corrections:
+    post:
+      operationId: correctQuoteField
+      parameters:
+        - {$ref: '#/components/parameters/BusinessId'}
+        - {$ref: '#/components/parameters/QuoteId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: './procurement-workbench.schema.json#/$defs/QuoteCorrectionInput'}
+      responses:
+        '200':
+          description: Corrected quote view.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/ProcurementQuote'}
+        '400': {description: Unknown field or chosen value outside conflict candidates.}
+        '404': {description: Quote not found.}
+  /api/procurement/corrections:
+    get:
+      operationId: listCorrections
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Human quote-correction records (P2-2 修正回灌只读接口).
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/CorrectionPage'}
 components:
   parameters:
     BusinessId:
       name: businessId
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+    QuoteId:
+      name: quoteId
       in: path
       required: true
       schema: {type: string, pattern: '^[0-9a-f]{32}$'}

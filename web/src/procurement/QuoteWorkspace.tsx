@@ -33,7 +33,8 @@ type Props = {
   onCorrect: (
     quoteId: string,
     field: string,
-    value: string | number | boolean | null
+    value: string | number | boolean | null,
+    chosenFromConflicts?: boolean
   ) => Promise<void>;
   onAnalyze: () => Promise<void>;
 };
@@ -222,7 +223,7 @@ function FieldEditor({
   meta: FieldMeta;
   field: QuoteField;
   saving: boolean;
-  onSave: (value: string | number | boolean | null) => Promise<void>;
+  onSave: (value: string | number | boolean | null, chosenFromConflicts?: boolean) => Promise<void>;
 }) {
   const rendered = displayValue(field.value, meta);
   const [value, setValue] = useState(rendered);
@@ -267,22 +268,34 @@ function FieldEditor({
           {saving ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}
         </button>
       </div>
+      {field.conflicts?.length ? (
+        <div className="proc-conflict-candidates" aria-label={`${meta.label}冲突候选值`}>
+          <span>候选值（点击即选中修正）</span>
+          {field.conflicts.map((candidate, index) => {
+            const candidateText = displayValue(candidate.value, meta) || "空值";
+            const selected = changed && candidateText === value;
+            return (
+              <button
+                type="button"
+                key={`${String(candidate.value)}-${candidate.source.locator}-${index}`}
+                className={`proc-conflict-chip ${selected ? "selected" : ""}`}
+                disabled={saving}
+                title={`来源：${sourceLocator(candidate.source.locator)}`}
+                onClick={() => void onSave(candidate.value, true)}
+              >
+                {candidateText}
+                <small title={candidate.source.excerpt}>{sourceLocator(candidate.source.locator)}</small>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
       <div className="proc-field-evidence">
         <span className={`proc-confidence ${confidence < 80 ? "low" : field.status === "corrected" ? "corrected" : "high"}`}>
           {field.status === "corrected" ? "人工修正" : field.conflicts?.length ? "证据冲突" : `${confidence}%`}
         </span>
         <span title={field.source.excerpt}>{sourceLocator(field.source.locator)}</span>
         <small>{field.source.excerpt || "原文未找到"}</small>
-        {field.conflicts?.length ? (
-          <ul className="proc-field-conflicts">
-            {field.conflicts.map((candidate, index) => (
-              <li key={`${String(candidate.value)}-${candidate.source.locator}-${index}`}>
-                <strong>{displayValue(candidate.value, meta) || "空值"}</strong>
-                <span title={candidate.source.excerpt}>{sourceLocator(candidate.source.locator)}</span>
-              </li>
-            ))}
-          </ul>
-        ) : null}
       </div>
     </div>
   );
@@ -476,7 +489,8 @@ export function QuoteWorkspace({
                   meta={fieldMeta}
                   field={field}
                   saving={busy === `field:${selected.id}:${name}`}
-                  onSave={(value) => onCorrect(selected.id, name, value)}
+                  onSave={(value, chosenFromConflicts) =>
+                    onCorrect(selected.id, name, value, chosenFromConflicts)}
                 />
               ))}
               {!entries.length ? (
