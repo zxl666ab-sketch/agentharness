@@ -110,3 +110,35 @@
 3. **排期（体验/维护）**：手工改单补 unit_price、对话框 useEscape/焦点、refetchInterval 函数式、两旗舰页组件测试、半开单探测单测、`evaluate_contract` 负例、低危清单各项。
 
 > 本次仅审核未修复。如需，可逐项按上述组件定位提交修复（每项修复需过既有门禁：ruff/pytest/`mvnw test`/`npm test+lint+build`/determinism）。
+
+---
+
+## 七、修复状态（2026-08-16，全部完成）
+
+| 项 | 状态 | 修复 commit | 验证 |
+|---|---|---|---|
+| H1 变更驳回重置 DRAFT | ✅ | `636fc50` fix(java) | `Contract.reject` 按来源分流恢复变更前状态；`ContractChangeTest` 5 例 |
+| H2 网关限流/熔断不重试 | ✅ | `e811d99` fix(python) | `_RETRYABLE_PROVIDER_ERRORS` + `rate_limited/circuit_open`；分类回归测试 |
+| H3 详情态被浅数据掩盖 | ✅ | `ba16bbc` fix(web) | 详情 isPending 标注 / isError 重试区块；组件测试覆盖 |
+| M1 状态筛选排序规则依赖 | ✅ | `636fc50` | invoice/contract list 按小写 wire 值过滤，非法值 400 |
+| M2 parser_version 错位 | ✅ | `e811d99` | 归位 invoice 内层；评测 ALL PASS 复验 |
+| M3 GRN 未参与匹配 | ✅ | `636fc50` | PurchaseSide.receivedQuantity 优先实收量（无收货回退 PO）；3 新测试 |
+| M4 变更无内容 | ✅ | `636fc50`+`ba16bbc` | request_change 必填修订值 → regen-draft → 批准落定；Java/Web/契约同步 |
+| M5 applyExplanation 乐观锁 | ✅ | `636fc50` | 重读合并重试一次 → 409 |
+| M6 草拟死局 | ✅ | `636fc50`+`ba16bbc` | `regen-draft` 端点（DRAFT/CHANGE_REQUEST）+ UI 按钮 |
+| M7 半开并发探测 | ✅ | `e811d99` | try_probe 单飞行 + abort_probe 防死锁；4 新测试 |
+| M8 circuit_closed 刷屏 | ✅ | `e811d99` | 仅状态迁移发射；2 新测试 |
+| M9 心跳线程竞态 | ✅ | `e811d99` | snapshot/stats 加锁 + 键列表浅拷贝 |
+| M10 InvoiceActionInput 类型 | ✅ | `ba16bbc` | schema/web 数值 number\|null 与 Java BigDecimal 对齐 |
+| D1 corrections 产物缺失 | ✅ | `db25ec8` | 产物生成并提交（0 条修正，可重跑）；文档如实说明 |
+| D2 合同评测 12 vs 8 | ✅ | `db25ec8` | 文档订正为 8 例 |
+| D3 evidence README 索引 | ✅ | `db25ec8` | 补 p1..p3-3/final-report 条目 |
+| D4 证据状态机描述不符 | ✅ | `db25ec8` | CHANGE_REQUEST/驳回分流/修订值字段对齐实现 |
+| 低危 Java 项 | ✅ | `636fc50` | saveAndFlush 入 try、幂等前置、expectedTaxRate 单次、length=36、IllegalStateTransition→409、自动匹配走状态机、grn received_at null、SyntheticAgentClient 数值省略 |
+| 低危 Python 项 | ✅ | `e811d99` | 需求版本常量、缓存校验门控、别名精确优先+预编译、阈值文案/inf·nan、contract_id 唯一化、导出脚本默认目录 |
+| 低危 Web 项 | ✅ | `ba16bbc` | useEscape/autoFocus、轮询函数化、文案收敛 viewModel、新页测试 7 例、契约枚举对齐断言 |
+| 审核证伪项 | ✅ 无需修 | — | 「等令牌二次计费」（`TokenBucket.take` 不足时不扣减，首次 take 为无副作用探测，实为单次计费）；`evaluate_contract` 条款评测弱阳性（保留并已在报告中说明，字段注入与风险分级校验仍然有效） |
+
+**修复后门禁复验**：Java 160 全绿（Testcontainers 全量）；Python 273 passed / 1 skipped，覆盖率 85.66%（≥80），invoice/contract 评测 ALL PASS；Web 63 全绿 + lint 0 + build ✓；frozen 基线复验（31 例 617/620 口径、0 漏检）不变；web/dist 与 static 字节一致（determinism ✓）；冻结资产零改动（再次确认）。
+
+**实机五服务验证（新镜像重建后 API 全链路）**：`output/verify-audit-fixes.py` **22/22 通过** —— M1 发票/合同状态过滤（MATCHED 小写命中、非法值 400×2）；createDraft→DRAFT（一致性 true）→ M6 DRAFT regen-draft 重试 → submit→approve→execute→EXECUTING；M4 变更缺修订值 400 `change_requires_values`、带修订值（10400→12400 / 12→17 天）→ CHANGE_REQUEST 且历史记录 from_status=executing+修订值；**H1 变更驳回恢复 EXECUTING 且原金额未动**；再次变更 → 按修订值 regen-draft → 一致性按修订值校验通过 → 批准落定（amount=12400、lead=17、快照 applied）。
