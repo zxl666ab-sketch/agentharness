@@ -1,4 +1,4 @@
-import type { ProcurementRequest, ProcurementStatus } from "./types";
+import type { ContractStatus, ProcurementRequest, ProcurementStatus } from "./types";
 
 /**
  * 采购任务视图模型（P1-1/P1-2/P1-3 共用）。
@@ -47,6 +47,20 @@ export const CLOSED_LOOP_STEPS = [
 
 export function statusLabel(status: ProcurementStatus): string {
   return STATUS_LABELS[status] ?? status;
+}
+
+/** 合同状态文案唯一来源（ContractCenter 与工作台任务详情共用，避免内联重复/兜底误标）。 */
+export const CONTRACT_STATUS_LABELS: Record<ContractStatus, string> = {
+  DRAFT: "草拟中",
+  PENDING_APPROVAL: "待审批",
+  EFFECTIVE: "已生效",
+  EXECUTING: "执行中",
+  CHANGE_REQUEST: "变更审批",
+  CLOSED: "已关闭",
+};
+
+export function contractStatusLabel(status: ContractStatus): string {
+  return CONTRACT_STATUS_LABELS[status] ?? status;
 }
 
 export function statusTone(status: ProcurementStatus): string {

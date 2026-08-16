@@ -719,7 +719,8 @@ export type CorrectionPage = {
   total: number;
 };
 
-export type InvoiceStatus = "REGISTERED" | "MATCHED" | "DIFF_HOLD" | "VOIDED" | "RECONCILED";
+export const INVOICE_STATUSES = ["REGISTERED", "MATCHED", "DIFF_HOLD", "VOIDED", "RECONCILED"] as const;
+export type InvoiceStatus = (typeof INVOICE_STATUSES)[number];
 
 export type InvoiceMatchDiff = {
   field: string;
@@ -778,17 +779,18 @@ export type InvoicePage = {
 };
 
 export type InvoiceActionInput = {
-  quantity?: string | null;
-  unit_price?: string | null;
-  amount_excluding_tax?: string | null;
-  tax_amount?: string | null;
-  total_amount?: string | null;
-  tax_rate?: string | null;
+  quantity?: number | null;
+  unit_price?: number | null;
+  amount_excluding_tax?: number | null;
+  tax_amount?: number | null;
+  total_amount?: number | null;
+  tax_rate?: number | null;
   confirmed?: boolean;
   notes?: string | null;
 };
 
-export type ContractStatus = "DRAFT" | "PENDING_APPROVAL" | "EFFECTIVE" | "EXECUTING" | "CHANGE_REQUEST" | "CLOSED";
+export const CONTRACT_STATUSES = ["DRAFT", "PENDING_APPROVAL", "EFFECTIVE", "EXECUTING", "CHANGE_REQUEST", "CLOSED"] as const;
+export type ContractStatus = (typeof CONTRACT_STATUSES)[number];
 
 export type ContractClause = {
   title: string;
@@ -823,7 +825,7 @@ export type ContractView = {
     lead_days_clause_present: boolean;
     valid: boolean;
   } | null;
-  change_history: Array<{ captured_at: string; reason: string; clauses: ContractClause[] }> | null;
+  change_history: ContractChangeEntry[] | null;
   notes: string | null;
   version: number;
   created_at: string;
@@ -838,9 +840,22 @@ export type ContractPage = {
   total: number;
 };
 
+export type ContractChangeEntry = {
+  captured_at: string;
+  reason: string;
+  clauses: ContractClause[] | null;
+  from_status?: string | null;
+  new_amount?: string | null;
+  new_lead_days?: number | null;
+  applied?: boolean;
+  applied_at?: string | null;
+};
+
 export type ContractActionInput = {
   confirmed?: boolean;
   notes?: string | null;
+  new_amount?: number | null;
+  new_lead_days?: number | null;
 };
 
 export type PlatformInfo = {

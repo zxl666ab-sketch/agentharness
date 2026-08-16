@@ -290,6 +290,14 @@ export const procurementApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
     }),
+  regenContractDraft: async (id: string) => {
+    const accepted = await requestJson<ProcurementRunAccepted>(`/api/procurement/contracts/${id}/regen-draft`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey() },
+    });
+    await waitForOperation(accepted.operation_id);
+    return accepted;
+  },
   correctRequirement: (requestId: string, input: CreateProcurementRequest) =>
     requestJson<ProcurementRequest>(
       `/api/procurement/requests/${requestId}/requirement`,

@@ -52,6 +52,7 @@ import { useWorkbenchState } from "./useWorkbenchState";
 import {
   CLOSED_LOOP_STEPS,
   closedLoopProgress,
+  contractStatusLabel,
   statusLabel,
   statusTone,
 } from "./viewModel";
@@ -320,7 +321,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
               {detail.status === "approved" ? (
                 <div className="proc-contract-entry">
                   {taskContract ? (
-                    <span><FileCheck2 size={14} />合同 {taskContract.contract_no} · {taskContract.status === "EFFECTIVE" ? "已生效" : taskContract.status === "EXECUTING" ? "执行中" : taskContract.status === "CLOSED" ? "已关闭" : taskContract.status === "PENDING_APPROVAL" ? "待审批" : taskContract.status === "CHANGE_REQUEST" ? "变更审批" : "草拟中"}</span>
+                    <span><FileCheck2 size={14} />合同 {taskContract.contract_no} · {contractStatusLabel(taskContract.status)}</span>
                   ) : (
                     <span><FileCheck2 size={14} />定标完成，可生成合同（金额/交期/供应商自动注入）</span>
                   )}

@@ -264,12 +264,12 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "quantity": { "type": ["string", "null"] },
-        "unit_price": { "type": ["string", "null"] },
-        "amount_excluding_tax": { "type": ["string", "null"] },
-        "tax_amount": { "type": ["string", "null"] },
-        "total_amount": { "type": ["string", "null"] },
-        "tax_rate": { "type": ["string", "null"] },
+        "quantity": { "type": ["number", "null"] },
+        "unit_price": { "type": ["number", "null"] },
+        "amount_excluding_tax": { "type": ["number", "null"] },
+        "tax_amount": { "type": ["number", "null"] },
+        "total_amount": { "type": ["number", "null"] },
+        "tax_rate": { "type": ["number", "null"] },
         "confirmed": { "type": "boolean" },
         "notes": { "type": ["string", "null"], "maxLength": 2000 }
       }
@@ -346,7 +346,9 @@
       "additionalProperties": false,
       "properties": {
         "confirmed": { "type": "boolean" },
-        "notes": { "type": ["string", "null"], "maxLength": 2000 }
+        "notes": { "type": ["string", "null"], "maxLength": 2000 },
+        "new_amount": { "type": ["number", "null"] },
+        "new_lead_days": { "type": ["number", "null"] }
       }
     },
     "OrderStatus": {

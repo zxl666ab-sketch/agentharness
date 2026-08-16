@@ -8,6 +8,8 @@ import {
   AI_TASK_STATUSES,
   AI_TASK_STEPS,
   AI_TASK_TYPES,
+  CONTRACT_STATUSES,
+  INVOICE_STATUSES,
   PROCUREMENT_STATUSES,
   type AiTaskView,
 } from "./types";
@@ -21,6 +23,8 @@ describe("procurement workbench contract", () => {
     expect([...AI_TASK_STATUSES]).toEqual(definitions.AiTaskStatus.enum);
     expect([...AI_TASK_TYPES]).toEqual(definitions.AiTaskType.enum);
     expect([...AI_TASK_STEPS]).toEqual(definitions.AiTaskStep.enum);
+    expect([...INVOICE_STATUSES]).toEqual(definitions.InvoiceStatus.enum);
+    expect([...CONTRACT_STATUSES]).toEqual(definitions.ContractStatus.enum);
     expect(AI_STATUS_TRANSITIONS).toEqual(schema["x-ai-status-transitions"]);
   });
 

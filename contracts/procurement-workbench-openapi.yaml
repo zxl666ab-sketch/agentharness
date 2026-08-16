@@ -555,6 +555,21 @@ paths:
               schema: {$ref: './procurement-workbench.schema.json#/$defs/ContractView'}
         '400': {description: Missing required notes/confirmation or unknown action.}
         '409': {description: Invalid transition, missing draft, consistency mismatch, or concurrent modification.}
+  /api/procurement/contracts/{contractId}/regen-draft:
+    post:
+      operationId: regenerateContractDraft
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+      responses:
+        '202':
+          description: Re-draft request accepted (DRAFT retry or CHANGE_REQUEST revision).
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/ProcurementRunAccepted'}
+        '409': {description: Contract status does not allow re-drafting.}
 components:
   parameters:
     BusinessId:

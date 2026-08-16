@@ -16,6 +16,7 @@ import { useState } from "react";
 
 import { procurementApi } from "./api";
 import type { InvoiceStatus, InvoiceView } from "./types";
+import { useEscape } from "./useEscape";
 
 const STATUS_FILTERS: Array<{ value: InvoiceStatus | ""; label: string }> = [
   { value: "", label: "全部" },
@@ -63,7 +64,11 @@ export function InvoiceCenter() {
   const [forceNotes, setForceNotes] = useState("");
   const [forceConfirmed, setForceConfirmed] = useState(false);
   const [correctTarget, setCorrectTarget] = useState<InvoiceView | null>(null);
-  const [correctForm, setCorrectForm] = useState({ quantity: "", amount_excluding_tax: "", tax_amount: "", total_amount: "", tax_rate: "" });
+  const [correctForm, setCorrectForm] = useState({ quantity: "", unit_price: "", amount_excluding_tax: "", tax_amount: "", total_amount: "", tax_rate: "" });
+
+  useEscape(!!voidTarget, () => setVoidTarget(null), busy?.startsWith("void:") ?? false);
+  useEscape(!!forceTarget, () => setForceTarget(null), busy?.startsWith("force:") ?? false);
+  useEscape(!!correctTarget, () => setCorrectTarget(null), busy?.startsWith("correct:") ?? false);
 
   const invoicesQuery = useQuery({
     queryKey: ["procurement-invoices", status],
@@ -80,7 +85,9 @@ export function InvoiceCenter() {
     queryKey: ["procurement-invoice", selectedId],
     queryFn: () => procurementApi.invoice(selectedId!),
     enabled: !!selectedId,
-    refetchInterval: 5_000,
+    // 终态（MATCHED/RECONCILED/VOIDED）不再轮询；仅在途态（解析/差异挂起）持续刷新
+    refetchInterval: () =>
+      selected?.status === "REGISTERED" || selected?.status === "DIFF_HOLD" ? 5_000 : false,
   });
   const detail = detailQuery.data ?? selected ?? null;
 
@@ -143,13 +150,15 @@ export function InvoiceCenter() {
 
   const correctInvoice = async () => {
     if (!correctTarget) return;
+    const numeric = (value: string) => (value.trim() === "" ? null : Number(value));
     const ok = await run(`correct:${correctTarget.id}`, () =>
       procurementApi.invoiceAction(correctTarget.id, "correct", {
-        quantity: correctForm.quantity || null,
-        amount_excluding_tax: correctForm.amount_excluding_tax || null,
-        tax_amount: correctForm.tax_amount || null,
-        total_amount: correctForm.total_amount || null,
-        tax_rate: correctForm.tax_rate || null,
+        quantity: numeric(correctForm.quantity),
+        unit_price: numeric(correctForm.unit_price),
+        amount_excluding_tax: numeric(correctForm.amount_excluding_tax),
+        tax_amount: numeric(correctForm.tax_amount),
+        total_amount: numeric(correctForm.total_amount),
+        tax_rate: numeric(correctForm.tax_rate),
         notes: "手工改单（人工修正发票字段）",
       }), "已手工改单并重新三单匹配。");
     if (ok) setCorrectTarget(null);
@@ -260,12 +269,23 @@ export function InvoiceCenter() {
         </div>
 
         <div className="proc-invoice-detail">
-          {detail ? (
+          {detailQuery.isError && selectedId ? (
+            <section className="proc-empty-state compact" role="alert">
+              <AlertTriangle size={26} />
+              <h2>发票详情加载失败</h2>
+              <p>{detailQuery.error instanceof Error ? detailQuery.error.message : "未知错误"}</p>
+              <button type="button" className="proc-button" onClick={() => { void detailQuery.refetch(); }}>重试</button>
+            </section>
+          ) : detail ? (
             <>
               <header className="proc-panel-head">
                 <div><Receipt size={15} /><h2>{detail.invoice_no}</h2><span>{detail.supplier_name}</span></div>
                 <span className={`proc-status ${STATUS_LABELS[detail.status].tone}`}><i />{STATUS_LABELS[detail.status].label}</span>
               </header>
+
+              {detailQuery.isPending ? (
+                <span className="proc-muted">列表快照 — 正在加载完整三单对比…</span>
+              ) : null}
 
               <div className="proc-invoice-facts">
                 <span><small>发票代码</small><strong>{detail.invoice_code || "—"}</strong></span>
@@ -348,7 +368,7 @@ export function InvoiceCenter() {
           <section className="proc-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="void-invoice-title">
             <header><div><XCircle size={17} /><h2 id="void-invoice-title">作废发票（退回重开）</h2></div></header>
             <div className="proc-delete-target"><strong>{voidTarget.invoice_no}</strong><span>{voidTarget.supplier_name} · {money(voidTarget.total_amount)}</span></div>
-            <label className="proc-field"><span>作废原因 <b>*</b></span><input value={voidNotes} onChange={(event) => setVoidNotes(event.target.value)} placeholder="例如：发票开具错误，重新开具" /></label>
+            <label className="proc-field"><span>作废原因 <b>*</b></span><input autoFocus value={voidNotes} onChange={(event) => setVoidNotes(event.target.value)} placeholder="例如：发票开具错误，重新开具" /></label>
             {error ? <p className="proc-form-error" role="alert">{error}</p> : null}
             <footer>
               <button className="proc-button secondary" type="button" onClick={() => setVoidTarget(null)} disabled={busy === `void:${voidTarget.id}`}>取消</button>
@@ -365,7 +385,7 @@ export function InvoiceCenter() {
           <section className="proc-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="force-invoice-title">
             <header><div><ShieldCheck size={17} /><h2 id="force-invoice-title">强制通过（allow-once 审批）</h2></div></header>
             <div className="proc-delete-target"><strong>{forceTarget.invoice_no}</strong><span>差异 {forceTarget.match_result?.diffs?.length || 0} 项</span></div>
-            <label className="proc-field"><span>人工备注 <b>*</b></span><input value={forceNotes} onChange={(event) => setForceNotes(event.target.value)} placeholder="强制通过原因（写入审计）" /></label>
+            <label className="proc-field"><span>人工备注 <b>*</b></span><input autoFocus value={forceNotes} onChange={(event) => setForceNotes(event.target.value)} placeholder="强制通过原因（写入审计）" /></label>
             <label className="proc-invoice-confirm"><input type="checkbox" checked={forceConfirmed} onChange={(event) => setForceConfirmed(event.target.checked)} /><span>我已核对差异并确认强制通过（一次性，不能撤销）</span></label>
             {error ? <p className="proc-form-error" role="alert">{error}</p> : null}
             <footer>
@@ -383,10 +403,10 @@ export function InvoiceCenter() {
           <section className="proc-confirm-dialog wide" role="dialog" aria-modal="true" aria-labelledby="correct-invoice-title">
             <header><div><RotateCcw size={17} /><h2 id="correct-invoice-title">手工改单（重新三单匹配）</h2></div></header>
             <div className="proc-supplier-form">
-              {([["quantity", "数量"], ["amount_excluding_tax", "不含税金额"], ["tax_amount", "税额"], ["total_amount", "价税合计"], ["tax_rate", "税率（小数，如 0.13）"]] as const).map(([key, label]) => (
+              {([["quantity", "数量"], ["unit_price", "单价"], ["amount_excluding_tax", "不含税金额"], ["tax_amount", "税额"], ["total_amount", "价税合计"], ["tax_rate", "税率（小数，如 0.13）"]] as const).map(([key, label], index) => (
                 <label className="proc-field" key={key}>
                   <span>{label}</span>
-                  <input type="number" step="any" value={correctForm[key]} onChange={(event) => setCorrectForm((current) => ({ ...current, [key]: event.target.value }))} placeholder={String(correctTarget[key] ?? "")} />
+                  <input autoFocus={index === 0} type="number" step="any" value={correctForm[key]} onChange={(event) => setCorrectForm((current) => ({ ...current, [key]: event.target.value }))} placeholder={String(correctTarget[key] ?? "")} />
                 </label>
               ))}
               {error ? <p className="proc-form-error proc-span-2" role="alert">{error}</p> : null}
