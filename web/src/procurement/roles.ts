@@ -50,3 +50,7 @@ export function visibleViews(role: DemoRole): WorkbenchView[] {
 export function isViewVisible(role: DemoRole, view: WorkbenchView): boolean {
   return VISIBLE_VIEWS[role].includes(view);
 }
+
+export function visibleViewOrDefault(role: DemoRole, view: WorkbenchView): WorkbenchView {
+  return isViewVisible(role, view) ? view : "workbench";
+}

@@ -1,18 +1,16 @@
-"""Unit tests for the Kafka-embedded Python agent service (no real Kafka/MySQL)."""
+"""Kafka transport tests for the canonical Harness-backed Agent service."""
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from concurrent.futures import Future
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from agentharness import agent_service as svc
-
-_ORIG_TOPIC_MAX = svc.AgentService._topic_max_global_seq
-
+from agentharness.contracts import EventEnvelope
 
 CONFIG = {
-    "AGENTHARNESS_DATABASE_URL": "mysql+pymysql://u:p@127.0.0.1:3306/caijiatai_runtime",
     "AGENT_KAFKA_BOOTSTRAP_SERVERS": "127.0.0.1:9092",
     "AGENT_KAFKA_SASL_USERNAME": "",
     "AGENT_KAFKA_SASL_PASSWORD": "",
@@ -20,60 +18,22 @@ CONFIG = {
 }
 
 
-class FakeCursor:
-    def __init__(self, rows=None):
-        self.rows = list(rows or [])
-        self.last = None
-
-    def execute(self, sql, params=None):
-        self.last = (sql, params)
-        return 0
-
-    def fetchone(self):
-        return self.rows.pop(0) if self.rows else None
-
-    def fetchall(self):
-        return []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
+@pytest.fixture
+def service(tmp_path):  # type: ignore[no-untyped-def]
+    runtime = svc.AgentService({**CONFIG, "AGENTHARNESS_DATA_DIR": str(tmp_path)})
+    runtime.producer = MagicMock()
+    runtime.consumer = MagicMock()
+    runtime.rpc.producer = MagicMock()
+    runtime.rpc.consumer = MagicMock()
+    yield runtime
+    runtime.close()
 
 
-class FakeConn:
-    def __init__(self, rows=None):
-        self._rows = rows
-
-    def cursor(self, *args, **kwargs):
-        return FakeCursor(self._rows)
-
-    def commit(self):
-        return None
-
-    def close(self):
-        return None
-
-
-@pytest.fixture(autouse=True)
-def fake_db(monkeypatch):
-    monkeypatch.setattr(svc.pymysql, "connect", lambda **kw: FakeConn())
-    # unit tests must not touch a real Kafka broker
-    monkeypatch.setattr(svc.AgentService, "_topic_max_global_seq", lambda self: 0)
-    return FakeConn()
-
-
-def make_service(monkeypatch, fake_db):
-    service = svc.AgentService(dict(CONFIG))
-    service.producer = MagicMock()
-    service.consumer = MagicMock()
-    service.rpc.producer = MagicMock()
-    service.rpc.consumer = MagicMock()
-    return service
-
-
-def envelope(operation_id="op-" + "a" * 30, operation_type="analyze", payload=None):
+def envelope(
+    operation_id: str = "11111111-1111-1111-1111-111111111111",
+    operation_type: str = "analyze",
+    payload: dict | None = None,
+) -> dict:
     payload = payload or {
         "task_id": "a" * 32,
         "business_id": "a" * 32,
@@ -83,682 +43,206 @@ def envelope(operation_id="op-" + "a" * 30, operation_type="analyze", payload=No
         "file_ids": [],
         "input_sha256": "d" * 64,
     }
-    payload_sha = svc._sha256(payload)
     value = {
         "operation_id": operation_id,
         "operation_type": operation_type,
         "schema_version": 1,
         "message_type": "ai_task.command" if operation_type == "analyze" else "agent.command",
-        "message_id": "e" * 32,
         "aggregate_id": "a" * 32,
         "generation": 1,
         "expected_task_version": 0,
-        "payload_sha256": payload_sha,
+        "payload_sha256": svc._sha256(payload),
         "payload": payload,
     }
     if operation_type == "analyze":
-        value.update({
-            "ai_task_id": "b" * 32,
-            "business_id": "a" * 32,
-            "trace_id": "c" * 32,
-            "task_type": "QUOTE_ANALYSIS",
-            "file_ids": [],
-        })
+        value.update(
+            {
+                "ai_task_id": "b" * 32,
+                "business_id": "a" * 32,
+                "trace_id": "c" * 32,
+                "task_type": "QUOTE_ANALYSIS",
+                "file_ids": [],
+            }
+        )
     value["signature"] = svc._sign_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], value)
     return value
 
 
-def test_hmac_roundtrip():
-    key = CONFIG["AGENT_INTERNAL_HMAC_KEY"]
-    envelope = {"kind": "command", "operation_id": "op-1", "payload": {"x": 1}}
-    envelope["signature"] = svc._sign_envelope(key, envelope)
-    assert svc._verify_envelope(key, envelope)
-    envelope["payload"]["x"] = 2
-    assert not svc._verify_envelope(key, envelope)
+def test_hmac_covers_the_complete_envelope() -> None:
+    value = envelope()
+    assert svc._verify_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], value)
+    value["payload"]["task_id"] = "f" * 32
+    assert not svc._verify_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], value)
 
 
-def test_fake_requirement_extracts_specs():
-    req = svc._fake_requirement("采购 50000 个快递袋，宽250mm 长350mm 厚60um，PE 白色，交期7天，预算0.5元")
-    assert req["schema_version"] == 1
-    assert req["quantity"] == 50000
-    assert req["specifications"]["material"] == "PE"
-    assert req["specifications"]["width_mm"] == "250"
-    assert req["constraints"]["max_lead_days"] == 7
-    assert req["constraints"]["max_landed_unit_cost"] == "0.5"
-
-
-def test_analyze_publishes_result_and_events(monkeypatch, fake_db):
-    service = make_service(monkeypatch, fake_db)
-    service.rpc.call = lambda kind, payload: {"quotes": []}
-    published = []
-    service._publish_result = lambda *a, **k: published.append(a)
+def test_command_delegates_to_the_canonical_harness_processor(service) -> None:  # type: ignore[no-untyped-def]
+    service.commands.execute = AsyncMock(
+        return_value={
+            "operation_id": envelope()["operation_id"],
+            "status": "completed",
+            "result": {"run_id": "r" * 32, "status": "waiting_approval"},
+            "error": None,
+        }
+    )
     service.handle_command(envelope())
-    assert len(published) == 1
-    status, result = published[0][2], published[0][3]
-    assert status == "completed"
-    assert result["run_id"].startswith("0" * 0)  # any 32-hex
-    assert len(result["run_id"]) == 32
-    assert result["structured_result"]["quote_count"] == 0
-    assert result["provider"] == "procurement_fake"
-    # Six observable steps emit RUNNING/SUCCEEDED, plus run lifecycle events.
-    sent = [call.args[0] for call in service.producer.send.call_args_list if call.args[0] == svc.EVENTS_TOPIC]
-    assert len(sent) == 14
+    service.commands.execute.assert_awaited_once()
+    published = service.producer.send.call_args
+    assert published.args[0] == svc.RESULTS_TOPIC
+    assert published.kwargs["value"]["status"] == "completed"
+    assert published.kwargs["value"]["result"]["status"] == "waiting_approval"
 
 
-def test_idempotent_replay_skips_execution(monkeypatch, fake_db):
-    service = make_service(monkeypatch, fake_db)
-    published = []
-    service._publish_result = lambda *a, **k: published.append(a)
-    command = envelope()
-    existing = {
-        "operation_id": command["operation_id"],
-        "payload_sha256": command["payload_sha256"],
-        "status": "completed",
-        "result": '{"run_id": "%s"}' % ("a" * 32),
-        "error": None,
-        "result_published_at": None,
-    }
-    service._load_operation = lambda operation_id: existing
-    executed = []
-    service._execute = lambda *a, **k: executed.append(a) or ({}, "completed", None)
-    service.handle_command(command)
-    assert executed == []
-    assert len(published) == 1
-    assert published[0][2] == "completed"
+def test_invalid_signature_never_reaches_the_runtime(service) -> None:  # type: ignore[no-untyped-def]
+    service.commands.execute = AsyncMock()
+    value = envelope()
+    value["signature"] = "0" * 64
+    service.handle_command(value)
+    service.commands.execute.assert_not_awaited()
+    service.producer.send.assert_not_called()
 
 
-def test_payload_conflict_returns_409(monkeypatch, fake_db):
-    service = make_service(monkeypatch, fake_db)
-    published = []
-    service._publish_result = lambda *a, **k: published.append(a)
-    service._load_operation = lambda operation_id: {
-        "operation_id": envelope()["operation_id"],
-        "payload_sha256": "different-hash",
-        "status": "accepted",
-        "result": None,
-        "error": None,
-        "result_published_at": None,
-    }
-    service.handle_command(envelope())
-    assert len(published) == 1
-    assert published[0][2] == "failed"
-    assert published[0][4] == "operation_payload_conflict"
+def test_runtime_failure_is_published_for_java_retry_policy(service) -> None:  # type: ignore[no-untyped-def]
+    service.commands.execute = AsyncMock(side_effect=TimeoutError("RPC timed out"))
+    service.handle_command(envelope(operation_type="import_quote"))
+    message = service.producer.send.call_args.kwargs["value"]
+    assert message["status"] == "failed"
+    assert message["error_category"] == "TRANSPORT"
+    assert message["retryable"] is True
 
 
-def test_rpc_client_retries_once_on_timeout():
+@pytest.mark.asyncio
+async def test_java_context_and_artifact_are_loaded_through_kafka_rpc(service) -> None:  # type: ignore[no-untyped-def]
+    service.rpc.call = MagicMock(
+        side_effect=[{"task_version": 3}, {"base64": "aGVsbG8="}]
+    )
+    context = await service._fetch_context_rpc(
+        f"/internal/v1/tasks/{'a' * 32}/context"
+    )
+    artifact = await service._fetch_artifact_rpc(
+        f"/internal/v1/artifacts/jb{'b' * 32}/raw"
+    )
+    assert context == {"task_version": 3}
+    assert artifact == b"hello"
+    assert service.rpc.call.call_args_list[0].args[0] == "get_task_context"
+    assert service.rpc.call.call_args_list[1].args[0] == "get_artifact"
+
+
+def test_harness_events_are_projected_to_kafka(service) -> None:  # type: ignore[no-untyped-def]
+    run_id = "r" * 32
+    session_id = service.harness.storage.create_session(title="采购")
+    service.harness.storage.create_run(
+        run_id=run_id,
+        session_id=session_id,
+        root_run_id=run_id,
+        metadata={"purchase_request_id": "a" * 32},
+    )
+    service._global_seq = 10
+    service._publish_harness_event(
+        EventEnvelope(
+            session_id=session_id,
+            root_run_id=run_id,
+            run_id=run_id,
+            type="run_status",
+            payload={"status": "require_human"},
+        )
+    )
+    message = service.producer.send.call_args.kwargs["value"]
+    assert message["task_id"] == "a" * 32
+    assert message["run_id"] == run_id
+    assert message["payload"]["status"] == "require_human"
+    assert message["global_seq"] == 11
+
+
+def test_rpc_client_retries_once() -> None:
     client = svc.RpcClient(dict(CONFIG), CONFIG["AGENT_INTERNAL_HMAC_KEY"])
     client.producer = MagicMock()
     client.consumer = MagicMock()
     with pytest.raises((TimeoutError, RuntimeError)):
-        client.call("get_artifact", {"artifact_id": "x"}, timeout=0.05)
-    # two attempts => two requests published
+        client.call("get_artifact", {"artifact_id": "x"}, timeout=0.01)
     assert client.producer.send.call_count == 2
 
 
-def test_heartbeat_message_shape():
-    service = svc.AgentService(dict(CONFIG))
-    service._closed = True  # stop loop
-    service.producer = MagicMock()
-    service._next_global_seq = lambda: 1
-    service._emit_heartbeat_for_test = None
-    # directly exercise the send used by the heartbeat loop
-    payload = {"agent": "python-agent", "service": "procurement_agent"}
-    payload_sha = svc._sha256(payload)
-    message = {
-        "type": "heartbeat.ping",
-        "task_id": "",
-        "run_id": "",
-        "global_seq": service._next_global_seq(),
-        "payload": payload,
-        "occurred_at": "2026-08-11T00:00:00Z",
-        "payload_sha256": payload_sha,
+def test_rpc_response_requires_matching_signature_and_request_hash() -> None:
+    client = svc.RpcClient(dict(CONFIG), CONFIG["AGENT_INTERNAL_HMAC_KEY"])
+    future: Future = Future()
+    client._futures["corr"] = (future, "request-sha")
+    value = {
+        "correlation_id": "corr",
+        "status": "ok",
+        "result": {"k": "v"},
+        "request_sha256": "request-sha",
     }
-    message["signature"] = svc._sign_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], message)
-    assert message["type"] == "heartbeat.ping"
-    assert message["global_seq"] == 1
+    value["signature"] = svc._sign_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], value)
+    client.consumer = [type("Record", (), {"value": value})()]
+    client._loop()
+    assert future.result()["result"] == {"k": "v"}
 
 
-def test_coerce_requirement_normalizes_llm_output():
-    data = {
-        "schema_version": 1,
-        "title": "采购",
-        "category": "ecommerce_packaging",
-        "item_name": "快递袋",
-        "quantity": "50000",
-        "unit": "piece",
-        "specifications": {"width_mm": "250", "length_mm": "350", "thickness_um": "60", "material": "PE", "color": "白色", "print_colors": 1},
-        "constraints": {"base_currency": "cny", "fx_rates": {"CNY": "1"}, "max_lead_days": "7", "invoice_required": True, "size_tolerance_mm": "2", "thickness_tolerance_um": "3", "max_landed_unit_cost": "0.5"},
+def test_sasl_configuration_is_applied_to_command_and_rpc_clients(tmp_path) -> None:
+    config = {
+        **CONFIG,
+        "AGENT_KAFKA_SASL_USERNAME": "python-agent",
+        "AGENT_KAFKA_SASL_PASSWORD": "secret",
+        "AGENTHARNESS_DATA_DIR": str(tmp_path),
     }
-    req = svc._coerce_requirement(data, "x")
-    assert req["quantity"] == 50000
-    assert req["constraints"]["base_currency"] == "CNY"
-    assert req["constraints"]["max_lead_days"] == 7
-    assert req["specifications"]["material"] == "PE"
+    service = svc.AgentService(config)
+    try:
+        assert service._producer_config()["security_protocol"] == "SASL_PLAINTEXT"
+        assert service._consumer_config()["sasl_plain_username"] == "python-agent"
+        assert service.rpc._sasl()["sasl_mechanism"] == "SCRAM-SHA-256"
+    finally:
+        service.close()
 
 
-def test_coerce_requirement_normalizes_print_colors():
-    base = {
-        "schema_version": 1,
-        "title": "采购",
-        "category": "ecommerce_packaging",
-        "item_name": "五层瓦楞纸箱",
-        "quantity": 5000,
-        "unit": "piece",
-        "specifications": {"width_mm": 400, "length_mm": 300, "height_mm": 250, "material": "瓦楞纸", "color": "牛皮色", "print_colors": "单色印刷"},
-        "constraints": {"max_lead_days": 20},
-    }
-    assert svc._coerce_requirement({**base, "specifications": {**base["specifications"], "print_colors": "单色印刷"}}, "x")["specifications"]["print_colors"] == 1
-    assert svc._coerce_requirement({**base, "specifications": {**base["specifications"], "print_colors": "2色"}}, "x")["specifications"]["print_colors"] == 2
-    assert svc._coerce_requirement({**base, "specifications": {**base["specifications"], "print_colors": "3"}}, "x")["specifications"]["print_colors"] == 3
-    import pytest as _pytest
-    with _pytest.raises(ValueError):
-        svc._coerce_requirement({**base, "specifications": {**base["specifications"], "print_colors": "many"}}, "x")
+def test_failure_categories_remain_explicit() -> None:
+    assert svc._failure_details(ValueError("bad input"))["error_category"] == "VALIDATION"
+    assert svc._failure_details(TimeoutError("timed out"))["retryable"] is True
+    assert svc._failure_details(RuntimeError("provider unavailable"))["error_category"] == "PROVIDER"
 
 
-def test_coerce_requirement_keeps_carton_height():
-    base = {
-        "schema_version": 1,
-        "title": "采购",
-        "category": "ecommerce_packaging",
-        "item_name": "五层瓦楞纸箱",
-        "quantity": 5000,
-        "unit": "piece",
-        "specifications": {"width_mm": 400, "length_mm": 300, "height_mm": 250, "material": "瓦楞纸", "color": "牛皮色", "print_colors": 1},
-        "constraints": {"max_lead_days": 20},
-    }
-    req = svc._coerce_requirement(base, "x")
-    assert req["specifications"]["height_mm"] == 250
+def test_start_consumes_commands_and_closes_runtime(monkeypatch, tmp_path) -> None:
+    produced: list[tuple[str, str | None, dict | None]] = []
 
-
-def test_coerce_requirement_rejects_bad_quantity():
-    import pytest as _pytest
-    with _pytest.raises(ValueError):
-        svc._coerce_requirement({"item_name": "x", "quantity": 0}, "x")
-
-
-def test_llm_requirement_falls_back_to_fake_without_key(monkeypatch):
-    config = dict(CONFIG)
-    config["AGENTHARNESS_PROCUREMENT_PROVIDER"] = "openai"
-    config.pop("OPENAI_API_KEY", None)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    req = svc._llm_requirement("采购快递袋 50000 个，宽250mm", config)
-    assert req["quantity"] == 50000
-
-
-def test_llm_requirement_fake_provider_does_not_call_model():
-    req = svc._llm_requirement("采购快递袋 3000 个", dict(CONFIG))
-    assert req["quantity"] == 3000
-
-
-def test_execute_exception_publishes_failed_result(monkeypatch, fake_db):
-    service = make_service(monkeypatch, fake_db)
-    published = []
-    service._publish_result = lambda *a, **k: published.append(a)
-    service._execute = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
-    service.handle_command(envelope(operation_type="import_quote"))
-    assert len(published) == 1
-    assert published[0][2] == "failed"
-    assert "boom" in published[0][4]
-
-
-def test_accepted_without_result_is_reexecuted(monkeypatch, fake_db):
-    service = make_service(monkeypatch, fake_db)
-    published = []
-    service._publish_result = lambda *a, **k: published.append(a)
-    command = envelope()
-    existing = {
-        "operation_id": command["operation_id"],
-        "payload_sha256": command["payload_sha256"],
-        "status": "accepted",
-        "result": None,
-        "error": None,
-        "result_published_at": None,
-    }
-    service._load_operation = lambda operation_id: existing
-    executed = []
-    service._execute = lambda *a, **k: executed.append(a) or ({"run_id": "r" * 32}, "completed", None)
-    service.handle_command(command)
-    assert len(executed) == 1
-    assert published[0][2] == "completed"
-
-
-class FakeRowsConn:
-    def __init__(self, rows=None):
-        self._rows = rows or []
-        self._index = 0
-
-    def cursor(self, *args, **kwargs):
-        return FakeCursor(self._rows)
-
-    def commit(self):
-        return None
-
-    def close(self):
-        return None
-
-
-def test_database_url_parse():
-    cfg = svc._parse_database_url("mysql+pymysql://u:p@dbhost:3307/dbname?x=1")
-    assert cfg["host"] == "dbhost"
-    assert cfg["port"] == 3307
-    assert cfg["user"] == "u"
-    assert cfg["password"] == "p"
-    assert cfg["database"] == "dbname"
-
-
-def test_next_global_seq_uses_persisted_counter(monkeypatch):
-    service = svc.AgentService(dict(CONFIG))
-    counter = {"value": 5}
-    class RowConn:
-        def cursor(self, *a, **k):
-            return FakeCursor([(counter["value"] + 1,)])
-        def commit(self):
-            counter["value"] += 1
-        def close(self):
-            return None
-    monkeypatch.setattr(service, "_connect", lambda: RowConn())
-    assert service._next_global_seq() == 6
-    assert service._next_global_seq() == 7
-
-
-def test_persist_result_updates_row(monkeypatch):
-    service = svc.AgentService(dict(CONFIG))
-    class CaptureConn:
-        def cursor(self, *a, **k):
-            return FakeCursor()
-        def commit(self):
-            return None
-        def close(self):
-            return None
-    monkeypatch.setattr(service, "_connect", lambda: CaptureConn())
-    service._persist_result({"operation_id": "op-1"}, "completed", {"run_id": "r"}, None, True)
-    # no exception = update path executed
-
-
-def test_import_quote_with_mocked_rpc_and_parse(monkeypatch, fake_db):
-    service = make_service(monkeypatch, fake_db)
-    service.rpc.call = lambda kind, payload: {
-        "base64": "aGVsbG8=", "filename": "q.xlsx", "content_type": "x", "sha256": "s",
-    }
-    monkeypatch.setattr("agentharness.procurement.parsing.parse_quote",
-                        lambda filename, data: {"fields": {"supplier_name": {"value": "S"}}})
-    monkeypatch.setattr("agentharness.procurement.parsing.fields_requiring_review",
-                        lambda extracted: [])
-    quote = service._import_quote({"artifact_id": "jb1", "filename": "q.xlsx"}, "task", "run" * 16)
-    assert quote["status"] == "ready"
-    assert quote["parser_version"] == "packaging-quote-v3"
-
-
-def test_execute_approve_and_reopen_paths(monkeypatch, fake_db):
-    service = make_service(monkeypatch, fake_db)
-    envelope_data = {
-        "operation_id": "op-" + "a" * 30,
-        "operation_type": "approve_decision",
-        "aggregate_id": "t" * 32,
-        "generation": 1,
-        "expected_task_version": 0,
-        "payload_sha256": "x" * 64,
-        "payload": {
-            "pending_decision_id": "p" * 32,
-            "run_id": "r" * 32,
-            "tool_name": "procurement_approve_supplier",
-            "task_version": 1,
-            "snapshot_id": "s" * 32,
-            "input_sha256": "i" * 64,
-            "business_decision": "approved",
-            "quote_id": "q" * 32,
-            "note_hash": "n" * 64,
-        },
-        "signature": "sig",
-    }
-    result, status, error = service._execute("op-" + "a" * 30, "approve_decision", envelope_data, envelope_data["payload"], "x" * 64)
-    assert status == "completed"
-    assert result["approval"]["decision"] == "formal_java_confirmation"
-
-    result2, status2, _ = service._execute("op-" + "b" * 30, "reopen_task", envelope_data, {"source_task_id": "t"}, "y" * 64)
-    assert status2 == "completed"
-    assert len(result2["run_id"]) == 32
-
-
-def test_start_and_close_with_fake_consumer(monkeypatch, fake_db):
-    service = svc.AgentService(dict(CONFIG))
-    produced = []
     class FakeProducer:
-        def send(self, topic, key=None, value=None):
+        def send(self, topic, key=None, value=None):  # type: ignore[no-untyped-def]
             produced.append((topic, key, value))
-            return None
-        def flush(self):
-            return None
-        def close(self):
-            return None
+
+        def flush(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
     class FakeConsumer:
-        def __iter__(self):
-            yield type("R", (), {"value": envelope(), "key": "op"})()
-        def close(self):
-            return None
-    monkeypatch.setattr(svc, "KafkaProducer", lambda **kw: FakeProducer())
-    monkeypatch.setattr(svc, "KafkaConsumer", lambda topic, **kw: FakeConsumer())
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            yield type("Record", (), {"value": envelope(), "key": "op"})()
+
+        def close(self) -> None:
+            return
+
+    service = svc.AgentService({**CONFIG, "AGENTHARNESS_DATA_DIR": str(tmp_path)})
+    service.commands.execute = AsyncMock(
+        return_value={"status": "completed", "result": {"run_id": "r" * 32}}
+    )
+    monkeypatch.setattr(svc, "KafkaProducer", lambda **_kwargs: FakeProducer())
+    monkeypatch.setattr(svc, "KafkaConsumer", lambda *_args, **_kwargs: FakeConsumer())
+    monkeypatch.setattr(service.rpc, "start", lambda: None)
     monkeypatch.setattr(service, "start_health_server", lambda: None)
     monkeypatch.setattr(service, "_heartbeat_loop", lambda: None)
-    monkeypatch.setattr(service.rpc, "start", lambda: None)
-    monkeypatch.setattr(service, "_load_operation", lambda operation_id: None)
-    monkeypatch.setattr(service, "_persist_result", lambda *a, **k: None)
-    monkeypatch.setattr(service, "_publish_result", lambda *a, **k: None)
+    monkeypatch.setattr(service, "_topic_max_global_seq", lambda: 0)
     service.start()
-    service.close()
+    assert any(topic == svc.RESULTS_TOPIC for topic, _key, _value in produced)
+    assert service._closed is True
 
 
-def test_web_main_imports():
-    import agentharness.web_main  # noqa: F401
-
-
-def test_rpc_loop_resolves_future(monkeypatch):
-    from concurrent.futures import Future
-    client = svc.RpcClient(dict(CONFIG), CONFIG["AGENT_INTERNAL_HMAC_KEY"])
-    future = Future()
-    client._futures["corr-1"] = (future, "request-sha")
-    record = type("R", (), {"value": {"correlation_id": "corr-1", "status": "ok", "result": {"k": "v"}}})()
-    record.value["request_sha256"] = "request-sha"
-    record.value["signature"] = svc._sign_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], record.value)
-    client.consumer = [record]
-    client._loop()
-    assert future.done()
-    assert future.result()["status"] == "ok"
-
-
-def test_envelope_signature_covers_result_body():
-    value = {"operation_id": "op", "status": "completed", "result": {"run_id": "a" * 32}}
-    value["signature"] = svc._sign_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], value)
-    assert svc._verify_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], value)
-    value["result"]["run_id"] = "b" * 32
-    assert not svc._verify_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], value)
-
-
-def test_emit_publishes_and_persists(monkeypatch, fake_db):
-    service = make_service(monkeypatch, fake_db)
-    service._next_global_seq = lambda: 7
-    service._emit("tool_call_start", "t" * 32, "r" * 32, {"tool": "x"})
-    sent = [call for call in service.producer.send.call_args_list if call.args[0] == svc.EVENTS_TOPIC]
-    assert len(sent) == 1
-    message = sent[0].kwargs["value"]
-    assert message["global_seq"] == 7
-    assert message["type"] == "tool_call_start"
-    assert message["signature"]
-
-
-def test_publish_result_builds_signed_envelope(monkeypatch, fake_db):
-    service = make_service(monkeypatch, fake_db)
-    service._publish_result("op-1", {"aggregate_id": "a" * 32, "generation": 1,
-                                     "expected_task_version": 0, "payload_sha256": "p" * 64},
-                            "completed", {"run_id": "r" * 32}, None)
-    sent = [call for call in service.producer.send.call_args_list if call.args[0] == svc.RESULTS_TOPIC]
-    assert len(sent) == 1
-    message = sent[0].kwargs["value"]
-    assert message["status"] == "completed"
-    assert message["signature"]
-
-
-def test_failure_details_distinguish_validation_provider_and_transport():
-    from agentharness.procurement.parsing import QuoteParseError
-    from agentharness.procurement.requirements import RequirementModelError
-
-    validation = svc._failure_details(QuoteParseError("报价文件为空"))
-    provider = svc._failure_details(RequirementModelError("采购模型调用失败"))
-    transport = svc._failure_details(TimeoutError("RPC timed out"))
-
-    assert validation == {
-        "error_category": "VALIDATION",
-        "error_code": "QUOTE_PARSE_ERROR",
-        "error_message": "报价文件为空",
-        "retryable": False,
-    }
-    assert provider["error_category"] == "PROVIDER"
-    assert provider["retryable"] is True
-    assert transport["error_category"] == "TRANSPORT"
-    assert transport["retryable"] is True
-
-
-def test_publish_failed_result_includes_structured_recovery_fields(monkeypatch, fake_db):
-    service = make_service(monkeypatch, fake_db)
-    failure = svc._failure_details(ValueError("模型返回数量无效"))
-    service._publish_result(
-        "op-failed",
-        {
-            "aggregate_id": "a" * 32,
-            "generation": 1,
-            "expected_task_version": 0,
-            "payload_sha256": "p" * 64,
-        },
-        "failed",
-        failure,
-        "VALUE_ERROR: 模型返回数量无效",
-    )
-
-    message = service.producer.send.call_args.kwargs["value"]
-    assert message["error_category"] == "VALIDATION"
-    assert message["error_code"] == "VALUE_ERROR"
-    assert message["error_message"] == "模型返回数量无效"
-    assert message["retryable"] is False
-    assert svc._verify_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], message)
-
-
-def test_topic_max_global_seq_scans_events(monkeypatch, fake_db):
-    class FakeBootConsumer:
-        def __init__(self, *a, **k):
-            pass
-        def __iter__(self):
-            yield type("R", (), {"value": {"global_seq": 42}})()
-            yield type("R", (), {"value": {"global_seq": 7}})()
-        def close(self):
-            return None
-    monkeypatch.setattr(svc, "KafkaConsumer", FakeBootConsumer)
-    monkeypatch.setattr(svc.AgentService, "_topic_max_global_seq", _ORIG_TOPIC_MAX)
-    service = svc.AgentService(dict(CONFIG))
-    assert service._topic_max_global_seq() == 42
-
-
-def test_context_cache_degrades_without_redis(monkeypatch):
-    cache = svc.AgentContextCache({"REDIS_URL": ""})
-    assert cache.client is None
-    cache.put_run("r" * 32, {"status": "ok"})
-    assert cache.get_run("r" * 32) is None
-
-
-def test_health_server_serves_health(monkeypatch, fake_db):
-    service = make_service(monkeypatch, fake_db)
-    service.config = dict(service.config, AGENT_PORT="18743")
-    import urllib.request
-    service.start_health_server()
-    with urllib.request.urlopen("http://127.0.0.1:18743/api/health", timeout=3) as resp:
-        assert resp.status == 200
-        assert b"procurement_agent" in resp.read()
-
-
-def test_config_builders(monkeypatch, fake_db):
-    service = make_service(monkeypatch, fake_db)
-    producer_cfg = service._producer_config()
-    assert producer_cfg["acks"] == "all"
-    consumer_cfg = service._consumer_config()
-    assert consumer_cfg["group_id"] == "python-agent"
-    assert service._bootstrap() == "127.0.0.1:9092"
-
-
-def test_ensure_schema_and_max_seq(monkeypatch):
-    service = svc.AgentService(dict(CONFIG))
-    rows = [(0,)]
-    monkeypatch.setattr(service, "_connect", lambda: FakeRowsConn(rows))
-    service._ensure_schema()
-    assert service._max_global_seq() == 0
-
-
-def test_heartbeat_loop_sends_one_message(monkeypatch, fake_db):
-    import threading as _threading
-    service = make_service(monkeypatch, fake_db)
-    sent = _threading.Event()
-    def send(topic, key=None, value=None):
-        if topic == svc.EVENTS_TOPIC and value.get("type") == "heartbeat.ping":
-            sent.set()
-        return None
-    service.producer.send = send
-    service._next_global_seq = lambda: 1
-    monkeypatch.setattr("time.sleep", lambda *a: None)
-    thread = _threading.Thread(target=service._heartbeat_loop, daemon=True)
-    thread.start()
-    assert sent.wait(5)
-    service._closed = True
-    thread.join(timeout=3)
-    assert not thread.is_alive()
-
-
-def test_context_cache_redis_roundtrip(monkeypatch):
-    class FakeRedisClient:
-        def __init__(self, *a, **k):
-            self._data = {}
-        def ping(self):
-            return True
-        def setex(self, key, ttl, value):
-            self._data[key] = value
-            return True
-        def get(self, key):
-            return self._data.get(key)
-    fake = FakeRedisClient()
-    monkeypatch.setattr("redis.Redis.from_url", staticmethod(lambda *a, **k: fake))
-    cache = svc.AgentContextCache({"REDIS_URL": "redis://localhost:6379/0"})
-    assert cache.client is not None
-    cache.put_run("r" * 32, {"status": "ok"})
-    assert cache.get_run("r" * 32) == {"status": "ok"}
-
-
-def test_execute_start_conversation_path(monkeypatch, fake_db):
-    service = make_service(monkeypatch, fake_db)
-    result, status, _ = service._execute("op-s", "start_conversation",
-        {"operation_id": "op-s", "operation_type": "start_conversation", "aggregate_id": "t" * 32,
-         "generation": 1, "expected_task_version": 0, "payload_sha256": "x" * 64,
-         "payload": {"message": "采购 3000 个快递袋，宽250mm 长350mm 厚60um，PE 白色，交期7天"}},
-        {"message": "采购 3000 个快递袋，宽250mm 长350mm 厚60um，PE 白色，交期7天"}, "x" * 64)
-    assert status == "completed"
-    assert result["requirement"]["quantity"] == 3000
-    assert len(result["session_id"]) == 32
-
-
-def test_import_quote_failure_publishes_failed(monkeypatch, fake_db):
-    service = make_service(monkeypatch, fake_db)
-    def boom(kind, payload):
-        raise RuntimeError("artifact unavailable")
-    service.rpc.call = boom
-    published = []
-    service._publish_result = lambda *a, **k: published.append(a)
-    service.handle_command(envelope(operation_type="import_quote", payload={"artifact_id": "jb1", "filename": "q.xlsx"}))
-    assert published
-    assert published[0][2] == "failed"
-    assert "artifact unavailable" in published[0][4]
-
-
-def test_persist_result_published_false_branch(monkeypatch, fake_db):
-    service = make_service(monkeypatch, fake_db)
-    service._persist_result({"operation_id": "op-1"}, "accepted", None, None, published=False)
-    service._persist_result({"operation_id": "op-1"}, "failed", None, "err", published=True)
-
-
-def test_llm_fallback_on_provider_error(monkeypatch):
-    import agentharness.agent_service as m
-    class FakeOpenAI:
-        def __init__(self, *a, **k):
-            pass
-        class chat:
-            class completions:
-                @staticmethod
-                def create(*a, **k):
-                    raise RuntimeError("provider down")
-    monkeypatch.setattr(m, "OpenAI", FakeOpenAI, raising=False)
-    config = dict(CONFIG)
-    config["AGENTHARNESS_PROCUREMENT_PROVIDER"] = "openai"
-    config["OPENAI_API_KEY"] = "k"
-    config["OPENAI_MODEL"] = "m"
-    config["OPENAI_BASE_URL"] = "http://x"
-    req = m._llm_requirement("采购快递袋 3000 个", config)
-    assert req["quantity"] == 3000
-
-
-def test_sasl_config_branches(monkeypatch, fake_db):
-    cfg = dict(CONFIG)
-    cfg["AGENT_KAFKA_SASL_USERNAME"] = "python-agent"
-    cfg["AGENT_KAFKA_SASL_PASSWORD"] = "secret"
-    service = svc.AgentService(cfg)
-    assert service._producer_config()["security_protocol"] == "SASL_PLAINTEXT"
-    assert service._consumer_config()["sasl_plain_username"] == "python-agent"
-    assert service._producer_sasl_only()["sasl_mechanism"] == "SCRAM-SHA-256"
-    client = svc.RpcClient(cfg, cfg["AGENT_INTERNAL_HMAC_KEY"])
-    assert client._sasl()["security_protocol"] == "SASL_PLAINTEXT"
-    client.close()
-
-
-def test_health_server_404(monkeypatch, fake_db):
-    import urllib.error
-    import urllib.request
-    service = make_service(monkeypatch, fake_db)
-    service.config = dict(service.config, AGENT_PORT="18744")
-    service.start_health_server()
-    try:
-        urllib.request.urlopen("http://127.0.0.1:18744/other", timeout=3)
-        raise AssertionError("expected 404")
-    except urllib.error.HTTPError as error:
-        assert error.code == 404
-
-
-def test_main_runs_with_stubbed_service(monkeypatch, fake_db):
-    class StubService:
-        def __init__(self):
-            pass
-        def start(self):
-            raise SystemExit(0)
-    monkeypatch.setattr(svc, "AgentService", StubService)
-    monkeypatch.setattr("logging.basicConfig", lambda **kw: None)
-    try:
-        svc.main()
-    except SystemExit:
-        pass
-
-
-def test_next_global_seq_fallback_without_row(monkeypatch, fake_db):
-    service = svc.AgentService(dict(CONFIG))
-    class EmptyConn:
-        def cursor(self, *a, **k):
-            return FakeCursor([])
-        def commit(self):
-            return None
-        def close(self):
-            return None
-    monkeypatch.setattr(service, "_connect", lambda: EmptyConn())
-    assert service._next_global_seq() >= 1
-
-
-
-def test_main_loads_project_env_before_start(monkeypatch, fake_db):
-    """README local dev runs `python -m agentharness.agent_service`; .env must be loaded."""
-    calls = []
+def test_main_loads_project_environment_before_start(monkeypatch) -> None:
+    calls: list[str] = []
 
     class StubService:
-        def __init__(self):
-            pass
+        def start(self) -> None:
+            calls.append("started")
 
-        def start(self):
-            raise SystemExit(0)
-
-    monkeypatch.setattr(svc, "AgentService", StubService)
-    monkeypatch.setattr("logging.basicConfig", lambda **kw: None)
     monkeypatch.setattr(svc, "load_project_env", lambda: calls.append("loaded"))
-    try:
-        svc.main()
-    except SystemExit:
-        pass
-    assert calls == ["loaded"]
-
-
-def test_missing_database_url_raises_actionable_error(monkeypatch):
-    import pytest
-
-    config = dict(CONFIG)
-    config["AGENTHARNESS_DATABASE_URL"] = ""
-    with pytest.raises(ValueError, match="AGENTHARNESS_DATABASE_URL 未配置"):
-        svc.AgentService(config)
+    monkeypatch.setattr(svc, "AgentService", StubService)
+    svc.main()
+    assert calls == ["loaded", "started"]

@@ -34,7 +34,12 @@ class RuntimeQueryServiceTest {
                 RuntimeEvent.create(11, null, runId, "ai_task.step", Map.of(
                         "step", "QUOTE_PARSE", "summary", "解析报价"),
                         Instant.parse("2026-08-13T00:00:01Z")),
-                RuntimeEvent.create(12, null, runId, "run_completed", Map.of(),
+                RuntimeEvent.create(12, null, runId, "run_completed", Map.of(
+                        "usage", Map.of(
+                                "input_tokens", 100,
+                                "output_tokens", 23,
+                                "total_tokens", 123,
+                                "model_turns", 2)),
                         Instant.parse("2026-08-13T00:00:02Z"))));
         when(tasks.findFirstByAnalysisRunId(runId)).thenReturn(Optional.empty());
         when(decisions.findByRunIdOrderByCreatedAtAsc(runId)).thenReturn(List.of());
@@ -48,6 +53,9 @@ class RuntimeQueryServiceTest {
         @SuppressWarnings("unchecked")
         var conclusion = (Map<String, Object>) report.get("conclusion");
         assertThat(conclusion).containsEntry("status", "unverified");
+        @SuppressWarnings("unchecked")
+        var usage = (Map<String, Object>) report.get("usage");
+        assertThat(usage).containsEntry("total_tokens", 123).containsEntry("model_turns", 2);
         assertThat((List<?>) report.get("events")).hasSize(3);
         assertThat(String.valueOf(report.get("evidence_sha256"))).matches("[0-9a-f]{64}");
     }
@@ -67,5 +75,41 @@ class RuntimeQueryServiceTest {
         assertThatThrownBy(() -> new RuntimeQueryService(events, decisions, reports, tasks, artifacts)
                 .report(runId)).isInstanceOf(ApiException.class)
                 .satisfies(error -> assertThat(((ApiException) error).code()).isEqualTo("run_not_found"));
+    }
+
+    @Test
+    void projectsLatestHumanGateInsteadOfFlatteningRunStatusToRunning() {
+        var events = mock(RuntimeEventRepository.class);
+        var decisions = mock(ProcurementDecisionRepository.class);
+        var reports = mock(RuntimeReportProjectionRepository.class);
+        var tasks = mock(ProcurementTaskRepository.class);
+        var artifacts = mock(BusinessArtifactRepository.class);
+        var runId = "c".repeat(32);
+        var started = RuntimeEvent.create(10, null, runId, "run_started", Map.of(),
+                Instant.parse("2026-08-13T00:00:00Z"));
+        var modelTurn = RuntimeEvent.create(249, null, runId, "model_turn_end", Map.of(
+                "provider", "procurement_openai",
+                "model", "deepseek-v4-flash",
+                "usage", Map.of("input_tokens", 80, "output_tokens", 20)),
+                Instant.parse("2026-08-13T00:04:59Z"));
+        var paused = RuntimeEvent.create(250, null, runId, "run_status",
+                Map.of("status", "waiting_approval"),
+                Instant.parse("2026-08-13T00:05:00Z"));
+        when(events.findByRunId(any(), any(Pageable.class))).thenReturn(List.of(paused, modelTurn));
+        when(events.findFirstByRunIdOrderByGlobalSeqAsc(runId)).thenReturn(Optional.of(started));
+        when(events.countByRunId(runId)).thenReturn(249L);
+        when(tasks.findFirstByAnalysisRunId(runId)).thenReturn(Optional.empty());
+
+        var run = new RuntimeQueryService(events, decisions, reports, tasks, artifacts).run(runId);
+
+        assertThat(run).containsEntry("status", "waiting_approval");
+        assertThat(run).containsEntry("event_count", 249L);
+        assertThat(run).containsEntry("started_at", started.getOccurredAt());
+        assertThat(run).containsEntry("updated_at", paused.getOccurredAt());
+        assertThat(run).containsEntry("provider", "procurement_openai");
+        assertThat(run).containsEntry("model", "deepseek-v4-flash");
+        assertThat(run.get("usage_json")).isEqualTo(
+                "{\"cached_input_tokens\":0,\"cost_status\":\"unknown\",\"estimated_cost_usd\":null,"
+                        + "\"input_tokens\":80,\"model_turns\":1,\"output_tokens\":20,\"total_tokens\":100}");
     }
 }

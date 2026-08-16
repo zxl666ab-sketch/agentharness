@@ -14,8 +14,6 @@ services:
       MYSQL_PASSWORD: ${PROCUREMENT_DATABASE_PASSWORD:?Set PROCUREMENT_DATABASE_PASSWORD in .env}
       PROCUREMENT_DATABASE_USER: ${PROCUREMENT_DATABASE_USER:?Set PROCUREMENT_DATABASE_USER in .env}
       PROCUREMENT_DATABASE_PASSWORD: ${PROCUREMENT_DATABASE_PASSWORD:?Set PROCUREMENT_DATABASE_PASSWORD in .env}
-      AGENT_DATABASE_USER: ${AGENT_DATABASE_USER:?Set AGENT_DATABASE_USER in .env}
-      AGENT_DATABASE_PASSWORD: ${AGENT_DATABASE_PASSWORD:?Set AGENT_DATABASE_PASSWORD in .env}
     command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
     volumes:
       - ./deploy/mysql-init:/docker-entrypoint-initdb.d:ro
@@ -81,22 +79,23 @@ services:
       context: .
       dockerfile: Dockerfile.agent
     depends_on:
-      mysql:
-        condition: service_healthy
       kafka:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
     environment:
-      AGENTHARNESS_DATABASE_URL: mysql+pymysql://${AGENT_DATABASE_USER:?Set AGENT_DATABASE_USER in .env}:${AGENT_DATABASE_PASSWORD:?Set AGENT_DATABASE_PASSWORD in .env}@mysql:3306/caijiatai_runtime
+      AGENTHARNESS_DATA_DIR: /data/runtime
       AGENT_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       AGENT_INTERNAL_HMAC_KEY: ${AGENT_INTERNAL_HMAC_KEY:?Set AGENT_INTERNAL_HMAC_KEY in .env}
       AGENT_PORT: 8742
       AGENTHARNESS_PROCUREMENT_PROVIDER: ${AGENTHARNESS_PROCUREMENT_PROVIDER:-procurement_fake}
+      AGENTHARNESS_PROCUREMENT_MODEL: ${OPENAI_MODEL:-gpt-5.4}
       AGENTHARNESS_PROCUREMENT_REASONING_EFFORT: ${AGENTHARNESS_PROCUREMENT_REASONING_EFFORT:-none}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-}
+    volumes:
+      - caijiatai-agent-runtime:/data/runtime
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8742/api/health', timeout=2)"]
       interval: 5s
@@ -150,3 +149,4 @@ services:
 volumes:
   caijiatai-mysql-data:
   caijiatai-artifacts:
+  caijiatai-agent-runtime:

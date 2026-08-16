@@ -40,7 +40,7 @@ import { ReportsCenter } from "./ReportsCenter";
 import { ReportView } from "./ReportView";
 import { ReviewCenter } from "./ReviewCenter";
 import { RequirementReview } from "./RequirementReview";
-import { readRole, ROLE_LABELS, type DemoRole, writeRole } from "./roles";
+import { readRole, ROLE_LABELS, type DemoRole, visibleViewOrDefault, writeRole } from "./roles";
 import { SupplierCenter } from "./SupplierCenter";
 import { SystemInfo } from "./SystemInfo";
 import { useEscape } from "./useEscape";
@@ -659,6 +659,8 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                 const next = event.target.value as DemoRole;
                 setRole(next);
                 writeRole(next);
+                const nextView = visibleViewOrDefault(next, view);
+                if (nextView !== view) openView(nextView);
               }}
             >
               {(Object.keys(ROLE_LABELS) as DemoRole[]).map((value) => (

@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
@@ -175,6 +176,36 @@ public class ReviewRecord {
         if (pendingDecisionId == null || !pendingDecisionId.equals(decision.getPendingDecisionId())) return;
         decisionId = decision.getId();
         status = "no_award".equals(decision.getDecision()) ? ReviewStatus.NO_AWARD : ReviewStatus.APPROVED;
+        updatedAt = Instant.now();
+    }
+
+    public void finalizeDirectDecision(ProcurementDecision decision) {
+        if (status != ReviewStatus.PENDING
+                || !businessId.equals(decision.getTaskId())
+                || !snapshotId.equals(decision.getSnapshotId())) {
+            return;
+        }
+        pendingDecisionId = decision.getPendingDecisionId();
+        decisionId = decision.getId();
+        finalQuoteId = decision.getQuoteId();
+        reason = blankToNull(decision.getNote());
+        actor = decision.getActor();
+        actedAt = decision.getCreatedAt();
+        if ("no_award".equals(decision.getDecision())) {
+            action = ReviewAction.NO_AWARD;
+            status = ReviewStatus.NO_AWARD;
+        } else if (Objects.equals(suggestedQuoteId, decision.getQuoteId())) {
+            action = ReviewAction.APPROVE_SUGGESTION;
+            status = ReviewStatus.APPROVED;
+        } else {
+            action = ReviewAction.REVISE_AND_APPROVE;
+            revisions = Map.of(
+                    "supplier_selection",
+                    Map.of(
+                            "from", suggestedQuoteId == null ? "" : suggestedQuoteId,
+                            "to", decision.getQuoteId() == null ? "" : decision.getQuoteId()));
+            status = ReviewStatus.APPROVED;
+        }
         updatedAt = Instant.now();
     }
 

@@ -23,6 +23,7 @@ from agentharness.contracts import (
 )
 from agentharness.procurement.parsing import fields_requiring_review, parse_quote
 from agentharness.procurement.requirements import (
+    RequirementModelError,
     _validate_model_requirement,
     extract_requirement,
 )
@@ -165,11 +166,33 @@ class ProcurementAgentTools:
             requirement = extract_requirement([Message(role=MessageRole.user, content=message)])
             source = "deterministic_offline_adapter"
         else:
-            requirement = _validate_model_requirement(proposed)
-            source = "model_tool_call"
+            try:
+                requirement = _validate_model_requirement(proposed)
+                source = "model_tool_call"
+            except RequirementModelError as exc:
+                message = str(metadata.get("procurement_source_message") or "").strip()
+                if not message:
+                    raise
+                requirement = extract_requirement(
+                    [Message(role=MessageRole.user, content=message)]
+                )
+                source = "deterministic_validation_fallback"
+                metadata["procurement_model_requirement_error"] = str(exc)
         self.storage.merge_run_metadata(
             ctx.run_id,
-            {"procurement_requirement": requirement, "procurement_requirement_source": source},
+            {
+                "procurement_requirement": requirement,
+                "procurement_requirement_source": source,
+                **(
+                    {
+                        "procurement_model_requirement_error": metadata[
+                            "procurement_model_requirement_error"
+                        ]
+                    }
+                    if "procurement_model_requirement_error" in metadata
+                    else {}
+                ),
+            },
         )
         return ToolResult(
             tool_call_id="",

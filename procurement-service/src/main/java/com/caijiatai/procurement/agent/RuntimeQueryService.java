@@ -61,23 +61,30 @@ public final class RuntimeQueryService {
     }
 
     public Map<String, Object> run(String runId) {
-        var rows = events.findByRunId(runId, PageRequest.of(0, 100, Sort.by("globalSeq").ascending()));
+        var rows = new ArrayList<>(events.findByRunId(
+                runId, PageRequest.of(0, 100, Sort.by("globalSeq").descending())));
+        java.util.Collections.reverse(rows);
+        var usage = usageOf(rows);
+        var first = events.findFirstByRunIdOrderByGlobalSeqAsc(runId)
+                .orElse(rows.isEmpty() ? null : rows.getFirst());
+        var eventCount = Math.max(events.countByRunId(runId), rows.size());
+        var stepCount = events.countByRunIdAndType(runId, "ai_task.step");
         var task = tasks.findFirstByAnalysisRunId(runId).orElse(null);
         var value = new LinkedHashMap<String, Object>();
         value.put("run_id", runId);
         value.put("status", statusOf(rows));
-        value.put("provider", "procurement_agent");
-        value.put("model", "deterministic");
+        value.put("provider", latestModelValue(rows, "provider", "procurement_agent"));
+        value.put("model", latestModelValue(rows, "model", "deterministic"));
         value.put("session_id", task == null ? null : task.getSessionId());
         value.put("root_run_id", runId);
-        value.put("started_at", rows.isEmpty() ? null : rows.getFirst().getOccurredAt());
+        value.put("started_at", first == null ? null : first.getOccurredAt());
         value.put("finished_at", rows.stream().map(RuntimeEvent::getOccurredAt).reduce((a, b) -> b).orElse(null));
-        value.put("created_at", rows.isEmpty() ? null : rows.getFirst().getOccurredAt());
+        value.put("created_at", first == null ? null : first.getOccurredAt());
         value.put("updated_at", rows.isEmpty() ? null : rows.getLast().getOccurredAt());
-        value.put("steps", rows.stream().filter(row -> "ai_task.step".equals(row.getType())).count());
-        value.put("usage_json", "{}");
+        value.put("steps", Math.max(stepCount, number(usage.get("model_turns"))));
+        value.put("usage_json", new String(CanonicalJson.bytes(usage), java.nio.charset.StandardCharsets.UTF_8));
         value.put("metadata_json", "{}");
-        value.put("event_count", rows.size());
+        value.put("event_count", eventCount);
         value.put("source", "runtime_event_projection");
         return value;
     }
@@ -143,7 +150,7 @@ public final class RuntimeQueryService {
         report.put("tools", toolRows);
         report.put("approvals", approvalRows);
         report.put("artifacts", artifactRows);
-        report.put("usage", Map.of("total_tokens", 0, "model_turns", 0));
+        report.put("usage", usageOf(rows));
         report.put("events", eventRows);
         report.put("source", source);
         report.put("evidence_sha256", CanonicalJson.sha256(report));
@@ -215,8 +222,8 @@ public final class RuntimeQueryService {
             value.put("tool_call_id", decision.getId());
             value.put("tool_name", "procurement_approve_supplier");
             value.put("effect", "external_write");
-            value.put("requires_confirmation", false);
-            value.put("decision", decision.getDecision());
+            value.put("requires_confirmation", true);
+            value.put("decision", "allow_once");
             value.put("status", "resolved");
             value.put("resolved_at", decision.getCreatedAt());
             value.put("invocation_id", decision.getId());
@@ -250,11 +257,86 @@ public final class RuntimeQueryService {
             if (type.equals("run_failed")) {
                 return "failed";
             }
-            if (type.equals("run_started") || type.equals("run_status")) {
+            if (type.equals("run_cancelled")) {
+                return "cancelled";
+            }
+            if (type.equals("run_interrupted")) {
+                return "interrupted";
+            }
+            if (type.equals("run_status")) {
+                var status = String.valueOf(rows.get(i).getPayload().getOrDefault("status", "running"));
+                if (List.of(
+                        "pending", "running", "waiting_approval", "require_human",
+                        "completed", "failed", "cancelled", "interrupted").contains(status)) {
+                    return status;
+                }
+                return "running";
+            }
+            if (type.equals("run_started")) {
                 return "running";
             }
         }
         return "unknown";
+    }
+
+    private Map<String, Object> usageOf(List<RuntimeEvent> rows) {
+        for (int index = rows.size() - 1; index >= 0; index--) {
+            var row = rows.get(index);
+            if (!List.of("run_completed", "run_failed", "run_cancelled", "run_interrupted")
+                    .contains(row.getType())) {
+                continue;
+            }
+            var usage = copiedMap(row.getPayload().get("usage"));
+            if (!usage.isEmpty()) {
+                usage.putIfAbsent("total_tokens", 0L);
+                usage.putIfAbsent("model_turns", 0L);
+                return usage;
+            }
+        }
+
+        long inputTokens = 0;
+        long outputTokens = 0;
+        long cachedInputTokens = 0;
+        long modelTurns = 0;
+        for (var row : rows) {
+            if (!"model_turn_end".equals(row.getType())) continue;
+            var usage = copiedMap(row.getPayload().get("usage"));
+            inputTokens += number(usage.get("input_tokens"));
+            outputTokens += number(usage.get("output_tokens"));
+            cachedInputTokens += number(usage.get("cached_input_tokens"));
+            modelTurns++;
+        }
+        var result = new LinkedHashMap<String, Object>();
+        result.put("input_tokens", inputTokens);
+        result.put("output_tokens", outputTokens);
+        result.put("total_tokens", inputTokens + outputTokens);
+        result.put("cached_input_tokens", cachedInputTokens);
+        result.put("model_turns", modelTurns);
+        result.put("estimated_cost_usd", null);
+        result.put("cost_status", "unknown");
+        return result;
+    }
+
+    private Map<String, Object> copiedMap(Object raw) {
+        var result = new LinkedHashMap<String, Object>();
+        if (raw instanceof Map<?, ?> map) {
+            map.forEach((key, value) -> result.put(String.valueOf(key), value));
+        }
+        return result;
+    }
+
+    private long number(Object raw) {
+        return raw instanceof Number value ? value.longValue() : 0L;
+    }
+
+    private String latestModelValue(List<RuntimeEvent> rows, String key, String fallback) {
+        for (int index = rows.size() - 1; index >= 0; index--) {
+            var row = rows.get(index);
+            if (!List.of("model_turn_start", "model_turn_end").contains(row.getType())) continue;
+            var value = String.valueOf(row.getPayload().getOrDefault(key, "")).trim();
+            if (!value.isEmpty()) return value;
+        }
+        return fallback;
     }
 
     private boolean cacheIsJavaOwned(Map<String, Object> report) {

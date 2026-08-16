@@ -213,11 +213,23 @@ public class ProcurementTaskService {
         if (existing.isPresent()) {
             return existingAccepted(existing.get(), payloadSha);
         }
+        var previousAttachment = attachments.findByTaskIdAndSha256(taskId, loaded.sha256());
+        if (previousAttachment.isPresent()
+                && quotes.existsByTaskIdAndSourceArtifactId(
+                        taskId, previousAttachment.get().getArtifactId())) {
+            throw conflict("duplicate_quote", "同一报价文件已导入，请勿重复上传");
+        }
         invalidate(task);
-        var artifact = artifactStore.store(
-                "procurement_original", taskId, loaded.filename(), loaded.contentType(),
-                new ByteArrayInputStream(loaded.bytes()), Map.of("source", "quote_import"));
-        attachments.save(ProcurementAttachment.from(taskId, artifact));
+        var artifact = previousAttachment
+                .map(item -> businessArtifacts.findById(item.getArtifactId())
+                        .orElseThrow(() -> notFound("artifact_not_found", "报价原件不存在")))
+                .orElseGet(() -> {
+                    var stored = artifactStore.store(
+                            "procurement_original", taskId, loaded.filename(), loaded.contentType(),
+                            new ByteArrayInputStream(loaded.bytes()), Map.of("source", "quote_import"));
+                    attachments.save(ProcurementAttachment.from(taskId, stored));
+                    return stored;
+                });
         contextCache.evict(taskId);
         var payload = Map.<String, Object>of(
                 "artifact_id", artifact.getId(), "filename", artifact.getFilename(),

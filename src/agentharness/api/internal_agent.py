@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal
 
@@ -14,7 +15,13 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentharness.api.reporting import build_run_report
-from agentharness.contracts import BudgetConfig, PricingConfig, RunRequest, RunStatus
+from agentharness.contracts import (
+    BudgetConfig,
+    PricingConfig,
+    RunRequest,
+    RunStatus,
+    ToolResult,
+)
 from agentharness.harness import Harness
 from agentharness.procurement.agent_tools import (
     PROCUREMENT_AGENT_SYSTEM_PROMPT,
@@ -73,7 +80,13 @@ class AgentCommandBody(BaseModel):
 
 
 class InternalAgentCommands:
-    def __init__(self, harness: Harness) -> None:
+    def __init__(
+        self,
+        harness: Harness,
+        *,
+        fetch_context: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
+        fetch_artifact: Callable[[str], Awaitable[bytes]] | None = None,
+    ) -> None:
         self.harness = harness
         self.java_base_url = os.environ.get(
             "PROCUREMENT_INTERNAL_BASE_URL", "http://127.0.0.1:8741"
@@ -81,6 +94,8 @@ class InternalAgentCommands:
         self.token = os.environ.get(
             "AGENT_INTERNAL_TOKEN", "development-only-change-me"
         )
+        self._fetch_context = fetch_context or self._http_json
+        self._fetch_artifact = fetch_artifact or self._http_bytes
         self.procurement_tools = ProcurementAgentTools(
             harness.storage,
             fetch_context=lambda path: self._java_json(path),
@@ -173,6 +188,7 @@ class InternalAgentCommands:
         run_id = str(context.get("analysis_run_id") or "")
         if not run_id or self.harness.storage.get_run(run_id) is None:
             raise ValueError("Java task is not bound to an Agent run")
+        self._ensure_run_provider(run_id)
         self.harness.storage.merge_run_metadata(
             run_id,
             {
@@ -197,6 +213,7 @@ class InternalAgentCommands:
         run_id = str(context.get("analysis_run_id") or "")
         if not run_id or self.harness.storage.get_run(run_id) is None:
             raise ValueError("Java task is not bound to an Agent run")
+        self._ensure_run_provider(run_id)
         self.harness.storage.merge_run_metadata(
             run_id,
             {
@@ -244,6 +261,7 @@ class InternalAgentCommands:
         run_id = str(binding["run_id"])
         if self.harness.storage.get_run(run_id) is None:
             raise ValueError("approval run was not found")
+        self._ensure_run_provider(run_id)
         self.harness.storage.merge_run_metadata(
             run_id,
             {
@@ -264,6 +282,37 @@ class InternalAgentCommands:
         approval = evidence_payload.get("approval")
         if not isinstance(approval, dict):
             raise ValueError("采购 Agent 未返回正式决定证据")
+        approval_id = str(approval.get("id") or "")
+        if len(approval_id) != 32:
+            raise ValueError("采购 Agent 返回的正式决定审批 ID 无效")
+        arguments_sha256 = _canonical_sha256(binding)
+        if approval.get("arguments_sha256") != arguments_sha256:
+            raise ValueError("采购 Agent 返回的正式决定证据哈希无效")
+        resolved_at = str(approval.get("created_at") or "")
+        if not resolved_at:
+            raise ValueError("采购 Agent 返回的正式决定审批时间无效")
+        self.harness.storage.save_approval(
+            {
+                "id": approval_id,
+                "run_id": run_id,
+                "tool_call_id": str(binding["pending_decision_id"]),
+                "tool_name": str(binding["tool_name"]),
+                "effect": "external_write",
+                "arguments_summary": "Java 控制面已确认正式采购决定",
+                "requires_confirmation": True,
+                "decision": "allow_once",
+                "created_at": resolved_at,
+                "resolved_at": resolved_at,
+                "invocation_id": body.operation_id,
+                "tool_version": "1",
+                "arguments_sha256": arguments_sha256,
+                "approval_scope": (
+                    f"procurement:{body.aggregate_id}:"
+                    f"{binding['snapshot_id']}:{binding['quote_id']}"
+                ),
+                "status": "resolved",
+            }
+        )
         report = build_run_report(self.harness, run_id) or {}
         return {
             "run_id": run_id,
@@ -279,6 +328,7 @@ class InternalAgentCommands:
         run_id = str(context.get("analysis_run_id") or "")
         if not run_id or self.harness.storage.get_run(run_id) is None:
             raise ValueError("run cannot be resumed")
+        self._ensure_run_provider(run_id)
         message = str(body.payload.get("message") or "").strip()
         self.harness.storage.merge_run_metadata(
             run_id,
@@ -403,6 +453,24 @@ class InternalAgentCommands:
             raise ValueError("采购模型 Provider 不可用")
         return "openai", model
 
+    def _ensure_run_provider(self, run_id: str) -> None:
+        run = self.harness.storage.get_run(run_id)
+        if run is None:
+            raise ValueError("run was not found")
+        provider = str(run.get("provider") or "")
+        if provider in self.harness.providers:
+            return
+        if provider == "procurement_openai":
+            restored, _ = self._configure_provider(
+                _load_model_config(self.harness.data_dir)
+            )
+            if restored == provider and provider in self.harness.providers:
+                return
+        raise ValueError(
+            f"run {run_id} uses unavailable provider {provider!r}; "
+            "restore the original provider configuration before resuming"
+        )
+
     @staticmethod
     def _require_paused(result: Any, expected: RunStatus, operation: str) -> None:
         if result.status != expected:
@@ -413,8 +481,40 @@ class InternalAgentCommands:
         for invocation in reversed(self.harness.storage.list_tool_invocations(run_id)):
             if invocation.tool_name != tool_name or invocation.result is None:
                 continue
+            content = invocation.result.content
+            spill = next(
+                (
+                    part
+                    for part in invocation.result.parts
+                    if part.type == "resource"
+                    and part.text == "Full tool result stored as artifact"
+                    and part.artifact_id
+                ),
+                None,
+            )
+            if spill is not None:
+                artifact = self.harness.storage.get_artifact(str(spill.artifact_id))
+                raw = (
+                    self.harness.storage.artifacts.get_text(str(artifact["sha256"]))
+                    if artifact is not None
+                    else None
+                )
+                if raw is None:
+                    raise ValueError(f"{tool_name} durable result artifact is missing")
+                try:
+                    full_result = ToolResult.model_validate_json(raw)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"{tool_name} durable result artifact is invalid"
+                    ) from exc
+                if (
+                    full_result.name != invocation.result.name
+                    or full_result.tool_call_id != invocation.result.tool_call_id
+                ):
+                    raise ValueError(f"{tool_name} durable result artifact is mismatched")
+                content = full_result.content
             try:
-                payload = json.loads(invocation.result.content)
+                payload = json.loads(content)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{tool_name} returned invalid JSON evidence") from exc
             if isinstance(payload, dict):
@@ -431,7 +531,31 @@ class InternalAgentCommands:
             None,
         )
 
+    def _run_result(self, run: dict[str, Any]):  # type: ignore[no-untyped-def]
+        from agentharness.contracts import RunResult, Usage
+
+        usage = json.loads(str(run.get("usage_json") or "{}"))
+        metadata = json.loads(str(run.get("metadata_json") or "{}"))
+        return RunResult(
+            run_id=str(run["id"]),
+            session_id=str(run["session_id"]),
+            status=RunStatus(str(run["status"])),
+            output=str(run.get("output_summary") or ""),
+            usage=Usage.model_validate(usage),
+            steps=int(run.get("steps") or 0),
+            error=run.get("error"),
+            parent_run_id=run.get("parent_run_id"),
+            root_run_id=run.get("root_run_id"),
+            metadata=metadata,
+        )
+
     async def _java_json(self, path: str) -> dict[str, Any]:
+        return await self._fetch_context(path)
+
+    async def _java_bytes(self, path: str) -> bytes:
+        return await self._fetch_artifact(path)
+
+    async def _http_json(self, path: str) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(
                 self.java_base_url + path,
@@ -443,7 +567,7 @@ class InternalAgentCommands:
             raise ValueError("Java internal API returned a non-object")
         return value
 
-    async def _java_bytes(self, path: str) -> bytes:
+    async def _http_bytes(self, path: str) -> bytes:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(
                 self.java_base_url + path,
@@ -515,7 +639,11 @@ def _model_config_path(data_dir: Path) -> Path:
 def _default_model_config() -> dict[str, Any]:
     return {
         "provider": os.environ.get("AGENTHARNESS_PROCUREMENT_PROVIDER", "openai"),
-        "model": os.environ.get("AGENTHARNESS_PROCUREMENT_MODEL", "gpt-5.4"),
+        "model": (
+            os.environ.get("AGENTHARNESS_PROCUREMENT_MODEL")
+            or os.environ.get("OPENAI_MODEL")
+            or "gpt-5.4"
+        ),
         "base_url": os.environ.get("OPENAI_BASE_URL") or None,
         "api_mode": os.environ.get("AGENTHARNESS_PROCUREMENT_API_MODE", "auto"),
         "reasoning_effort": os.environ.get(

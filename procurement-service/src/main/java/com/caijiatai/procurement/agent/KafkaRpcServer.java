@@ -3,6 +3,8 @@ package com.caijiatai.procurement.agent;
 import com.caijiatai.procurement.api.ApiException;
 import com.caijiatai.procurement.artifact.ArtifactStore;
 import com.caijiatai.procurement.artifact.BusinessArtifactRepository;
+import com.caijiatai.procurement.approval.PendingDecision;
+import com.caijiatai.procurement.approval.PendingDecisionRepository;
 import com.caijiatai.procurement.config.AppProperties;
 import com.caijiatai.procurement.quote.ProcurementQuoteRepository;
 import com.caijiatai.procurement.task.ProcurementTaskRepository;
@@ -41,12 +43,14 @@ public final class KafkaRpcServer {
     private final RuntimeEventRepository events;
     private final TaskViewMapper views;
     private final ReferencePriceService referencePrices;
+    private final PendingDecisionRepository pendingDecisions;
 
     public KafkaRpcServer(KafkaTemplate<String, byte[]> kafka, AppProperties properties,
             ProcurementTaskRepository tasks, ProcurementQuoteRepository quotes,
             BusinessArtifactRepository artifacts, ArtifactStore artifactStore,
             RuntimeEventRepository events, TaskViewMapper views,
-            ReferencePriceService referencePrices) {
+            ReferencePriceService referencePrices,
+            PendingDecisionRepository pendingDecisions) {
         this.kafka = kafka;
         this.hmacKey = properties.internalHmacKey();
         this.tasks = tasks;
@@ -56,6 +60,7 @@ public final class KafkaRpcServer {
         this.events = events;
         this.views = views;
         this.referencePrices = referencePrices;
+        this.pendingDecisions = pendingDecisions;
     }
 
     @KafkaListener(topics = REQUESTS_TOPIC, groupId = "java-svc-rpc")
@@ -108,6 +113,27 @@ public final class KafkaRpcServer {
                 null,
                 null);
         value.remove("attachments");
+        value.put("pending_decisions", pendingDecisions
+                .findByTaskIdAndStatusIn(taskId, List.of("pending", "approved", "stale"))
+                .stream()
+                .map(this::pendingDecision)
+                .toList());
+        return value;
+    }
+
+    private Map<String, Object> pendingDecision(PendingDecision pending) {
+        var value = new LinkedHashMap<String, Object>();
+        value.put("pending_decision_id", pending.getId());
+        value.put("operation_id", pending.getOperationId());
+        value.put("run_id", pending.getRunId());
+        value.put("tool_name", pending.getToolName());
+        value.put("task_version", pending.getTaskVersion());
+        value.put("snapshot_id", pending.getSnapshotId());
+        value.put("input_sha256", pending.getInputSha256());
+        value.put("business_decision", pending.getDecision());
+        value.put("quote_id", pending.getQuoteId());
+        value.put("note_hash", pending.getNoteHash());
+        value.put("status", pending.getStatus());
         return value;
     }
 

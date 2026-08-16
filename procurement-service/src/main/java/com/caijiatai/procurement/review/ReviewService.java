@@ -233,8 +233,19 @@ public class ReviewService {
 
     @Transactional
     public void finalizeDecision(com.caijiatai.procurement.approval.ProcurementDecision decision) {
-        reviews.findByPendingDecisionId(decision.getPendingDecisionId())
-                .ifPresent(review -> review.finalizeDecision(decision));
+        var bound = reviews.findByPendingDecisionId(decision.getPendingDecisionId());
+        if (bound.isPresent()) {
+            bound.get().finalizeDecision(decision);
+            return;
+        }
+        var candidates = reviews.findByBusinessIdAndStatus(decision.getTaskId(), ReviewStatus.PENDING);
+        for (int index = candidates.size() - 1; index >= 0; index--) {
+            var review = candidates.get(index);
+            if (review.getSnapshotId().equals(decision.getSnapshotId())) {
+                review.finalizeDirectDecision(decision);
+                return;
+            }
+        }
     }
 
     private void validateCurrentEvidence(ReviewRecord review, ProcurementTask business) {

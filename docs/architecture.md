@@ -11,7 +11,7 @@ flowchart LR
     Java <-->|"Kafka（唯一通道）"| Kafka["Kafka KRaft 单节点"]
     Kafka <-->|"commands/results/rpc/events"| Python["Python Agent 微服务"]
     Java -->|"JPA / Flyway V1-V7"| MySQL["MySQL 8 caijiatai_business"]
-    Python -->|"pymysql 自建表"| RuntimeDB["MySQL 8 caijiatai_runtime"]
+    Python -->|"Run / Checkpoint / Lease / Approval"| RuntimeStore["持久化 Harness Runtime"]
     Java <--> Redis["Redis 任务上下文缓存"]
     Python <--> Redis
 ```
@@ -22,10 +22,10 @@ Compose 默认启动 `procurement`、`agent`、`mysql`、`redis`、`kafka`（含
 ### Kafka 契约
 
 - topics：`caijiatai.commands`（Java→Python，3 分区按 aggregate_id 路由）、`caijiatai.results`、`caijiatai.rpc.requests`、`caijiatai.rpc.responses`、`caijiatai.events`，各配 `*.dlq`。
-- 消息使用 `AGENT_INTERNAL_HMAC_KEY` 对完整规范 JSON envelope 做 HMAC-SHA256 签名，并双侧校验正文哈希；双侧幂等（Java `agent_command` outbox、Python `internal_operations`）。
+- 消息使用 `AGENT_INTERNAL_HMAC_KEY` 对完整规范 JSON envelope 做 HMAC-SHA256 签名，并双侧校验正文哈希；双侧幂等（Java `agent_command` outbox、Harness `internal_operations`）。
 - 命令状态机：`pending → published → accepted → completed/failed`；瞬时错误最多投递 4 次，耗尽后持久化为可人工重试的传输失败。
 - RPC：`get_task_context` / `get_artifact` / `list_events`，10s 超时 + 一次重试，correlationId 匹配。
-- 事件：Python 持久化到 `caijiatai_runtime.runtime_event` 并发布；Java 投影到 `caijiatai_business.runtime_event`（`global_seq` 唯一），Web SSE 从 Java 投影表读取。
+- 事件：Harness 先持久化 Runtime 事件，再由 Kafka 适配器发布；Java 投影到 `caijiatai_business.runtime_event`（`global_seq` 唯一），Web SSE 从 Java 投影表读取。
 - 心跳：Python 每 5s 发布 `heartbeat.ping`；`/api/health` 的 `agent_status` 以最近心跳（≤15s）判定。
 
 数据库业务 schema 与运行时 schema 使用不同账号；首次初始化由 `deploy/mysql-init/02-users.sh` 从环境变量创建。已有数据卷不会重新执行 init 脚本，升级时需在维护窗口用同一脚本或等价 SQL 轮换旧账号并撤销跨 schema 权限。
@@ -41,8 +41,8 @@ Compose 默认启动 `procurement`、`agent`、`mysql`、`redis`、`kafka`（含
 | React | 采购任务、复核、比价、审批、报告和 Runtime 审计交互；不持久化业务真值 |
 | Java | 任务、附件、报价、修正、Agent 绑定、快照、待决审批、正式决定、业务审计、业务 Artifact 和业务报告 |
 | MySQL 业务 schema | Java 采购控制面持久化；Flyway 是唯一 Schema 创建机制 |
-| Python | 文档解析、需求抽取、Provider/模型、Run、Session、Checkpoint、Approval、工具治理、Runtime Artifact 和抽取评测 |
-| MySQL runtime schema | 仅保存 Python Runtime 事实；不保存当前采购业务真值 |
+| Python | 文档解析、需求抽取、Provider/模型、Run、Session、Checkpoint、Lease、Approval、工具治理、Runtime Artifact 和抽取评测 |
+| Harness Runtime volume | 保存 Python Runtime 事实；不保存当前采购业务真值 |
 
 历史 SQLite/PostgreSQL 数据只离线归档；公共采购 Router、Service、costing 和采购 Repo 不在 Python 接线。旧数据不自动导入 MySQL。
 

@@ -61,13 +61,13 @@ flowchart LR
     Java <-->|"Kafka（唯一通道）commands/results/rpc/events"| Agent["Python Agent 微服务"]
     Agent --> Provider["LLM API"]
     Java --> MySQL["MySQL 8 caijiatai_business"]
-    Agent --> RuntimeDB["MySQL 8 caijiatai_runtime"]
+    Agent --> RuntimeStore["持久化 Harness Runtime（Run / Checkpoint / Lease / Approval）"]
     Java <--> Redis["Redis 分布式锁 / 上下文与看板缓存"]
 ```
 
 - Java 是采购任务、附件、报价、人工修正、比价快照、待决审批、正式决定、供应商档案、采购订单、对账付款、统计报表、业务审计、业务 Artifact、SSE 事件投影的唯一真源；可脱离 Python 独立运行（`APP_AGENT_MODE=demo`）。
-- Python Agent 是嵌入式微服务，只保留自然语言需求结构化、XLSX/PDF 文档解析、历史成交参考区间软提示（RAG）、Provider 调用、Run/事件与运行时 MySQL；通过 Kafka 命令/结果/RPC/事件与 Java 通信。
-- 业务 Schema 只由 Java Flyway 创建（V1-V11：任务/报价/审批/审计 + 供应商 V8 + 订单 V9 + 对账 V10 + 审计通用业务定位 V11），运行时 Schema 由 Python Agent 自建；禁止交叉建表。金额使用 `DECIMAL`/`BigDecimal`，时间使用 `DATETIME(6)`/`Instant`。
+- Python Agent 是 Kafka 传输适配器加唯一 Harness Runtime：负责自然语言需求结构化、XLSX/PDF 文档解析、历史成交参考区间软提示（RAG）、Provider 调用，以及 Run、Checkpoint、Lease、Tool Invocation 和 Approval 的持久化；通过 Kafka 命令/结果/RPC/事件与 Java 通信。
+- 业务 Schema 只由 Java Flyway 创建（V1-V11：任务/报价/审批/审计 + 供应商 V8 + 订单 V9 + 对账 V10 + 审计通用业务定位 V11）。Agent Runtime 数据写入 `AGENTHARNESS_DATA_DIR` 并由 Compose 独立 volume 持久化；金额使用 `DECIMAL`/`BigDecimal`，时间使用 `DATETIME(6)`/`Instant`。
 - Kafka 使用 KRaft 单节点：`caijiatai.commands/results/rpc.requests/rpc.responses/events` + 各 `*.dlq`；消息带 HMAC-SHA256 签名与 `payload_sha256`，双侧幂等。
 - Python 读取业务上下文/原件走 Kafka RPC（`get_task_context` / `get_artifact` / `list_events` / `get_reference_prices`）。
 - 审计事件全量留痕：任务事件挂 `task_id`，供应商/订单/对账等业务事件挂 `business_type`/`business_id`（V11），全局审计页可按类型/操作人/业务对象筛选。
@@ -117,7 +117,7 @@ docker compose ps
 - SASL/SCRAM 加固：`compose.kafka-sasl.yml`（cp-kafka）首次启动在 `kafka-storage format --add-scram` 预置 admin/java-svc/python-agent；已实测五服务 healthy、无凭据访问失败、全闭环通过。
 - 本地开发（不构建镜像）：先 `docker compose up -d mysql redis` 再 `docker compose -f compose.kafka.yml up -d` 起 Kafka；
   Java 用 `mvnw spring-boot:run`，Python 用 `uv run python -m agentharness.agent_service`（Agent 会读取仓库 `.env`，
-  需要 `AGENTHARNESS_DATABASE_URL` 与 `AGENT_INTERNAL_HMAC_KEY`，示例见 `.env.example`）。
+  需要 `AGENTHARNESS_DATA_DIR` 与 `AGENT_INTERNAL_HMAC_KEY`，示例见 `.env.example`）。
 
 ### 环境变量
 
@@ -125,8 +125,7 @@ docker compose ps
 |---|---|
 | `DATABASE_URL` | `jdbc:mysql://127.0.0.1:3306/caijiatai_business?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=UTF-8` |
 | `PROCUREMENT_DATABASE_USER` / `PROCUREMENT_DATABASE_PASSWORD` | Java 业务 schema 专用账号与随机密码 |
-| `AGENT_DATABASE_USER` / `AGENT_DATABASE_PASSWORD` | Python Runtime schema 专用账号与随机密码 |
-| `AGENTHARNESS_DATABASE_URL` | Python Agent 运行时 MySQL URL（本地开发用 `mysql+pymysql://…@127.0.0.1:3306/caijiatai_runtime`，Compose 会覆盖为 compose 网络内的 `mysql` 主机） |
+| `AGENTHARNESS_DATA_DIR` | Python Agent Runtime 持久化目录；Compose 使用独立 `caijiatai-agent-runtime` volume |
 | `MYSQL_ROOT_PASSWORD` | 仅用于初始化数据库的随机 root 密码 |
 | `KAFKA_BOOTSTRAP_SERVERS` / `AGENT_KAFKA_BOOTSTRAP_SERVERS` | `127.0.0.1:9092` |
 | `AGENT_INTERNAL_HMAC_KEY` | ≥32 字节随机串（Java/Python 共享） |

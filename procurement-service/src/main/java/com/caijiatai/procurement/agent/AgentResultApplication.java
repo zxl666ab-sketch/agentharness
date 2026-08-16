@@ -5,6 +5,7 @@ import com.caijiatai.procurement.ai.AiTaskService;
 import com.caijiatai.procurement.ai.AiErrorCategory;
 import com.caijiatai.procurement.approval.ApprovalService;
 import com.caijiatai.procurement.artifact.BusinessArtifactRepository;
+import com.caijiatai.procurement.cache.TaskContextCache;
 import com.caijiatai.procurement.comparison.ComparisonService;
 import com.caijiatai.procurement.quote.ProcurementQuote;
 import com.caijiatai.procurement.quote.ProcurementQuoteRepository;
@@ -22,6 +23,8 @@ import java.util.List;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Service
 public final class AgentResultApplication {
@@ -34,6 +37,7 @@ public final class AgentResultApplication {
     private final RuntimeReportProjectionRepository runtimeReports;
     private final AiTaskService aiTasks;
     private final ReviewService reviews;
+    private final TaskContextCache contextCache;
 
     public AgentResultApplication(
             ProcurementTaskRepository tasks,
@@ -44,7 +48,8 @@ public final class AgentResultApplication {
             AuditEventRepository audit,
             RuntimeReportProjectionRepository runtimeReports,
             AiTaskService aiTasks,
-            ReviewService reviews) {
+            ReviewService reviews,
+            TaskContextCache contextCache) {
         this.tasks = tasks;
         this.quotes = quotes;
         this.artifacts = artifacts;
@@ -54,26 +59,31 @@ public final class AgentResultApplication {
         this.runtimeReports = runtimeReports;
         this.aiTasks = aiTasks;
         this.reviews = reviews;
+        this.contextCache = contextCache;
     }
 
     public void apply(AgentCommand command, Map<String, Object> envelope) {
-        var result = map(envelope.get("result"));
-        if (result.isEmpty()) {
-            result = envelope;
-        }
-        switch (command.getOperationType()) {
-            case "start_conversation" -> startConversation(command, result);
-            case "import_quote" -> importQuote(command, result);
-            case "analyze" -> analyze(command, result);
-            case "approve_decision" -> {
-                var decision = approvals.finalizeFromAgent(command, result);
-                reviews.finalizeDecision(decision);
-                cacheRuntimeReport(command, result);
+        try {
+            var result = map(envelope.get("result"));
+            if (result.isEmpty()) {
+                result = envelope;
             }
-            case "resume_run" -> resume(command, result);
-            case "create_structured", "reopen_task" -> bind(command, result);
-            default -> throw new ApiException(
-                    HttpStatus.CONFLICT, "unknown_agent_operation", "Agent 命令类型不受支持");
+            switch (command.getOperationType()) {
+                case "start_conversation" -> startConversation(command, result);
+                case "import_quote" -> importQuote(command, result);
+                case "analyze" -> analyze(command, result);
+                case "approve_decision" -> {
+                    var decision = approvals.finalizeFromAgent(command, result);
+                    reviews.finalizeDecision(decision);
+                    cacheRuntimeReport(command, result);
+                }
+                case "resume_run" -> resume(command, result);
+                case "create_structured", "reopen_task" -> bind(command, result);
+                default -> throw new ApiException(
+                        HttpStatus.CONFLICT, "unknown_agent_operation", "Agent 命令类型不受支持");
+            }
+        } finally {
+            evictContext(command.getAggregateId());
         }
     }
 
@@ -86,31 +96,47 @@ public final class AgentResultApplication {
             String error,
             AiErrorCategory category,
             boolean retryable) {
-        if ("analyze".equals(command.getOperationType())) {
-            aiTasks.fail(command, error, category, retryable);
-            var task = tasks.lockById(command.getAggregateId()).orElse(null);
-            if (task == null || task.getGeneration() != command.getGeneration()) {
+        try {
+            if ("analyze".equals(command.getOperationType())) {
+                aiTasks.fail(command, error, category, retryable);
+                var task = tasks.lockById(command.getAggregateId()).orElse(null);
+                if (task == null || task.getGeneration() != command.getGeneration()) {
+                    return;
+                }
+                task.restoreReadyAfterFailedAnalysis();
+                audit.save(AuditEvent.create(
+                        task.getId(), null, task.getAnalysisRunId(), "analysis_failed", "agent",
+                        Map.of("operation_id", command.getOperationId(), "error", error)));
                 return;
             }
-            task.restoreReadyAfterFailedAnalysis();
-            audit.save(AuditEvent.create(
-                    task.getId(), null, task.getAnalysisRunId(), "analysis_failed", "agent",
-                    Map.of("operation_id", command.getOperationId(), "error", error)));
-            return;
+            if ("start_conversation".equals(command.getOperationType())) {
+                var task = tasks.lockById(command.getAggregateId()).orElse(null);
+                if (task == null || task.getGeneration() != command.getGeneration()) {
+                    return;
+                }
+                // 需求与报价未成功落库的草稿无法从 UI 恢复，取消它避免“Agent 读取中”死任务。
+                if (TaskStatus.DRAFT.wireValue().equals(task.getStatus())
+                        && quotes.countByTaskId(task.getId()) == 0) {
+                    task.setStatus(TaskStatus.CANCELLED);
+                }
+                audit.save(AuditEvent.create(
+                        task.getId(), null, task.getAnalysisRunId(), "conversation_failed", "agent",
+                        Map.of("operation_id", command.getOperationId(), "error", error)));
+            }
+        } finally {
+            evictContext(command.getAggregateId());
         }
-        if ("start_conversation".equals(command.getOperationType())) {
-            var task = tasks.lockById(command.getAggregateId()).orElse(null);
-            if (task == null || task.getGeneration() != command.getGeneration()) {
-                return;
-            }
-            // 需求与报价未成功落库的草稿无法从 UI 恢复，取消它避免“Agent 读取中”死任务。
-            if (TaskStatus.DRAFT.wireValue().equals(task.getStatus())
-                    && quotes.countByTaskId(task.getId()) == 0) {
-                task.setStatus(TaskStatus.CANCELLED);
-            }
-            audit.save(AuditEvent.create(
-                    task.getId(), null, task.getAnalysisRunId(), "conversation_failed", "agent",
-                    Map.of("operation_id", command.getOperationId(), "error", error)));
+    }
+
+    private void evictContext(String taskId) {
+        contextCache.evict(taskId);
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    contextCache.evict(taskId);
+                }
+            });
         }
     }
 

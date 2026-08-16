@@ -1,6 +1,7 @@
 package com.caijiatai.procurement.agent;
 
 import java.util.List;
+import java.util.Optional;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
@@ -11,6 +12,12 @@ public interface RuntimeEventRepository extends JpaRepository<RuntimeEvent, Long
     List<RuntimeEvent> findByGlobalSeqGreaterThanOrderByGlobalSeqAsc(long after, Pageable pageable);
 
     List<RuntimeEvent> findByRunId(String runId, Pageable pageable);
+
+    Optional<RuntimeEvent> findFirstByRunIdOrderByGlobalSeqAsc(String runId);
+
+    long countByRunId(String runId);
+
+    long countByRunIdAndType(String runId, String type);
 
     RuntimeEvent findFirstByTypeOrderByGlobalSeqDesc(String type);
 

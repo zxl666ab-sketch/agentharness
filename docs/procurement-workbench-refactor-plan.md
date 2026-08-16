@@ -69,8 +69,8 @@
 | 事实 | 当前 owner | 说明 |
 |---|---|---|
 | 采购任务、报价、修正、比较、决定、报告 | Java + `caijiatai_business` | Flyway V1-V7 管理业务 schema |
-| Agent 命令投递和幂等 | Java `agent_command` + Python `internal_operations` | 至少一次投递，双侧幂等 |
-| AI/运行时事件 | Python runtime MySQL -> Java `runtime_event` 投影 | Web SSE 从 Java 投影读取 |
+| Agent 命令投递和幂等 | Java `agent_command` + Harness `internal_operations` | 至少一次投递，双侧幂等 |
+| AI/运行时事件 | Harness Runtime -> Kafka -> Java `runtime_event` 投影 | Web SSE 从 Java 投影读取 |
 | 原始文件和执行草稿 | Java Artifact Store | SHA-256、owner 校验、原子移动 |
 | LLM/解析 | Python | 不写采购业务真值 |
 | 金额、资格、排序 | Java `ComparisonEngine` | `BigDecimal` 确定性计算 |

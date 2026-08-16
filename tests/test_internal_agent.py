@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -10,12 +11,155 @@ from agentharness.api.internal_agent import (
     AgentCommandBody,
     InternalAgentCommands,
     _canonical_sha256,
+    _default_model_config,
 )
 from agentharness.api.server import create_app
-from agentharness.contracts import Checkpoint, Message, MessageRole, RunStatus, new_id
+from agentharness.contracts import (
+    Checkpoint,
+    Message,
+    MessageRole,
+    RunStatus,
+    ToolContentPart,
+    ToolContext,
+    ToolResult,
+    new_id,
+)
 from agentharness.harness import Harness
 from agentharness.procurement.requirements import extract_requirement
 from tests.fake_provider import FakeModelAdapter
+
+
+def test_default_model_config_uses_the_shared_openai_model(monkeypatch) -> None:
+    monkeypatch.delenv("AGENTHARNESS_PROCUREMENT_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_MODEL", "deepseek-v4-flash")
+
+    assert _default_model_config()["model"] == "deepseek-v4-flash"
+
+    monkeypatch.setenv("AGENTHARNESS_PROCUREMENT_MODEL", "runtime-override")
+    assert _default_model_config()["model"] == "runtime-override"
+
+
+def test_latest_tool_payload_reads_spilled_durable_result(tmp_path, monkeypatch) -> None:
+    harness = Harness(data_dir=tmp_path / "runtime")
+    commands = InternalAgentCommands(harness)
+    payload = {"quotes": [{"supplier_name": "嘉兴胶粘", "details": "x" * 8_000}]}
+    full_result = ToolResult(
+        tool_call_id="call-1",
+        name="procurement_parse_uploaded_quotes",
+        content=json.dumps(payload, ensure_ascii=False),
+    )
+    meta = harness.storage.artifacts.put(
+        full_result.model_dump_json(), content_type="application/json"
+    )
+    artifact_id = harness.storage.register_artifact(meta)
+    inline_result = full_result.model_copy(
+        update={
+            "content": '{"quotes": [...truncated',
+            "artifact_id": artifact_id,
+            "parts": [
+                ToolContentPart(
+                    type="resource",
+                    text="Full tool result stored as artifact",
+                    mime_type="application/json",
+                    artifact_id=artifact_id,
+                )
+            ],
+        }
+    )
+    monkeypatch.setattr(
+        harness.storage,
+        "list_tool_invocations",
+        lambda _run_id: [
+            SimpleNamespace(
+                tool_name="procurement_parse_uploaded_quotes",
+                result=inline_result,
+            )
+        ],
+    )
+
+    assert commands._latest_tool_payload("a" * 32, inline_result.name) == payload
+    harness.close()
+
+
+def test_restart_restores_provider_for_persisted_procurement_run(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("AGENTHARNESS_PROCUREMENT_PROVIDER", "openai")
+    monkeypatch.setenv("AGENTHARNESS_PROCUREMENT_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    data_dir = tmp_path / "runtime"
+    first = Harness(data_dir=data_dir)
+    session_id = first.storage.create_session(title="采购长任务")
+    run_id = new_id()
+    first.storage.create_run(
+        run_id=run_id,
+        session_id=session_id,
+        root_run_id=run_id,
+        status=RunStatus.require_human,
+        provider="procurement_openai",
+        model="deepseek-v4-flash",
+        approval="ask",
+        allow_write=False,
+    )
+    first.close()
+
+    restarted = Harness(data_dir=data_dir)
+    commands = InternalAgentCommands(restarted)
+    assert "procurement_openai" not in restarted.providers
+
+    commands._ensure_run_provider(run_id)
+
+    assert "procurement_openai" in restarted.providers
+    restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_capture_requirement_falls_back_when_model_shape_is_invalid(
+    tmp_path,
+) -> None:
+    harness = Harness(data_dir=tmp_path / "runtime")
+    commands = InternalAgentCommands(harness)
+    session_id = harness.storage.create_session(title="采购需求降级")
+    run_id = new_id()
+    source_message = (
+        "采购3000个BOPP透明封箱胶带，宽48毫米、长100米、厚50微米，"
+        "透明无印刷，送上海仓，12天内交付，需要开票。"
+    )
+    harness.storage.create_run(
+        run_id=run_id,
+        session_id=session_id,
+        root_run_id=run_id,
+        metadata={
+            "purchase_request_id": "a" * 32,
+            "procurement_source_message": source_message,
+        },
+    )
+    context = ToolContext(
+        run_id=run_id,
+        session_id=session_id,
+        cwd=str(tmp_path),
+        data_dir=str(harness.data_dir),
+        allow_write=False,
+    )
+
+    result = await commands.procurement_tools.capture_requirement(
+        context,
+        {
+            "requirement": {
+                "itemName": "BOPP透明封箱胶带",
+                "quantity": 3000,
+                "specifications": {"widthMm": 48},
+            }
+        },
+    )
+    payload = json.loads(result.content)
+    run = harness.storage.get_run(run_id)
+    metadata = json.loads(str(run["metadata_json"]))
+
+    assert payload["source"] == "deterministic_validation_fallback"
+    assert payload["requirement"]["quantity"] == "3000"
+    assert metadata["procurement_model_requirement_error"]
+    harness.close()
 
 
 def test_extracts_spaced_chinese_packaging_requirement() -> None:
@@ -339,7 +483,15 @@ async def test_procurement_agent_resumes_the_same_run_until_formal_decision(tmp_
         "procurement_request_comparison",
         "procurement_record_decision_evidence",
     ]
-    assert harness.storage.list_approvals(run_id) == []
+    approvals = harness.storage.list_approvals(run_id)
+    assert len(approvals) == 1
+    assert approvals[0]["id"] == approved["approval"]["id"]
+    assert approvals[0]["tool_name"] == "procurement_approve_supplier"
+    assert approvals[0]["effect"] == "external_write"
+    assert approvals[0]["requires_confirmation"] is True
+    assert approvals[0]["decision"] == "allow_once"
+    assert approvals[0]["status"] == "resolved"
+    assert approvals[0]["arguments_sha256"] == _canonical_sha256(binding)
     await harness.aclose()
 
 
@@ -474,7 +626,15 @@ async def test_approval_only_allows_exact_java_binding(tmp_path) -> None:
     result = await commands._approve(body)
     checkpoint = harness.storage.load_checkpoint(run_id)
 
-    assert harness.storage.list_approvals(run_id) == []
+    approvals = harness.storage.list_approvals(run_id)
+    assert len(approvals) == 1
+    assert approvals[0]["id"] == result["approval"]["id"]
+    assert approvals[0]["tool_call_id"] == binding["pending_decision_id"]
+    assert approvals[0]["invocation_id"] == operation_id
+    assert approvals[0]["requires_confirmation"] is True
+    assert approvals[0]["decision"] == "allow_once"
+    assert approvals[0]["status"] == "resolved"
+    assert approvals[0]["arguments_sha256"] == _canonical_sha256(binding)
     assert result["approval"]["confirmation_source"] == "java_control_plane"
     assert result["approval"]["decision"] == "formal_java_confirmation"
     assert result["approval"]["arguments_sha256"] == _canonical_sha256(binding)

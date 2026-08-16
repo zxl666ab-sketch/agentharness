@@ -147,6 +147,42 @@ afterEach(() => {
 });
 
 describe("OrderCenter operations", () => {
+  it("formats persisted decimal scales as business amounts and quantities", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    mockFetch(() => jsonResponse({}));
+    const queryClient = client();
+    queryClient.setQueryData(["procurement-orders", ""], {
+      items: [order({
+        landed_total: "10400.000000000000000000",
+        quantity: "3000.000000000000000000",
+        received_quantity: "2999.500000000000000000",
+      })],
+      page: 0,
+      size: 100,
+      total: 1,
+    });
+    queryClient.setQueryData(["procurement-settlements"], {
+      items: [settlement({ total_amount: "10400.000000000000000000" })],
+      page: 0,
+      size: 100,
+      total: 1,
+    });
+    const root = createRoot(host);
+    root.render(
+      <QueryClientProvider client={queryClient}>
+        <OrderCenter />
+      </QueryClientProvider>,
+    );
+    await act(async () => { await Promise.resolve(); });
+
+    expect(host.textContent).toContain("10,400.00");
+    expect(host.textContent).toContain("3,000 piece");
+    expect(host.textContent).toContain("2,999.5");
+    expect(host.textContent).not.toContain("10400.000000000000000000");
+    await act(async () => root.unmount());
+  });
+
   it("keeps the receive dialog open with input intact when the API fails", async () => {
     const host = document.createElement("div");
     document.body.append(host);

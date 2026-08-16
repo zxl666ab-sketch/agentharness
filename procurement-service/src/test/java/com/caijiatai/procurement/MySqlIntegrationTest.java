@@ -466,6 +466,34 @@ class MySqlIntegrationTest {
     }
 
     @Test
+    void taskDetailDecisionAlsoClosesThePendingHumanReview() {
+        var fixture = pendingReview(false);
+        var review = fixture.review();
+        var requested = approvalService.request(
+                fixture.taskId(),
+                new ProcurementDtos.Decision(
+                        "approved",
+                        review.getSnapshotId(),
+                        review.getInputSha256(),
+                        review.getSuggestedQuoteId(),
+                        true,
+                        "从采购任务详情核对并批准"),
+                "task-detail-review-decision");
+        var client = mock(AgentDispatcher.class);
+        when(client.dispatch(any())).thenReturn(new AgentDispatcher.DispatchResult(
+                200, Map.of("status", "completed", "result", approvalResult(requested.pending()))));
+        transactions.executeWithoutResult(ignored -> new AgentOutboxWorker(
+                commands, tasks, client, resultApplication, aiTaskService).dispatch());
+
+        var completed = reviewRecords.findById(review.getId()).orElseThrow();
+        assertThat(completed.getStatus()).isEqualTo(ReviewStatus.APPROVED);
+        assertThat(completed.getAction()).isEqualTo(ReviewAction.APPROVE_SUGGESTION);
+        assertThat(completed.getDecisionId()).isEqualTo(
+                decisions.findByTaskId(fixture.taskId()).orElseThrow().getId());
+        assertThat(reviewRecords.countByStatus(ReviewStatus.PENDING)).isZero();
+    }
+
+    @Test
     void reviseAndApproveStoresHumanValuesWithoutOverwritingTheSuggestion() {
         var fixture = pendingReview(false);
         var snapshot = snapshots.findById(fixture.review().getSnapshotId()).orElseThrow();

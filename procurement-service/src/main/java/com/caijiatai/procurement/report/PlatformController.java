@@ -7,6 +7,9 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.RedisCallback;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -22,16 +25,22 @@ public final class PlatformController {
     private final ProcurementQuoteRepository quotes;
     private final ProcurementTaskRepository tasks;
     private final AiTaskRepository aiTasks;
+    private final StringRedisTemplate redis;
+    private final boolean redisEnabled;
 
     public PlatformController(
             JdbcTemplate jdbc,
             ProcurementQuoteRepository quotes,
             ProcurementTaskRepository tasks,
-            AiTaskRepository aiTasks) {
+            AiTaskRepository aiTasks,
+            StringRedisTemplate redis,
+            @Value("${app.redis.enabled:false}") boolean redisEnabled) {
         this.jdbc = jdbc;
         this.quotes = quotes;
         this.tasks = tasks;
         this.aiTasks = aiTasks;
+        this.redis = redis;
+        this.redisEnabled = redisEnabled;
     }
 
     @GetMapping
@@ -60,8 +69,18 @@ public final class PlatformController {
         value.put("mysql", "ready");
         value.put("kafka", System.getenv().getOrDefault("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9092"));
         value.put("agent_mode", System.getenv().getOrDefault("APP_AGENT_MODE", "kafka"));
-        value.put("redis", "noop-fallback");
+        value.put("redis", redisStatus());
         return value;
+    }
+
+    private String redisStatus() {
+        if (!redisEnabled) return "disabled";
+        try {
+            var pong = redis.execute((RedisCallback<String>) connection -> connection.ping());
+            return "PONG".equalsIgnoreCase(pong) ? "ready" : "down (noop-fallback)";
+        } catch (RuntimeException error) {
+            return "down (noop-fallback)";
+        }
     }
 
     private Map<String, Object> parsers() {

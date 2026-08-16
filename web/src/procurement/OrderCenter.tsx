@@ -54,6 +54,23 @@ function settlementTone(status: SettlementStatus) {
   }[status];
 }
 
+function formatAmount(value: string | null) {
+  if (value === null) return "未补录成本";
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return value;
+  return new Intl.NumberFormat("zh-CN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(amount);
+}
+
+function formatQuantity(value: string | null) {
+  if (value === null) return "—";
+  const quantity = Number(value);
+  if (!Number.isFinite(quantity)) return value;
+  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 3 }).format(quantity);
+}
+
 export function OrderCenter() {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<OrderStatus | "">("");
@@ -251,15 +268,15 @@ export function OrderCenter() {
             <header>
               <div className="proc-order-title">
                 <code>{order.order_no}</code>
-                <strong>{order.item_name} × {Number(order.quantity).toLocaleString("zh-CN")} {order.unit}</strong>
+                <strong>{order.item_name} × {formatQuantity(order.quantity)} {order.unit}</strong>
                 <small>{order.task_reference} · {order.task_title}</small>
               </div>
               <span className={`proc-status ${statusTone(order.status)}`}><i />{ORDER_STATUS_LABELS[order.status]}</span>
             </header>
             <div className="proc-order-facts">
               <span><small>供应商</small><strong>{order.supplier_name}</strong></span>
-              <span><small>到货总价</small><strong>{order.landed_total ?? "未补录成本"}</strong></span>
-              <span><small>收货数量</small><strong>{order.received_quantity ?? "—"}</strong></span>
+              <span><small>到货总价</small><strong>{formatAmount(order.landed_total)}</strong></span>
+              <span><small>收货数量</small><strong>{formatQuantity(order.received_quantity)}</strong></span>
               <span><small>到货日期</small><strong>{order.arrival_date ? new Date(order.arrival_date).toLocaleDateString("zh-CN") : "—"}</strong></span>
             </div>
             <div className="proc-order-actions">
@@ -339,7 +356,7 @@ export function OrderCenter() {
               <label className="proc-field">
                 <span>收货数量 <b>*</b></span>
                 <input type="number" min="0" step="any" value={receiveQuantity} onChange={(event) => setReceiveQuantity(event.target.value)} />
-                <small>不得超过订单数量 {Number(receiveTarget.quantity).toLocaleString("zh-CN")}</small>
+                <small>不得超过订单数量 {formatQuantity(receiveTarget.quantity)}</small>
               </label>
               <label className="proc-field">
                 <span>到货日期 <b>*</b></span>
@@ -476,7 +493,7 @@ function SettlementTable({ onPay }: { onPay: (settlement: SettlementView) => voi
         <div className="proc-settlement-row" key={settlement.id}>
           <code>{settlement.settlement_no}</code>
           <span>{settlement.supplier_name}</span>
-          <strong>{settlement.total_amount}</strong>
+          <strong>{formatAmount(settlement.total_amount)}</strong>
           <i className={settlementTone(settlement.status)}>{SETTLEMENT_STATUS_LABELS[settlement.status]}</i>
           {settlement.status === "SETTLED" ? (
             <button className="proc-link-button" type="button" disabled={busy === `row-pay:${settlement.id}`} onClick={() => onPay(settlement)}>
