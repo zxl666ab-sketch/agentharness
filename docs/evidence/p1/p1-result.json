@@ -1,0 +1,120 @@
+{
+  "checks": [
+    {
+      "name": "P1-1 home has no raw status enums",
+      "ok": true,
+      "detail": "leaks=[]"
+    },
+    {
+      "name": "P1-1 task list rendered",
+      "ok": true,
+      "detail": "items=20"
+    },
+    {
+      "name": "P1-1 task list has no raw enums",
+      "ok": true,
+      "detail": "leaked=[]"
+    },
+    {
+      "name": "P1-1 待审批/审批处理中 文案可区分",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P1-2 next-step bar visible",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P1-2 next-step has label + hint",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P1-3 progress has 9 closed-loop steps",
+      "ok": true,
+      "detail": "steps=['创建需求', '上传报价', '字段复核', '4\\n供应商比价', '5\\n人工审批', '6\\n采购订单', '7\\n收货确认', '8\\n对账', '9\\n付款']"
+    },
+    {
+      "name": "P1-3 approved task shows order entry button",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P1-3 orders view focused on task",
+      "ok": true,
+      "detail": "http://127.0.0.1:5173/?view=orders&order_task=b923de09dc8c48ad94280682a04053bf"
+    },
+    {
+      "name": "P1-3 focused order header",
+      "ok": true,
+      "detail": "任务订单 |  | 聚焦 RFQ-20260814-B923DE 的订单：待发货 → 已发货 → 已收货 → 对账 → 付款 |  | ← 返回采购任务"
+    },
+    {
+      "name": "P1-3 back to task works",
+      "ok": true,
+      "detail": "http://127.0.0.1:5173/?view=tasks&task=b923de09dc8c48ad94280682a04053bf"
+    },
+    {
+      "name": "P1-3 found an approved task",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P1-4 conversation collapsed by default",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P1-4 conversation panel hidden",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P1-4 conversation opens on click",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P1-4 evidence panel closed by default",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P1-4 evidence badge shown",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P1-4 field review defaults to only-review",
+      "ok": true,
+      "detail": "checked=True"
+    },
+    {
+      "name": "P1-4 compare columns collapsed by default",
+      "ok": true,
+      "detail": "columns=['', '供应商', '资格', '报价口径', '总到货成本', '到货单价', '起订量（MOQ）', '交期']"
+    },
+    {
+      "name": "P1-4 expand details shows 11 columns",
+      "ok": true,
+      "detail": "columns=['', '供应商', '资格', '报价口径', '税额', '运费', '总到货成本', '到货单价', '起订量（MOQ）', '交期', '成本指数']"
+    },
+    {
+      "name": "P1-2 create panel shows 2-quote hint",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P1-2 create panel shows file count",
+      "ok": true,
+      "detail": "0 / 50 份"
+    },
+    {
+      "name": "P1 zero console errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "console_errors": []
+}

@@ -435,6 +435,7 @@ describe("procurement workflow views", () => {
         request={dynamicRequest}
         meta={meta}
         busy={null}
+        defaultOnlyReview={false}
         onUpload={async () => undefined}
         onCorrect={async () => undefined}
         onAnalyze={async () => undefined}
@@ -487,6 +488,7 @@ describe("procurement workflow views", () => {
         request={dynamicRequest}
         meta={meta}
         busy={null}
+        defaultOnlyReview={false}
         onUpload={async () => undefined}
         onCorrect={async () => undefined}
         onAnalyze={async () => undefined}
@@ -590,6 +592,7 @@ describe("procurement workflow views", () => {
           },
         }}
         busy={null}
+        defaultOnlyReview={false}
         onUpload={async () => undefined}
         onCorrect={async () => undefined}
         onAnalyze={async () => undefined}
@@ -961,6 +964,7 @@ describe("comparison approval gate", () => {
         request={heightRequest}
         meta={heightMeta}
         busy={null}
+        defaultOnlyReview={false}
         onUpload={async () => undefined}
         onCorrect={async () => undefined}
         onAnalyze={async () => undefined}
@@ -968,4 +972,32 @@ describe("comparison approval gate", () => {
     );
     expect(html).toContain('data-field="height_mm"');
     expect(html).toContain('value="250"');
+  });
+
+  it("collapses accepted fields and evidence details by default (P1-4 density)", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <QuoteWorkspace
+          request={request}
+          meta={meta}
+          busy={null}
+          onUpload={async () => undefined}
+          onCorrect={async () => undefined}
+          onAnalyze={async () => undefined}
+        />
+      );
+    });
+    // 默认 onlyReview：待复核的 supplier_name 可见，已接受的 unit_price 隐藏
+    expect(host.querySelector('[data-field="supplier_name"]')).toBeTruthy();
+    expect(host.querySelector('[data-field="unit_price"]')).toBeNull();
+    // 证据条默认收进可展开面板，只保留「证据已验证」徽标
+    const evidence = host.querySelector("details.proc-evidence-panel") as HTMLDetailsElement | null;
+    expect(evidence).toBeTruthy();
+    expect(evidence?.open).toBe(false);
+    expect(evidence?.textContent).toContain("证据已验证");
+    await act(async () => root.unmount());
+    host.remove();
   });

@@ -19,6 +19,7 @@ import { procurementApi } from "./api";
 import { ROLE_LABELS, type DemoRole } from "./roles";
 import type { AiTaskView, ProcurementRequestSummary, ReviewView } from "./types";
 import type { TaskFilter, WorkbenchView } from "./workbenchUrl";
+import { statusLabel } from "./viewModel";
 
 type Props = {
   role: DemoRole;
@@ -160,7 +161,7 @@ export function WorkbenchHome({
             <div role="row"><span>采购编号</span><span>任务</span><span>报价</span><span>状态</span><span>更新时间</span></div>
             {recent.map((request) => (
               <button role="row" type="button" key={request.id} onClick={() => onOpenTask(request.id)}>
-                <code>{request.reference}</code><strong>{request.title}</strong><span>{request.quote_count} 家</span><span>{request.status}</span><time>{shortDate(request.updated_at)}</time>
+                <code>{request.reference}</code><strong>{request.title}</strong><span>{request.quote_count} 家</span><span>{statusLabel(request.status)}</span><time>{shortDate(request.updated_at)}</time>
               </button>
             ))}
           </div>

@@ -71,7 +71,13 @@ function formatQuantity(value: string | null) {
   return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 3 }).format(quantity);
 }
 
-export function OrderCenter() {
+type Props = {
+  /** 闭环衔接：聚焦指定采购任务的订单（P1-3） */
+  highlightTaskId?: string | null;
+  onBackToTask?: (taskId: string) => void;
+};
+
+export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<OrderStatus | "">("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -91,7 +97,10 @@ export function OrderCenter() {
     queryFn: () => procurementApi.orders(status || undefined, 0, 100),
     refetchInterval: 10_000,
   });
-  const orders = ordersQuery.data?.items || [];
+  const allOrders = ordersQuery.data?.items || [];
+  const focused = highlightTaskId ? allOrders.filter((item) => item.task_id === highlightTaskId) : null;
+  const orders = focused ?? allOrders;
+  const focusTask = highlightTaskId && focused ? focused[0] : null;
 
   const invalidate = () =>
     Promise.all([
@@ -223,10 +232,18 @@ export function OrderCenter() {
     <section className="proc-main">
       <header className="proc-page-head">
         <div>
-          <h1>采购订单</h1>
-          <p>订单状态机：待发货 → 已发货 → 已收货 → 已关闭；收货自动派生对账单</p>
+          <h1>{highlightTaskId ? "任务订单" : "采购订单"}</h1>
+          <p>
+            {focusTask
+              ? `聚焦 ${focusTask.task_reference || "采购任务"} 的订单：待发货 → 已发货 → 已收货 → 对账 → 付款`
+              : "订单状态机：待发货 → 已发货 → 已收货 → 已关闭；收货自动派生对账单"}
+          </p>
         </div>
-        <span className="proc-page-count">共 {ordersQuery.data?.total ?? 0} 张</span>
+        <span className="proc-page-count">
+          {highlightTaskId && onBackToTask ? (
+            <button type="button" className="proc-link-button" onClick={() => onBackToTask(highlightTaskId)}>← 返回采购任务</button>
+          ) : `共 ${ordersQuery.data?.total ?? 0} 张`}
+        </span>
       </header>
 
       <div className="proc-toolbar" role="toolbar">
@@ -259,8 +276,10 @@ export function OrderCenter() {
         {!ordersQuery.isPending && !ordersQuery.isError && !orders.length ? (
           <div className="proc-empty-state">
             <Archive size={30} />
-            <h2>{status ? "该状态下没有订单" : "还没有采购订单"}</h2>
-            <p>已批准任务会在打开本页时自动派生订单（惰性派生，幂等）。</p>
+            <h2>{highlightTaskId ? "该任务还没有订单" : status ? "该状态下没有订单" : "还没有采购订单"}</h2>
+            <p>{highlightTaskId
+              ? "已批准任务会在打开本页时自动派生订单（惰性派生，幂等），刷新后重试。"
+              : "已批准任务会在打开本页时自动派生订单（惰性派生，幂等）。"}</p>
           </div>
         ) : null}
         {orders.map((order) => (

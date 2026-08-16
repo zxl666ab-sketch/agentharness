@@ -74,6 +74,7 @@ export function ComparisonView({
   const [noAwardOpen, setNoAwardOpen] = useState(false);
   const [noAwardConfirmed, setNoAwardConfirmed] = useState(false);
   const [noAwardNote, setNoAwardNote] = useState("");
+  const [showDetails, setShowDetails] = useState(false);
   useEffect(() => {
     setSelectedId(result?.recommended_quote_id || null);
     setConfirmOpen(false);
@@ -129,13 +130,19 @@ export function ComparisonView({
             <p>{result.recommendation_explanation.map(businessText).join("；")}</p>
           </div>
         </div>
-        <div className="proc-comparison-proof">
-          <span><Fingerprint size={14} />快照 v{snapshot.version}</span>
-          <code title={snapshot.input_sha256}>{snapshot.input_sha256.slice(0, 16)}</code>
-          <a href={`/api/artifacts/${snapshot.artifact_id}`} target="_blank" rel="noreferrer">
-            <ExternalLink size={14} />证据
-          </a>
-        </div>
+        <details className="proc-evidence-panel compact" aria-label="比价证据详情">
+          <summary>
+            <span className="proc-evidence-badge"><ShieldCheck size={14} />证据已验证</span>
+            <small>快照指纹与比对原件</small>
+          </summary>
+          <div className="proc-comparison-proof">
+            <span><Fingerprint size={14} />快照 v{snapshot.version}</span>
+            <code title={snapshot.input_sha256}>{snapshot.input_sha256.slice(0, 16)}</code>
+            <a href={`/api/artifacts/${snapshot.artifact_id}`} target="_blank" rel="noreferrer">
+              <ExternalLink size={14} />证据
+            </a>
+          </div>
+        </details>
         <div className="proc-comparison-counts">
           <span><strong>{result.eligible_count}</strong>符合</span>
           <span><strong>{result.excluded_count}</strong>淘汰</span>
@@ -144,6 +151,12 @@ export function ComparisonView({
       </header>
 
       <div className="proc-comparison-table-wrap">
+        <div className="proc-comparison-table-toolbar">
+          <span>默认收起税额 / 运费 / 成本指数等明细列</span>
+          <button type="button" className="proc-button secondary compact" onClick={() => setShowDetails((value) => !value)}>
+            {showDetails ? "收起详情" : "展开详情"}
+          </button>
+        </div>
         <table className="proc-comparison-table">
           <thead>
             <tr>
@@ -151,13 +164,13 @@ export function ComparisonView({
               <th>供应商</th>
               <th>资格</th>
               <th>报价口径</th>
-              <th>税额</th>
-              <th>运费</th>
+              {showDetails ? <th>税额</th> : null}
+              {showDetails ? <th>运费</th> : null}
               <th>总到货成本</th>
               <th>到货单价</th>
               <th>起订量（MOQ）</th>
               <th>交期</th>
-              <th>成本指数</th>
+              {showDetails ? <th>成本指数</th> : null}
             </tr>
           </thead>
           <tbody>
@@ -193,13 +206,13 @@ export function ComparisonView({
                   <span>{quote.cost.quoted_price} {quote.cost.quote_currency}</span>
                   <small>/ {quote.cost.price_basis.toLocaleString("zh-CN")} 个</small>
                 </td>
-                <td>{money(quote.cost.tax_quote_currency, quote.cost.quote_currency)}</td>
-                <td>{money(quote.cost.freight_quote_currency, quote.cost.quote_currency)}</td>
+                {showDetails ? <td>{money(quote.cost.tax_quote_currency, quote.cost.quote_currency)}</td> : null}
+                {showDetails ? <td>{money(quote.cost.freight_quote_currency, quote.cost.quote_currency)}</td> : null}
                 <td><strong>{money(quote.cost.landed_total_base, quote.cost.base_currency)}</strong></td>
                 <td><strong>{money(quote.cost.landed_unit_base, quote.cost.base_currency)}</strong></td>
                 <td>{quote.commercial.moq.toLocaleString("zh-CN")}</td>
                 <td>{quote.commercial.lead_time_days} 天</td>
-                <td>{quote.score || "-"}</td>
+                {showDetails ? <td>{quote.score || "-"}</td> : null}
               </tr>
             ))}
           </tbody>

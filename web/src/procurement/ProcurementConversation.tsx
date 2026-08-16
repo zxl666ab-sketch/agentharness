@@ -220,6 +220,9 @@ export function NewProcurementConversation({
             {busy ? "正在创建" : "开始分析"}
           </button>
         </div>
+        {files.length < 2 ? (
+          <p className="proc-compose-hint" role="note">至少上传 2 家供应商报价才能开始分析（当前已选 {files.length} 份）</p>
+        ) : null}
         {localError || error ? <p className="proc-compose-error" role="alert">{localError || error}</p> : null}
       </form>
     </section>

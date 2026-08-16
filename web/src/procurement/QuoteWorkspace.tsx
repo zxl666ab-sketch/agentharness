@@ -27,6 +27,8 @@ type Props = {
   meta: ProcurementMeta;
   busy: string | null;
   error?: string | null;
+  /** 默认是否只显示待复核字段（P1-4 默认 true） */
+  defaultOnlyReview?: boolean;
   onUpload: (files: File[]) => Promise<void>;
   onCorrect: (
     quoteId: string,
@@ -291,12 +293,14 @@ export function QuoteWorkspace({
   meta,
   busy,
   error,
+  defaultOnlyReview = true,
   onUpload,
   onCorrect,
   onAnalyze,
 }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(request.quotes[0]?.id || null);
-  const [onlyReview, setOnlyReview] = useState(false);
+  // 默认只显示待复核字段（P1-4 信息密度治理），可手动切回全部字段
+  const [onlyReview, setOnlyReview] = useState(defaultOnlyReview);
   useEffect(() => {
     if (!request.quotes.some((quote) => quote.id === selectedId)) {
       setSelectedId(request.quotes[0]?.id || null);
@@ -451,11 +455,18 @@ export function QuoteWorkspace({
                 </a>
               </div>
             </header>
-            <div className="proc-source-strip">
-              <span><ShieldCheck size={14} />原件 SHA-256</span>
-              <code title={selected.source_sha256}>{selected.source_sha256.slice(0, 20)}</code>
-              <span>解析用时 {Math.round(selected.processing_ms)} ms</span>
-            </div>
+            <details className="proc-evidence-panel" aria-label="报价证据详情">
+              <summary>
+                <span className="proc-evidence-badge"><ShieldCheck size={14} />证据已验证</span>
+                <small>原件指纹与解析用时</small>
+              </summary>
+              <div className="proc-source-strip">
+                <span><ShieldCheck size={14} />原件 SHA-256</span>
+                <code title={selected.source_sha256}>{selected.source_sha256.slice(0, 20)}</code>
+                <span>解析用时 {Math.round(selected.processing_ms)} ms</span>
+                <span>快照 v{selected.extracted.schema_version} · {selected.parser_version}</span>
+              </div>
+            </details>
             <div className="proc-field-table">
               <div className="proc-field-table-head"><span>字段</span><span>抽取值 / 修正值</span><span>来源证据</span></div>
               {entries.map(({ name, field, meta: fieldMeta }) => (

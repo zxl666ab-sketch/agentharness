@@ -26,6 +26,8 @@ export type WorkbenchUrlState = {
   status: TaskFilter;
   q: string;
   page: number;
+  /** 订单视图聚焦的采购任务（P1-3 闭环衔接入口） */
+  orderTask: string | null;
 };
 
 function oneOf<T extends string>(value: string | null, allowed: readonly T[], fallback: T): T {
@@ -51,6 +53,7 @@ export function readWorkbenchUrl(search?: string): WorkbenchUrlState {
     status: oneOf(query.get("status"), TASK_FILTERS, "all"),
     q: query.get("q") || "",
     page: Math.max(0, Number.parseInt(query.get("page") || "0", 10) || 0),
+    orderTask: query.get("order_task")?.trim() || null,
   };
 }
 
@@ -64,6 +67,7 @@ export function workbenchSearch(state: WorkbenchUrlState) {
   if (state.status !== "all") query.set("status", state.status);
   if (state.q.trim()) query.set("q", state.q.trim());
   if (state.page > 0) query.set("page", String(state.page));
+  if (state.orderTask) query.set("order_task", state.orderTask);
   const value = query.toString();
   return value ? `?${value}` : "";
 }
