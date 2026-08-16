@@ -1,11 +1,12 @@
 """P2-2 修正回灌：把人工修正记录导出为评测集扩展候选。
 
 从只读接口 GET /api/procurement/corrections 拉取全部人工修正记录，转换为
-评测集扩展候选并写入新文件 frozen-evaluation-corrections.json（冻结资源不动，
-用户审核后才启用）。幂等可重跑：每次运行都从实时数据全量重建同一输出文件。
+评测集扩展候选并写入新文件（冻结资源不动，用户审核后才提交启用）。
+内容级幂等：同输入实时数据 + 稳定排序 (created_at, id) 下 items 字段一致；
+exported_at 每次运行变化，属导出元数据，不参与内容比对。
 
 用法：
-  uv run python scripts/export_corrections_to_eval.py [--base-url http://127.0.0.1:8741] [--out frozen-evaluation-corrections.json]
+  uv run python scripts/export_corrections_to_eval.py [--base-url http://127.0.0.1:8741] [--out procurement-service/src/main/resources/frozen/frozen-evaluation-corrections.json]
 """
 
 from __future__ import annotations
@@ -17,7 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUT = ROOT / "frozen-evaluation-corrections.json"
+# 默认输出到 frozen 资源目录（与其它冻结评测文件同处；提交前需人工审核）
+DEFAULT_OUT = ROOT / "procurement-service/src/main/resources/frozen/frozen-evaluation-corrections.json"
 
 
 def fetch_corrections(base_url: str, page_size: int = 100) -> list[dict]:

@@ -181,7 +181,8 @@ class InternalAgentCommands:
         invoice = parsed.get("invoice") or {}
         if not str(invoice.get("invoice_no") or "").strip() or invoice.get("total_amount") is None:
             raise ValueError("invoice parse missing required fields (invoice_no / total_amount)")
-        return {"invoice": invoice, "parser_version": parsed.get("parser_version"), "processing_ms": parsed.get("processing_ms")}
+        # parser_version 位于 invoice 对象内层（与 Java applyParseResult 的读取位置一致）
+        return {"invoice": invoice, "processing_ms": parsed.get("processing_ms")}
 
     async def _explain_invoice_diff(self, body: AgentCommandBody) -> dict[str, Any]:
         """P3-1 模式 C：Java 结构化差异 → 自然语言原因与处理建议（数值只来自注入的 diffs，

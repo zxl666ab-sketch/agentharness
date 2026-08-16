@@ -17,6 +17,9 @@ from agentharness.contracts import (
 
 QUANTITY_UNITS = "个|只|件|套|份|包|卷|箱|盒|张|桶|瓶|吨|公斤|千克|kg"
 
+# 需求结构化 schema 版本：参与语义缓存 key（升级即自动失效），与 extract_requirement 输出一致
+REQUIREMENT_SCHEMA_VERSION = 2
+
 MODEL_REQUIREMENT_SYSTEM_PROMPT = """你是采购需求结构化助手。把用户的中文采购描述转换为一个 JSON 对象，且只输出 JSON，不要 Markdown、解释或推荐供应商。
 
 必须返回以下结构：
@@ -498,7 +501,7 @@ def extract_requirement(messages: list[Message]) -> dict[str, Any]:
         if max_unit_cost:
             constraints["max_landed_unit_cost"] = max_unit_cost.group(1)
         return {
-            "schema_version": 2,
+            "schema_version": REQUIREMENT_SCHEMA_VERSION,
             "title": f"{item_name}采购询价",
             "category": "general",
             "item_name": item_name,

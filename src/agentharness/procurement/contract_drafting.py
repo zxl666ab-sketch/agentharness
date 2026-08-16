@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 CONTRACT_TEMPLATE = """采购合同
@@ -44,7 +45,7 @@ CONTRACT_TEMPLATE = """采购合同
 CLAUSE_LIBRARY_SOFT_HINTS: list[dict[str, Any]] = [
     {
         "title": "金额条款",
-        "hint": "金额大于 5000 元，建议复核预算与三单匹配口径",
+        "hint": "金额不少于 5000 元，建议复核预算与三单匹配口径",
         "threshold": 5000,
     },
     {
@@ -135,10 +136,10 @@ def build_contract_draft(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _is_number(value: str) -> bool:
     try:
-        float(value)
-        return True
+        number = float(value)
     except (TypeError, ValueError):
         return False
+    return math.isfinite(number)  # 拒绝 inf/nan（避免触发金额提示阈值）
 
 
 __all__ = ["build_contract_draft"]

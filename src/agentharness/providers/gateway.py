@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable
@@ -107,6 +108,7 @@ class CircuitBreaker:
         self._clock = clock
         self._outcomes: deque[tuple[float, bool]] = deque()
         self._open_until = 0.0
+        self._probe_inflight = False  # M7：half-open 单飞行探测标志
 
     def state(self) -> str:
         now = self._clock()
@@ -119,12 +121,25 @@ class CircuitBreaker:
     def allow(self) -> bool:
         return self.state() != "open"
 
+    def try_probe(self) -> bool:
+        """half-open 阶段仅放行一个在途探测请求（单飞行）；其余返回 False 继续拒绝。
+
+        修复（审核 M7）：避免并发请求同时冲击未恢复的 provider，破坏熔断恢复语义。
+        """
+        if self.state() != "half_open":
+            return True
+        if self._probe_inflight:
+            return False
+        self._probe_inflight = True
+        return True
+
     def record(self, ok: bool) -> str:
         """Record an outcome; returns the resulting state (for event emission)."""
         now = self._clock()
         if self._open_until > 0:
             if now >= self._open_until:
                 # 探测结果：成功恢复，失败重新熔断一个完整窗口
+                self._probe_inflight = False
                 if ok:
                     self._open_until = 0.0
                     self._outcomes.clear()
@@ -140,12 +155,18 @@ class CircuitBreaker:
         failures = sum(1 for _ts, outcome in self._outcomes if not outcome)
         if failures / len(self._outcomes) >= self._failure_rate:
             self._open_until = now + self._open_s
+            self._probe_inflight = False
             return "open"
         return "closed"
 
     def _prune(self, now: float) -> None:
         while self._outcomes and now - self._outcomes[0][0] > self._window_s:
             self._outcomes.popleft()
+
+    def abort_probe(self) -> None:
+        """取消的请求若持有 half-open 探测位，立即释放（避免探测位死锁）。"""
+        if self.state() == "half_open":
+            self._probe_inflight = False
 
     def remaining_open_s(self) -> float:
         return max(0.0, self._open_until - self._clock())
@@ -183,6 +204,8 @@ class ProviderGateway:
             "degraded": 0,
         }
         self._last_event: dict[str, Any] | None = None
+        # M9：心跳线程（agent_service daemon 线程）跨线程读快照的互斥
+        self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # gating
@@ -190,10 +213,12 @@ class ProviderGateway:
 
     async def acquire(self) -> None:
         """Wait for concurrency quota + QPS token; raise GatewayBlockedError on refusal."""
-        if self._breaker.state() == "open":
-            self._stats["circuit_blocked"] += 1
+        state = self._breaker.state()
+        if state == "open" or (state == "half_open" and not self._breaker.try_probe()):
+            with self._lock:
+                self._stats["circuit_blocked"] += 1
             detail = {
-                "retry_after_s": round(self._breaker.remaining_open_s(), 3),
+                "retry_after_s": round(self._breaker.remaining_open_s(), 3) if state == "open" else 0.5,
                 "provider": self.provider,
             }
             self._notify("circuit_open", detail)
@@ -207,7 +232,8 @@ class ProviderGateway:
             wait = self._bucket.take()
             if wait > 0:
                 if wait > self._bucket_wait_s:
-                    self._stats["rate_limited"] += 1
+                    with self._lock:
+                        self._stats["rate_limited"] += 1
                     detail = {
                         "retry_after_s": round(wait, 3),
                         "qps": self._config["qps"],
@@ -221,7 +247,8 @@ class ProviderGateway:
                     )
                 await asyncio.sleep(wait)
                 if self._bucket.take() > 0:
-                    self._stats["rate_limited"] += 1
+                    with self._lock:
+                        self._stats["rate_limited"] += 1
                     detail = {
                         "retry_after_s": 0.0,
                         "qps": self._config["qps"],
@@ -237,20 +264,28 @@ class ProviderGateway:
         self._semaphore.release()
 
     def record(self, ok: bool) -> None:
-        self._stats["requests"] += 1
-        if ok:
-            self._stats["successes"] += 1
-        else:
-            self._stats["failures"] += 1
+        with self._lock:
+            self._stats["requests"] += 1
+            if ok:
+                self._stats["successes"] += 1
+            else:
+                self._stats["failures"] += 1
+        # M8：事件只在状态迁移时发射（open/half_open ↔ closed），稳态流量不刷屏
+        before = self._breaker.state()
         state = self._breaker.record(ok)
-        if state == "open":
+        if state == "open" and before != "open":
             self._notify("circuit_opened", {"provider": self.provider, "open_s": self._config["open_s"]})
-        elif state == "closed":
+        elif state == "closed" and before in ("open", "half_open"):
             self._notify("circuit_closed", {"provider": self.provider})
 
     def record_degraded(self) -> None:
-        self._stats["degraded"] += 1
+        with self._lock:
+            self._stats["degraded"] += 1
         self._notify("degraded", {"provider": self.provider})
+
+    def abort_probe(self) -> None:
+        """取消的请求若持有 half-open 探测位，立即释放（避免探测位死锁）。"""
+        self._breaker.abort_probe()
 
     # ------------------------------------------------------------------
     # observability
@@ -258,11 +293,16 @@ class ProviderGateway:
 
     def snapshot(self) -> dict[str, Any]:
         """Sanitized gateway state for the Java platform endpoint (no secrets)."""
+        with self._lock:
+            stats = dict(self._stats)
+            state = self._breaker.state()
+            remaining = round(self._breaker.remaining_open_s(), 3)
+            last_event = self._last_event
         return {
             "provider": self.provider,
-            "state": self._breaker.state(),
-            "remaining_open_s": round(self._breaker.remaining_open_s(), 3),
-            "stats": dict(self._stats),
+            "state": state,
+            "remaining_open_s": remaining,
+            "stats": stats,
             "limits": {
                 "max_concurrency": self._config["max_concurrency"],
                 "qps": self._config["qps"],
@@ -271,7 +311,7 @@ class ProviderGateway:
                 "min_samples": self._config["min_samples"],
                 "open_s": self._config["open_s"],
             },
-            "last_event": self._last_event,
+            "last_event": last_event,
         }
 
     def _notify(self, event: str, detail: dict[str, Any]) -> None:
@@ -351,6 +391,9 @@ class GatewayAdapter:
             self.gateway.release()
             if outcome is not None:
                 self.gateway.record(outcome == "ok")
+            else:
+                # 取消路径不产生结果：释放可能持有的 half-open 探测位
+                self.gateway.abort_probe()
 
 
 __all__ = [

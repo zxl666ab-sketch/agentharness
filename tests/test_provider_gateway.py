@@ -168,6 +168,106 @@ class TestCircuitBreaker:
         assert breaker.state() == "closed"
 
 
+class TestHalfOpenProbeGating:
+    """M7：half-open 只放行单个探测请求（单飞行），失败后重新熔断。"""
+
+    def test_only_one_probe_allowed_in_half_open(self) -> None:
+        clock = _FakeClock()
+        breaker = CircuitBreaker(
+            window_s=30.0, failure_rate=0.5, min_samples=2, open_s=60.0, clock=clock
+        )
+        breaker.record(False)
+        breaker.record(False)
+        assert breaker.state() == "open"
+        clock.advance(61.0)
+        assert breaker.state() == "half_open"
+        assert breaker.try_probe() is True
+        assert breaker.try_probe() is False  # 单飞行：第二个探测被拒
+        assert breaker.record(True) == "closed"  # 探测成功 → 恢复
+        assert breaker.try_probe() is True  # 恢复后正常放行
+
+    def test_failed_probe_reopens_and_blocks_until_next_window(self) -> None:
+        clock = _FakeClock()
+        breaker = CircuitBreaker(
+            window_s=30.0, failure_rate=0.5, min_samples=2, open_s=60.0, clock=clock
+        )
+        breaker.record(False)
+        breaker.record(False)
+        clock.advance(61.0)
+        assert breaker.try_probe() is True
+        assert breaker.record(False) == "open"  # 探测失败 → 重新熔断
+        assert breaker.state() == "open"
+        assert breaker.allow() is False  # open 态由 acquire 拦截（try_probe 仅 half_open 语义）
+        clock.advance(61.0)
+        assert breaker.state() == "half_open"
+        assert breaker.try_probe() is True  # 下一窗口可再探测
+
+    def test_abort_probe_releases_inflight_flag(self) -> None:
+        clock = _FakeClock()
+        breaker = CircuitBreaker(
+            window_s=30.0, failure_rate=0.5, min_samples=2, open_s=60.0, clock=clock
+        )
+        breaker.record(False)
+        breaker.record(False)
+        clock.advance(61.0)
+        assert breaker.try_probe() is True
+        breaker.abort_probe()  # 取消路径释放探测位
+        assert breaker.try_probe() is True
+
+    @pytest.mark.asyncio
+    async def test_gateway_rejects_second_probe_before_first_completes(self) -> None:
+        clock = _FakeClock()
+        gateway = _gateway(
+            clock, qps=100.0, window_s=30.0, failure_rate=0.5, min_samples=2, open_s=60.0
+        )
+        gateway.record(False)
+        gateway.record(False)
+        clock.advance(61.0)  # half_open
+        await gateway.acquire()  # 第一个请求拿到探测位
+        gateway.release()
+        with pytest.raises(GatewayBlockedError) as exc:
+            await gateway.acquire()  # 探测完成前其余请求被拒
+        assert exc.value.code == "circuit_open"
+        gateway.record(True)  # 探测成功 → 恢复
+        assert gateway.snapshot()["state"] == "closed"
+
+
+class TestCircuitEventEmission:
+    """M8：circuit_closed 只在状态迁移（open/half_open → closed）时发射，稳态不刷屏。"""
+
+    @pytest.mark.asyncio
+    async def test_no_circuit_closed_spam_on_steady_state(self) -> None:
+        clock = _FakeClock()
+        events: list[tuple[str, str, dict[str, Any]]] = []
+        gateway = _gateway(
+            clock, events=events, qps=100.0, window_s=30.0, failure_rate=0.5,
+            min_samples=5, open_s=60.0,
+        )
+        adapter = GatewayAdapter(_FakeAdapter(), gateway)
+        for _ in range(8):
+            await _drain(adapter, _request())
+        assert gateway.snapshot()["state"] == "closed"
+        assert not any(event == "circuit_closed" for _p, event, _d in events)
+
+    @pytest.mark.asyncio
+    async def test_circuit_closed_emitted_once_on_recovery_transition(self) -> None:
+        clock = _FakeClock()
+        events: list[tuple[str, str, dict[str, Any]]] = []
+        gateway = _gateway(
+            clock, events=events, qps=100.0, window_s=30.0, failure_rate=0.5,
+            min_samples=2, open_s=60.0,
+        )
+        adapter = GatewayAdapter(_FakeAdapter(fail=True), gateway)
+        for _ in range(2):
+            await _drain(adapter, _request())
+        assert gateway.snapshot()["state"] == "open"
+        clock.advance(61.0)
+        # 探测成功（换成功适配器）→ 恢复并恰好发射一次 circuit_closed
+        await _drain(GatewayAdapter(_FakeAdapter(), gateway), _request())
+        assert gateway.snapshot()["state"] == "closed"
+        assert sum(1 for _p, event, _d in events if event == "circuit_closed") == 1
+
+
 class TestGatewayAcquire:
     @pytest.mark.asyncio
     async def test_circuit_open_blocks_with_retry_after(self) -> None:

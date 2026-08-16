@@ -64,7 +64,7 @@ from agentharness.security.redaction import Redactor, default_redactor
 from agentharness.storage.sqlite import Storage
 
 _RETRYABLE_PROVIDER_ERRORS = frozenset(
-    {"rate_limit", "timeout", "connection", "server_error"}
+    {"rate_limit", "rate_limited", "circuit_open", "timeout", "connection", "server_error"}
 )
 
 

@@ -15,7 +15,19 @@ from agentharness.contracts import (
     StreamItemType,
     Usage,
 )
+from agentharness.engine.runtime import _RETRYABLE_PROVIDER_ERRORS, _provider_exception_kind
 from agentharness.harness import Harness
+from agentharness.providers.gateway import GatewayBlockedError
+
+
+def test_gateway_block_errors_are_classified_retryable() -> None:
+    """H2 修复：网关限流/熔断异常必须进入可重试集合（P2-1 恢复路径）。"""
+    blocked = GatewayBlockedError("rate_limited", provider="openai", retry_after_s=1.5)
+    assert _provider_exception_kind(blocked) == "rate_limited"
+    assert _provider_exception_kind(blocked) in _RETRYABLE_PROVIDER_ERRORS
+    opened = GatewayBlockedError("circuit_open", provider="openai", retry_after_s=2.0)
+    assert _provider_exception_kind(opened) == "circuit_open"
+    assert _provider_exception_kind(opened) in _RETRYABLE_PROVIDER_ERRORS
 
 
 class _SequenceProvider:

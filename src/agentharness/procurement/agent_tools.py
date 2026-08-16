@@ -23,6 +23,7 @@ from agentharness.contracts import (
 )
 from agentharness.procurement.parsing import PARSER_VERSION, fields_requiring_review, parse_quote
 from agentharness.procurement.requirements import (
+    REQUIREMENT_SCHEMA_VERSION,
     RequirementModelError,
     _validate_model_requirement,
     extract_requirement,
@@ -168,7 +169,7 @@ class ProcurementAgentTools:
                 raise ValueError("procurement source message is missing")
             # P2-3 语义缓存：相同需求消息（精确 SHA-256 + schema 版本）→ 确定性复用
             message_sha = hashlib.sha256(message.encode("utf-8")).hexdigest()
-            cached = self.semantic_cache.get_requirement(message_sha, 2)
+            cached = self.semantic_cache.get_requirement(message_sha, REQUIREMENT_SCHEMA_VERSION)
             if cached is not None:
                 requirement = cached
                 source = "semantic_cache"
@@ -176,7 +177,9 @@ class ProcurementAgentTools:
                 requirement = extract_requirement(
                     [Message(role=MessageRole.user, content=message)]
                 )
-                self.semantic_cache.put_requirement(message_sha, 2, requirement)
+                self.semantic_cache.put_requirement(
+                    message_sha, REQUIREMENT_SCHEMA_VERSION, requirement
+                )
                 source = "deterministic_offline_adapter"
         else:
             try:
@@ -298,8 +301,8 @@ class ProcurementAgentTools:
             extracted = await asyncio.to_thread(parse_quote, filename, content)
             review_fields = fields_requiring_review(extracted)
             extracted = {**extracted, "review_fields": review_fields}
-            if expected_sha:
-                # 只缓存工具成功路径的解析结果（已通过字段校验）
+            if expected_sha and not review_fields:
+                # 只缓存已通过字段校验（无待复核字段）的解析结果，与设计纪律一致
                 self.semantic_cache.put_quote_parse(expected_sha, PARSER_VERSION, extracted)
         review_fields = extracted.get("review_fields") or fields_requiring_review(extracted)
         supplier = str(

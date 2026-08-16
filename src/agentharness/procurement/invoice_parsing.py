@@ -54,6 +54,42 @@ _AMOUNT_KEYS = {
 }
 
 
+def _match_field(label: str) -> str | None:
+    """键值标签 → 字段：精确匹配优先；startswith 匹配取最长别名（确定性，避免 dict 顺序耦合）。
+
+    修复（审核 M-低）：'合计金额' 不得因 '合计' 别名的 startswith 而被误判为 total_amount。
+    """
+    for field, aliases in _ALIASES.items():
+        for alias in aliases:
+            if label == _key(alias):
+                return field
+    best: tuple[int, str] | None = None
+    for field, aliases in _ALIASES.items():
+        for alias in aliases:
+            key_alias = _key(alias)
+            if key_alias and label.startswith(key_alias):
+                if best is None or len(key_alias) > best[0]:
+                    best = (len(key_alias), field)
+    return best[1] if best else None
+
+
+def _alias_pattern(alias: str) -> re.Pattern[str]:
+    """预编译单个别名的值捕获正则（值分组无嵌套量词，无 ReDoS 风险）。"""
+    escaped = re.escape(alias).replace("\\ ", "\\s*")
+    return re.compile(
+        rf"{escaped}[\s:：]*([0-9,¥￥.\-年月日%]+|[^\s，。；;]{{2,40}})",
+        re.IGNORECASE,
+    )
+
+
+# 预编译别名正则（避免每行每别名重复 re.compile）
+_ALIAS_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
+    (alias, field, _alias_pattern(alias))
+    for field, aliases in _ALIASES.items()
+    for alias in aliases
+]
+
+
 def _key(value: Any) -> str:
     return re.sub(r"[\s:：*（）()【】\[\]_\-—]", "", str(value or "")).strip().lower()
 
@@ -110,11 +146,7 @@ def _entries_from_cells(rows: list[list[Any]], kind: str) -> list[dict[str, Any]
         label = _key(cells[0])
         if not label:
             continue
-        field = next(
-            (name for name, aliases in _ALIASES.items()
-             if any(label == _key(alias) or label.startswith(_key(alias)) for alias in aliases)),
-            None,
-        )
+        field = _match_field(label)
         if field is None:
             continue
         value = cells[1]
@@ -209,19 +241,13 @@ def _from_text(text: str, kind: str) -> dict[str, Any]:
     fields: dict[str, Any] = {}
     for line in lines:
         matches: list[tuple[int, str, str, str, int, int]] = []  # (alias_len, alias, field, value, start, end)
-        for field, aliases in _ALIASES.items():
-            for alias in aliases:
-                escaped = re.escape(alias).replace("\\ ", "\\s*")
-                pattern = re.compile(
-                    rf"{escaped}[\s:：]*([0-9,¥￥.\-年月日%]+|[^\s，。；;]{{2,40}})",
-                    re.IGNORECASE,
-                )
-                for match in pattern.finditer(line):
-                    matches.append((
-                        len(alias), alias, field,
-                        match.group(1).strip().rstrip("元"),
-                        match.start(), match.end(),
-                    ))
+        for alias, field, pattern in _ALIAS_PATTERNS:
+            for match in pattern.finditer(line):
+                matches.append((
+                    len(alias), alias, field,
+                    match.group(1).strip().rstrip("元"),
+                    match.start(), match.end(),
+                ))
         matches.sort(key=lambda item: (-item[0], item[1]))
         taken: list[tuple[int, int]] = []
         for _alias_len, _alias, field, value, start, end in matches:
@@ -255,7 +281,7 @@ def parse_invoice(filename: str, data: bytes) -> dict[str, Any]:
     else:
         raise InvoiceParseError("invoice must be xlsx or text pdf")
 
-    invoice: dict[str, Any] = {}
+    invoice: dict[str, Any] = {"parser_version": INVOICE_PARSER_VERSION}
     for field, spec in {
         "invoice_code": ("text", None),
         "invoice_no": ("text", None),

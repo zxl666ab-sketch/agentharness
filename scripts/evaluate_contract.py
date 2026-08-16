@@ -45,7 +45,8 @@ def main() -> int:
     per_case: list[dict] = []
 
     for case in cases:
-        inputs = {**case["inputs"], "contract_id": case["id"] * 2}
+        # contract_id 唯一化（不能与真实合同 id 冲突；build_contract_draft 只要求非空）
+        inputs = {**case["inputs"], "contract_id": f"eval-{case['id']}"}
         draft = build_contract_draft(inputs)
         produced = {clause["title"] for clause in draft["clauses"]}
         expected = set(case["expected_clauses"])

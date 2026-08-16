@@ -125,8 +125,12 @@ class Harness:
                 pass
 
     def gateway_snapshots(self) -> list[dict[str, Any]]:
-        """脱敏的 LLM 网关状态（供 Java /api/procurement/platform 展示）。"""
-        return [gateway.snapshot() for gateway in self.gateways.values()]
+        """脱敏的 LLM 网关状态（供 Java /api/procurement/platform 展示）。
+
+        M9：心跳线程（daemon）跨线程调用；先浅拷贝键列表，
+        避免与 register_provider 的并发增删产生 'dictionary changed size'。
+        """
+        return [gateway.snapshot() for gateway in list(self.gateways.values())]
 
     async def run(
         self, request: RunRequest, *, run_id: str | None = None
