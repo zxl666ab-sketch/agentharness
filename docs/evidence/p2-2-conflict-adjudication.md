@@ -10,12 +10,13 @@
 | chosen_from_conflicts 落库 | Flyway `V13__quote_correction_conflict_flag.sql` + `QuoteCorrection` | 新列 `chosen_from_conflicts boolean NOT NULL DEFAULT FALSE`；审计事件 `quote_field_corrected` 附带该标记 |
 | 服务端候选校验 | `CorrectionConflictPolicy` + `ProcurementTaskService.correctQuote` | 标记为候选选择时，所选值必须命中 `conflicts[].value`（字符串规范化比较，数字/字符串同候选，null 拒绝），否则 400 `chosen_value_not_in_conflicts` |
 | 只读回灌接口 | `GET /api/procurement/corrections`（page/size） | `CorrectionView`（task/quote/供应商/字段/新旧值/候选标记/操作人/时间），contracts 已同步 |
-| 导出脚本 | `scripts/export_corrections_to_eval.py` | 拉取全部修正 → `frozen-evaluation-corrections.json`（新文件，冻结资源不动，README 标注 synthetic；按 created_at+id 稳定排序，每次全量重建 → **幂等可重跑**） |
+| 导出脚本 | `scripts/export_corrections_to_eval.py` | 拉取全部修正 → `procurement-service/src/main/resources/frozen/frozen-evaluation-corrections.json`（新文件，冻结资源不动，README 标注 synthetic；按 created_at+id 稳定排序，每次全量重建；items 内容幂等，`exported_at` 为导出元数据每次变化） |
 
 ## 验收
 
 - ✅ 冲突字段可点选候选值完成修正（Web 单测：点击 chip → `onCorrect(quote, field, value, true)`）
-- ✅ 导出脚本幂等可重跑（单测：两次 `build_export` 输出一致；稳定排序验证）
+- ✅ 导出脚本可重跑（单测：两次 `build_export` 的 items 内容一致；稳定排序验证；`exported_at` 元数据除外）
+- ✅ `frozen-evaluation-corrections.json` 已按当前演示数据生成并提交（当前 0 条修正记录；有新修正后重跑脚本更新）
 - ✅ README「冲突裁决与修正回灌（P2-2）」说明回灌流程
 - ✅ 冻结资源（`frozen-evaluation.json` / `frozen-evaluation-ext.json` / 黄金契约）零改动
 

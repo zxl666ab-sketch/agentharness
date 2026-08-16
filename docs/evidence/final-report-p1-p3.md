@@ -8,10 +8,10 @@
 |---|---|---|---|
 | P1 工作台可用性 | `c8be795` | 共享 viewModel（状态标签/语调/闭环步骤/下一步引导）、9 步闭环进度条、已审批任务一键转订单（order_task 聚焦视图）、信息密度默认折叠、god-component 拆分 1071→382 行（useWorkbenchState/useRequestQueries/useWorkbenchActions + DeleteDialog/ConfigDrawer） | `docs/evidence/p1-frontend-usability.md`，Playwright 走查 22/22 |
 | P2-1 LLM 网关熔断/降级 | `59ed979` | Python 侧按 provider 并发信号量 + QPS 令牌桶 + 30s 窗口熔断（半开探测）、可降级解释任务模板降级（标记 model-unavailable）、`provider_gateway.*` 事件 + 心跳快照到 Java 平台接口、SystemInfo 网关卡片、.env 旋钮；故障注入演示 全链路 open→blocked→degraded→recovered | `docs/evidence/p2-1-llm-gateway.md` |
-| P2-2 报价纠错闭环 | `4d75e07` | 冲突候选 chip 点击纠正（chosen_from_conflicts 持久化，V13）+ 服务端候选校验（CorrectionConflictPolicy）、只读 `GET /api/procurement/corrections`、导出脚本 → `frozen-evaluation-corrections.json`（幂等，冻结资源零改动） | `docs/evidence/p2-2-conflict-adjudication.md` |
+| P2-2 报价纠错闭环 | `4d75e07` | 冲突候选 chip 点击纠正（chosen_from_conflicts 持久化，V13）+ 服务端候选校验（CorrectionConflictPolicy）、只读 `GET /api/procurement/corrections`、导出脚本 → `frozen-evaluation-corrections.json`（修复后已生成并提交，当前 0 条修正记录，随演示数据重跑更新；冻结资源零改动） | `docs/evidence/p2-2-conflict-adjudication.md` |
 | P2-3 语义缓存 | `272e402` | Python 侧 Redis 精确匹配缓存（key `semantic:v1:{scope}:{sha256}:{version}`、TTL 24h、版本失效、校验通过才写、Redis 不可用自动 no-op），接入报价解析与需求抽取，agent 容器 AGENT_REDIS_URL | `docs/evidence/p2-3-semantic-cache.md` |
 | P3-1 发票三单匹配（旗舰） | `bd78e21` | V14 invoice 域 + 状态机（REGISTERED→MATCHED→RECONCILED / DIFF_HOLD / VOIDED，注册进 StateMachineRegistry）、确定性 ThreeWayMatcher（数量/单价 ±0.01 含税口径/总价 ±0.01/税率 ±0.1%）、差异挂起三种处理（作废/手工改单/强制通过 allow-once）、付款被 409 `unmatched_invoice_blocks_payment` 阻断、Python 只做解析+差异解释（模式 C 数值硬校验）、发票中心 UI、进度 9→10 步、`frozen-evaluation-invoice.json` 合成评测（字段抽取 100%） | `docs/evidence/p3-1-invoice-three-way.md`（五服务演示路径实测），UI 走查 11/11 |
-| P3-2 合同管理（旗舰） | `9bbc9e6` | V15 contract 域 + 状态机（DRAFT→PENDING_APPROVAL→EFFECTIVE→EXECUTING→CLOSED / REJECT / CHANGE_REQUESTED 变更闭环）、Agent 起草边界（金额/交期只来自定标快照注入，`evaluate_contract.py` 硬校验）、Java 一致性硬校验（文本金额≠定标金额拒绝生效）+ 条款约束（金额/交期条款必含，risk_level 自动标注）、合同中心 UI + 任务详情入口、`frozen-evaluation-contract.json` 合成评测（条款精度/召回 1.0） | `docs/evidence/p3-2-contract-management.md`（五服务演示路径实测：createDraft→submit→approve→execute→request_change→approve_change→execute→close），UI 走查 8/8 |
+| P3-2 合同管理（旗舰） | `9bbc9e6` | V15 contract 域 + 状态机（DRAFT→PENDING_APPROVAL→EFFECTIVE→EXECUTING→CLOSED / 驳回按来源分流 / CHANGE_REQUEST 变更闭环，审核修复后变更必填修订金额/交期、regen-draft 重新草拟、批准落定、驳回恢复变更前状态）、Agent 起草边界（金额/交期只来自定标快照注入，`evaluate_contract.py` 硬校验）、Java 一致性硬校验（文本金额≠定标金额拒绝生效）+ 条款约束（金额/交期条款必含，risk_level 自动标注）、合同中心 UI + 任务详情入口、`frozen-evaluation-contract.json` 合成评测（8 例，条款精度/召回 1.0） | `docs/evidence/p3-2-contract-management.md`（五服务演示路径实测：createDraft→submit→approve→execute→request_change→regen-draft→approve→驳回恢复→execute→close），UI 走查 8/8 |
 | P3-3 供应商准入 | `a4c7476` | **降级为设计笔记**（计划 §5 标注可选 + §6.5 时间盒纪律）：完整实现蓝图（V16 草案/状态机/Agent 边界/规则校验+评分卡/前端/契约/评测/测试计划/面试话术） | `docs/evidence/p3-3-supplier-admission-design.md` |
 
 ## 未完成项与原因
@@ -29,8 +29,8 @@
 ## 数字变化
 
 - **测试数**：Java 133 → **153**（P2-1 +4 / P2-2 +3 / P3-1 +8 / P3-2 +5）；Python 228 → **266**（P2-1 +17 / P2-3 +10 / P3-1 +5 / P3-2 +6，覆盖率 85.52%）；Web **56**（P1 54 + P2-1 +1 + P2-2 +1）
-- **评测**：冻结基线 617/620、31/31、0 漏检、0 错误入选——字节级不变；新增独立合成评测 3 份（corrections / invoice 字段 100% / contract 条款 precision·recall 1.0），README 均如实标注 synthetic
-- **新增 API**：corrections（1 path）+ invoices（7 path）+ contracts（9 path）+ platform gateway 状态接口，全部同步 `contracts/procurement-workbench.schema.json` + OpenAPI + web types/api（contracts.test.ts 对齐）
+- **评测**：冻结基线 617/620、31/31、0 漏检、0 错误入选——字节级不变；新增评测产物：invoice 合成评测集（16 例，字段 100%）+ contract 合成评测集（8 例，条款 precision·recall 1.0）+ corrections 人工修正导出候选（当前 0 条，随演示数据重跑生成），README 均如实标注 synthetic
+- **新增 API**：corrections（1 path）+ invoices（7 path）+ contracts（10 path，含 regen-draft）+ platform gateway 状态接口，全部同步 `contracts/procurement-workbench.schema.json` + OpenAPI + web types/api（contracts.test.ts 对齐）
 - **web bundle**：每次变更后同步 Java static 包，`check_web_build_determinism.py` 4 文件字节级一致 ✓
 - **契约数字**：状态机注册 +3（invoice/contract/correction 相关）、审计事件类型 +11、进度条 9→10 步、导航 +2（发票中心/合同中心）
 

@@ -11,6 +11,15 @@
 | `runtime-audit.png` | Run、Checkpoint、Verification、Approval、工具与 Token 证据 |
 | `approved-report-sample.md` | 浏览器从同一合成任务下载的中文审批报告 |
 | `real-model-acceptance.md` | 一次真实模型正常闭环、异常输入和重启恢复的脱敏验收记录 |
+| `p1-frontend-usability.md` | P1 工作台可用性升级（共享 viewModel / 下一步引导 / 10 步闭环 / 信息密度）验收，Playwright 走查 22/22 |
+| `p2-1-llm-gateway.md` | P2-1 LLM 网关限流/熔断/降级（故障注入全链路演示 + 快照脱敏）验收 |
+| `p2-2-conflict-adjudication.md` | P2-2 冲突裁决流程化 + 修正回灌评测集候选验收 |
+| `p2-3-semantic-cache.md` | P2-3 语义缓存（版本化 key / TTL / no-op 降级）验收 |
+| `p3-1-invoice-three-way.md` | P3-1 发票三单匹配旗舰验收（五服务演示路径 + UI 走查 11/11），截图见 `p31/`（如有） |
+| `p3-2-contract-management.md` | P3-2 合同管理旗舰验收（全生命周期 + 真实变更修订 + UI 走查 8/8），截图见 `p32/` |
+| `p3-3-supplier-admission-design.md` | P3-3 供应商准入设计笔记（可选阶段降级，实现蓝图） |
+| `final-report-p1-p3.md` | P1→P3 全部阶段的最终汇总报告（数字变化 / 证据清单 / 面试话术） |
+| `code-audit-report.md` | P1→P3 升级面代码审核报告（3 high / 10 medium 修复清单；见仓库根 `docs/code-audit-report.md`） |
 
 ## 复算
 
