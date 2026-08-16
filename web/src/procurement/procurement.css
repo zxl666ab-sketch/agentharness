@@ -1246,6 +1246,8 @@
 .proc-audit-row time { color: var(--text-muted); font-size: 9px; }
 .proc-system-grid { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
 .proc-system-grid h4 { margin: 10px 0 2px; color: var(--text-muted); font-size: 10px; }
+.proc-system-grid .gateway-attention { border-left: 3px solid var(--warning); padding-left: 14px; }
+.proc-system-grid .proc-facts-grid dd small { display: block; margin-top: 2px; color: var(--text-muted); font-size: 10px; }
 @media (max-width: 1100px) {
   .proc-todo-cards, .proc-report-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .proc-reports-grid, .proc-system-grid { grid-template-columns: 1fr; }

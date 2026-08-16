@@ -1,5 +1,7 @@
 package com.caijiatai.procurement.report;
 
+import com.caijiatai.procurement.agent.GatewayStatusView;
+import com.caijiatai.procurement.agent.RuntimeEventRepository;
 import com.caijiatai.procurement.ai.AiTaskRepository;
 import com.caijiatai.procurement.quote.ProcurementQuoteRepository;
 import com.caijiatai.procurement.task.ProcurementTaskRepository;
@@ -17,6 +19,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 /**
  * 系统信息接口（K6）：版本 / 组件状态 / 解析器 / 规则集 / 模型脱敏状态。
+ * P2-1：新增 LLM 网关脱敏状态（限流/熔断/降级）。
  */
 @RestController
 @RequestMapping("/api/procurement/platform")
@@ -27,6 +30,7 @@ public final class PlatformController {
     private final AiTaskRepository aiTasks;
     private final StringRedisTemplate redis;
     private final boolean redisEnabled;
+    private final RuntimeEventRepository runtimeEvents;
 
     public PlatformController(
             JdbcTemplate jdbc,
@@ -34,13 +38,15 @@ public final class PlatformController {
             ProcurementTaskRepository tasks,
             AiTaskRepository aiTasks,
             StringRedisTemplate redis,
-            @Value("${app.redis.enabled:false}") boolean redisEnabled) {
+            @Value("${app.redis.enabled:false}") boolean redisEnabled,
+            RuntimeEventRepository runtimeEvents) {
         this.jdbc = jdbc;
         this.quotes = quotes;
         this.tasks = tasks;
         this.aiTasks = aiTasks;
         this.redis = redis;
         this.redisEnabled = redisEnabled;
+        this.runtimeEvents = runtimeEvents;
     }
 
     @GetMapping
@@ -54,14 +60,26 @@ public final class PlatformController {
         value.put("rulesets", rulesets());
         value.put("model", modelStatus());
         value.put("db", dbStatus());
+        value.put("gateway", gatewayStatus());
         value.put("capabilities", List.of(
                 "state_machine_engine_v1",
                 "supplier_domain_v1",
                 "order_lifecycle_v1",
                 "settlement_lifecycle_v1",
                 "insights_v1",
-                "audit_business_scope_v1"));
+                "audit_business_scope_v1",
+                "llm_gateway_v1"));
         return value;
+    }
+
+    /** P2-1：LLM 网关脱敏状态（来自 Python 心跳快照，回退到 provider_gateway.* 事件）。 */
+    private Map<String, Object> gatewayStatus() {
+        var heartbeat = runtimeEvents.findFirstByTypeOrderByGlobalSeqDesc("heartbeat.ping");
+        var gatewayEvents = runtimeEvents.findTop10ByTypeStartingWithOrderByGlobalSeqDesc(
+                "provider_gateway.");
+        return GatewayStatusView.from(
+                heartbeat == null ? java.util.Optional.empty() : java.util.Optional.of(heartbeat),
+                gatewayEvents);
     }
 
     private Map<String, Object> components() {

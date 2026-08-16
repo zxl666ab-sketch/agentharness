@@ -362,7 +362,7 @@ paths:
       operationId: platformInfo
       responses:
         '200':
-          description: System information (version, components, parsers, rulesets, model status).
+          description: System information (version, components, parsers, rulesets, model status, LLM gateway state).
           content:
             application/json:
               schema: {$ref: './procurement-workbench.schema.json#/$defs/PlatformInfo'}

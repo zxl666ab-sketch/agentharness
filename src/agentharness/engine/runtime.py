@@ -72,6 +72,10 @@ def _provider_exception_kind(exc: BaseException) -> str:
     status = getattr(exc, "status_code", None)
     low = str(exc).lower()
     name = type(exc).__name__.lower()
+    code = getattr(exc, "code", None)
+    if code in {"rate_limited", "circuit_open"}:
+        # P2-1 LLM 网关拒绝（限流/熔断），归类为可重试 provider 类错误
+        return str(code)
     if status == 429 or "rate limit" in low:
         return "rate_limit"
     if "timeout" in low or "timeout" in name:
@@ -91,6 +95,9 @@ def _retry_delay(config: ProviderRetryConfig, retry_number: int) -> float:
 
 
 def _exception_retry_after_s(exc: BaseException) -> float | None:
+    retry_after_s = getattr(exc, "retry_after_s", None)
+    if isinstance(retry_after_s, (int, float)) and retry_after_s >= 0:
+        return min(86_400.0, float(retry_after_s))
     response = getattr(exc, "response", None)
     for headers in (getattr(response, "headers", None), getattr(exc, "headers", None)):
         if headers is None or not hasattr(headers, "get"):

@@ -130,6 +130,31 @@
         "rulesets": { "type": "object", "additionalProperties": true },
         "model": { "type": "object", "additionalProperties": true },
         "db": { "type": "object", "additionalProperties": true },
+        "gateway": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "providers"],
+          "properties": {
+            "source": { "type": "string" },
+            "providers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": ["provider", "state"],
+                "properties": {
+                  "provider": { "type": "string" },
+                  "state": { "type": "string", "enum": ["open", "half_open", "degraded", "closed", "active"] },
+                  "remaining_open_s": { "type": "number" },
+                  "stats": { "type": "object", "additionalProperties": true },
+                  "limits": { "type": "object", "additionalProperties": true },
+                  "last_event": { "type": "string" },
+                  "occurred_at": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
         "capabilities": { "type": "array", "items": { "type": "string" } }
       }
     },

@@ -250,7 +250,10 @@ class AgentService:
         self._seq_lock = threading.Lock()
         self._global_seq = 0
         self.rpc = RpcClient(self.config, self.hmac_key)
-        self.harness = Harness(data_dir=data_dir)
+        self.harness = Harness(
+            data_dir=data_dir,
+            on_gateway_event=self._publish_gateway_event,
+        )
         self.commands = InternalAgentCommands(
             self.harness,
             fetch_context=self._fetch_context_rpc,
@@ -406,6 +409,17 @@ class AgentService:
             },
         )
 
+    def _publish_gateway_event(self, provider: str, event: str, detail: dict[str, Any]) -> None:
+        """P2-1：熔断/限流/降级事件 → Kafka runtime 事件 → Java 平台接口可见。"""
+        if self.producer is None:
+            return
+        self._emit(
+            f"provider_gateway.{event}",
+            "",
+            "",
+            {"provider": provider, **detail},
+        )
+
     def _publish_result(
         self,
         operation_id: str,
@@ -472,7 +486,12 @@ class AgentService:
                         "heartbeat.ping",
                         "",
                         "",
-                        {"agent": "python-agent", "service": "procurement_agent"},
+                        {
+                            "agent": "python-agent",
+                            "service": "procurement_agent",
+                            # P2-1：网关脱敏状态随心跳上送，Java 平台接口可读
+                            "gateway": self.harness.gateway_snapshots(),
+                        },
                     )
                     self.producer.flush()
             except Exception:  # noqa: BLE001

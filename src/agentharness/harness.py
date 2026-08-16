@@ -23,11 +23,20 @@ from agentharness.contracts import (
 )
 from agentharness.engine.runtime import ApprovalCallback, RunEngine
 from agentharness.engine.tool_execution import validate_tool_spec
+from agentharness.providers.gateway import (
+    GatewayAdapter,
+    GatewayEventCallback,
+    ProviderGateway,
+    gateway_config_from_env,
+)
 from agentharness.providers.openai_adapter import OpenAIResponsesAdapter
 from agentharness.security.redaction import Redactor, default_redactor
 from agentharness.storage.sqlite import Storage
 
 EventCallback = Callable[[EventEnvelope], None]
+
+# 确定性离线适配器不走 LLM 网关（无并发/限流/熔断意义）
+_DETERMINISTIC_PROVIDERS = frozenset({"procurement_internal"})
 
 
 class Harness:
@@ -44,7 +53,10 @@ class Harness:
         lease_owner_id: str | None = None,
         lease_ttl_s: float = 60.0,
         lease_heartbeat_s: float = 10.0,
+        on_gateway_event: GatewayEventCallback | None = None,
+        gateway_config: dict[str, dict[str, Any]] | None = None,
     ) -> None:
+        """``gateway_config`` 提供按 provider 的网关参数覆盖（限流/熔断/降级演示用）。"""
         self.data_dir = Path(data_dir or Path.home() / ".agentharness").expanduser()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.redactor = redactor or default_redactor
@@ -53,8 +65,15 @@ class Harness:
         self.tools: dict[str, Any] = dict(tools or {})
         for tool in self.tools.values():
             validate_tool_spec(tool.spec)
-        self.providers: dict[str, Any] = providers or {
+        self._on_gateway_event = on_gateway_event
+        self._gateway_config = gateway_config or {}
+        self.gateways: dict[str, ProviderGateway] = {}
+        raw_providers = providers or {
             "openai": OpenAIResponsesAdapter(),
+        }
+        self.providers: dict[str, Any] = {
+            name: self._wrap_provider(name, adapter)
+            for name, adapter in raw_providers.items()
         }
         self._event_subs: list[EventCallback] = []
         self._event_subs_lock = threading.RLock()
@@ -80,8 +99,34 @@ class Harness:
         self.tools[spec.name] = tool
 
     def register_provider(self, name: str, adapter: Any) -> None:
-        self.providers[name] = adapter
+        self.providers[name] = self._wrap_provider(name, adapter)
         self.engine.providers = self.providers
+
+    def _wrap_provider(self, name: str, adapter: Any) -> Any:
+        """P2-1：LLM 网关（限流/熔断/降级）包一层；确定性离线适配器除外。"""
+        if isinstance(adapter, GatewayAdapter):
+            return adapter
+        if name in _DETERMINISTIC_PROVIDERS or name.startswith("procurement_internal"):
+            return adapter
+        config = gateway_config_from_env(name)
+        config.update(self._gateway_config.get(name) or {})
+        gateway = ProviderGateway(
+            config=config,
+            emit=self._gateway_event,
+        )
+        self.gateways[name] = gateway
+        return GatewayAdapter(adapter, gateway)
+
+    def _gateway_event(self, provider: str, event: str, detail: dict[str, Any]) -> None:
+        if self._on_gateway_event is not None:
+            try:
+                self._on_gateway_event(provider, event, detail)
+            except Exception:  # noqa: BLE001 - one observer cannot break gating
+                pass
+
+    def gateway_snapshots(self) -> list[dict[str, Any]]:
+        """脱敏的 LLM 网关状态（供 Java /api/procurement/platform 展示）。"""
+        return [gateway.snapshot() for gateway in self.gateways.values()]
 
     async def run(
         self, request: RunRequest, *, run_id: str | None = None

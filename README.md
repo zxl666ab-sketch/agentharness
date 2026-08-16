@@ -89,6 +89,7 @@ flowchart LR
 - **前端闭环（P1）**：任务详情 9 步闭环进度条（创建需求→报价→复核→比价→审批→订单→收货→对账→付款，已批准任务按订单/对账生命周期继续推进）；状态驱动的「下一步」引导条（卡点原因可见，不再只靠 hover）；已批准任务一键直达其订单（`order_task` 聚焦视图，可返回任务）；对话面板默认折叠、字段复核默认仅待复核、比价明细列与证据指纹收进可展开面板；全站状态文案共用 `viewModel.ts` 单一映射（无英文枚举直出）。
 - **供应商档案（K1）**：与报价/中标按名称自动关联；删除保护（有报价历史 409）；绩效评分实时派生（口径见上）。
 - **历史报价 RAG（K5）**：比价分析时经 Kafka RPC 获取同物料历史成交参考区间，注入解释文本与风险 flag（软提示，不参与比价）。
+- **LLM 网关（P2-1）**：Python Agent 侧按 provider 叠加并发配额（Semaphore）、QPS 令牌桶、失败率熔断（30s 窗口 >50% → 熔断 60s，半开探测恢复）与降级（熔断期间解释类请求返回注明「模型不可用」的确定性摘要，解析类请求结构化失败走 AiTask 恢复）；事件写 Kafka runtime 事件，`/api/procurement/platform` 暴露脱敏网关状态，系统信息页展示熔断/降级标识。
 - Java 采购报告与已投影的 Run 审计在 Python 不可用时仍可读取；实时 `/api/runtime` 可用性检查在心跳过期时返回结构化 503。
 - kafka/demo 模式下冻结评测面板由 Java 自带资源提供（`frozen-evaluation.json`，与 Python 冻结真值集同步，见 `scripts/export_frozen_evaluation.py`）；K5 扩展用例在独立的 `frozen-evaluation-ext.json`（冻结资源一个字节不动）。
 

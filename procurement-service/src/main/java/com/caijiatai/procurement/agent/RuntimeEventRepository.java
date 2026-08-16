@@ -21,6 +21,8 @@ public interface RuntimeEventRepository extends JpaRepository<RuntimeEvent, Long
 
     RuntimeEvent findFirstByTypeOrderByGlobalSeqDesc(String type);
 
+    List<RuntimeEvent> findTop10ByTypeStartingWithOrderByGlobalSeqDesc(String typePrefix);
+
     boolean existsByGlobalSeq(long globalSeq);
 
     @Modifying

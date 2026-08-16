@@ -1,0 +1,204 @@
+{
+  "demo": "P2-1 LLM gateway: rate limit / circuit breaker / degradation / recovery",
+  "gateway_config": {
+    "openai": {
+      "window_s": 5.0,
+      "failure_rate": 0.5,
+      "min_samples": 3,
+      "open_s": 2.0,
+      "bucket_wait_s": 0.0
+    }
+  },
+  "events": [
+    {
+      "event": "circuit_closed",
+      "provider": "openai",
+      "detail": {
+        "provider": "openai"
+      }
+    },
+    {
+      "event": "circuit_closed",
+      "provider": "openai",
+      "detail": {
+        "provider": "openai"
+      }
+    },
+    {
+      "event": "circuit_opened",
+      "provider": "openai",
+      "detail": {
+        "provider": "openai",
+        "open_s": 2.0
+      }
+    },
+    {
+      "event": "circuit_open",
+      "provider": "openai",
+      "detail": {
+        "retry_after_s": 2.0,
+        "provider": "openai"
+      }
+    },
+    {
+      "event": "degraded",
+      "provider": "openai",
+      "detail": {
+        "provider": "openai"
+      }
+    },
+    {
+      "event": "circuit_closed",
+      "provider": "openai",
+      "detail": {
+        "provider": "openai"
+      }
+    }
+  ],
+  "journey": [
+    {
+      "step": "failing call 1",
+      "status": "error",
+      "snapshot": {
+        "state": "closed",
+        "remaining_open_s": 0.0,
+        "stats": {
+          "requests": 1,
+          "successes": 0,
+          "failures": 1,
+          "rate_limited": 0,
+          "circuit_blocked": 0,
+          "degraded": 0
+        }
+      }
+    },
+    {
+      "step": "failing call 2",
+      "status": "error",
+      "snapshot": {
+        "state": "closed",
+        "remaining_open_s": 0.0,
+        "stats": {
+          "requests": 2,
+          "successes": 0,
+          "failures": 2,
+          "rate_limited": 0,
+          "circuit_blocked": 0,
+          "degraded": 0
+        }
+      }
+    },
+    {
+      "step": "failing call 3",
+      "status": "error",
+      "snapshot": {
+        "state": "open",
+        "remaining_open_s": 2.0,
+        "stats": {
+          "requests": 3,
+          "successes": 0,
+          "failures": 3,
+          "rate_limited": 0,
+          "circuit_blocked": 0,
+          "degraded": 0
+        }
+      }
+    },
+    {
+      "step": "breaker opened",
+      "snapshot": {
+        "state": "open",
+        "remaining_open_s": 2.0,
+        "stats": {
+          "requests": 3,
+          "successes": 0,
+          "failures": 3,
+          "rate_limited": 0,
+          "circuit_blocked": 0,
+          "degraded": 0
+        }
+      }
+    },
+    {
+      "step": "parse-type blocked while open",
+      "blocked": {
+        "code": "circuit_open",
+        "retry_after_s": 2.0
+      },
+      "snapshot": {
+        "state": "open",
+        "remaining_open_s": 2.0,
+        "stats": {
+          "requests": 3,
+          "successes": 0,
+          "failures": 3,
+          "rate_limited": 0,
+          "circuit_blocked": 1,
+          "degraded": 0
+        }
+      }
+    },
+    {
+      "step": "explanation degraded to template",
+      "status": "ok",
+      "text": "模型服务暂不可用，展示确定性摘要：已请求 Java 执行确定性比价，请等待人工审批结果。（模型服务暂不可用，展示确定性摘要）",
+      "marked": true,
+      "snapshot": {
+        "state": "open",
+        "remaining_open_s": 2.0,
+        "stats": {
+          "requests": 3,
+          "successes": 0,
+          "failures": 3,
+          "rate_limited": 0,
+          "circuit_blocked": 1,
+          "degraded": 1
+        }
+      }
+    },
+    {
+      "step": "half-open probe succeeds",
+      "status": "ok",
+      "texts": [
+        "healthy reply"
+      ],
+      "snapshot": {
+        "state": "closed",
+        "remaining_open_s": 0.0,
+        "stats": {
+          "requests": 1,
+          "successes": 1,
+          "failures": 0,
+          "rate_limited": 0,
+          "circuit_blocked": 0,
+          "degraded": 0
+        }
+      }
+    }
+  ],
+  "final_snapshot": {
+    "provider": "openai",
+    "state": "closed",
+    "remaining_open_s": 0.0,
+    "stats": {
+      "requests": 1,
+      "successes": 1,
+      "failures": 0,
+      "rate_limited": 0,
+      "circuit_blocked": 0,
+      "degraded": 0
+    },
+    "limits": {
+      "max_concurrency": 4,
+      "qps": 10.0,
+      "window_s": 5.0,
+      "failure_rate": 0.5,
+      "min_samples": 3,
+      "open_s": 2.0
+    },
+    "last_event": {
+      "event": "circuit_closed",
+      "provider": "openai"
+    }
+  }
+}

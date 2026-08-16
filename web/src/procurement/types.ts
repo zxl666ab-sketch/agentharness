@@ -713,6 +713,18 @@ export type PlatformInfo = {
     reasoning_effort: string;
   };
   db: Record<string, unknown>;
+  gateway?: {
+    source: string;
+    providers: Array<{
+      provider: string;
+      state: "open" | "half_open" | "closed" | "degraded" | "active" | string;
+      remaining_open_s?: number | null;
+      stats?: Record<string, number> | null;
+      limits?: Record<string, unknown> | null;
+      last_event?: string | null;
+      occurred_at?: string | null;
+    }>;
+  };
   capabilities: string[];
 };
 

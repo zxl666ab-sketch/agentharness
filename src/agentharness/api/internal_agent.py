@@ -30,6 +30,7 @@ from agentharness.procurement.agent_tools import (
     ProcurementAgentTools,
 )
 from agentharness.procurement.evaluation import evaluate_frozen_cases
+from agentharness.providers.gateway import GatewayAdapter
 from agentharness.providers.openai_adapter import OpenAIResponsesAdapter
 
 
@@ -437,7 +438,9 @@ class InternalAgentCommands:
         if not api_key or not model:
             raise ValueError("采购模型未配置 API Key 或模型名称")
         adapter = self.harness.providers.get("openai")
-        if isinstance(adapter, OpenAIResponsesAdapter):
+        # P2-1：默认适配器已被 LLM 网关包裹，比较内层适配器类型
+        inner = adapter.inner if isinstance(adapter, GatewayAdapter) else adapter
+        if isinstance(inner, OpenAIResponsesAdapter):
             self.harness.register_provider(
                 "procurement_openai",
                 OpenAIResponsesAdapter(
