@@ -24,6 +24,7 @@ public class ContractStateMachineConfig {
                 .permit(ContractStatus.EXECUTING, ContractEvent.REQUEST_CHANGE, ContractStatus.CHANGE_REQUEST)
                 .permit(ContractStatus.CHANGE_REQUEST, ContractEvent.APPROVE, ContractStatus.EFFECTIVE)
                 .permit(ContractStatus.CHANGE_REQUEST, ContractEvent.REJECT, ContractStatus.EFFECTIVE)
+                .permit(ContractStatus.CHANGE_REQUEST, ContractEvent.REJECT, ContractStatus.EXECUTING)
                 .build();
     }
 }

@@ -80,8 +80,13 @@ public final class SyntheticAgentClient implements AgentDispatcher {
         invoice.put("invoice_no", "INV-" + command.getOperationId().substring(0, 12));
         invoice.put("issue_date", java.time.LocalDate.now().toString());
         invoice.put("supplier_name", "演示供应商");
-        invoice.put("total_amount", text(payload.get("order_landed_total")));
-        invoice.put("quantity", text(payload.get("order_quantity")));
+        // 数值字段仅在注入值存在时才输出，缺失时省略（避免把"缺成本数据"误报为字段非法）
+        if (payload.get("order_landed_total") != null) {
+            invoice.put("total_amount", String.valueOf(payload.get("order_landed_total")));
+        }
+        if (payload.get("order_quantity") != null) {
+            invoice.put("quantity", String.valueOf(payload.get("order_quantity")));
+        }
         invoice.put("parser_version", "invoice-v1");
         return Map.of("invoice", invoice);
     }

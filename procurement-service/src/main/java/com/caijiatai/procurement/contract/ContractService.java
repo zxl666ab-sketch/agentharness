@@ -20,7 +20,6 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.domain.Page;
@@ -96,15 +95,7 @@ public class ContractService {
                 taskId, contractNo, order.getSupplierName(), task.getItemName(),
                 order.getLandedTotal(), leadDays);
         contracts.saveAndFlush(contract);
-        var payload = new LinkedHashMap<String, Object>();
-        payload.put("contract_id", contract.getId());
-        payload.put("contract_no", contractNo);
-        payload.put("task_id", taskId);
-        payload.put("task_reference", task.getReference());
-        payload.put("supplier_name", contract.getSupplierName());
-        payload.put("item_name", contract.getItemName());
-        payload.put("amount", contract.getAmount().stripTrailingZeros().toPlainString());
-        payload.put("lead_days", contract.getLeadDays());
+        var payload = draftPayload(contract, task, order.getLandedTotal(), leadDays);
         var payloadSha = com.caijiatai.procurement.agent.CanonicalJson.sha256(payload);
         var key = normalizeIdempotencyKey(idempotencyKey, payloadSha);
         var existing = idempotency.findById(new IdempotencyRecord.Key("contract_draft", key));
@@ -145,8 +136,10 @@ public class ContractService {
             clauses.add(normalized);
         }
         var clauseValidation = ContractClausePolicy.validate(clauses);
-        // Java 权威一致性：草拟文本金额/交期 vs 注入字段
-        var consistency = ContractConsistencyPolicy.check(draftText, contract.getAmount(), contract.getLeadDays());
+        // Java 权威一致性：草拟文本金额/交期 vs 注入字段（变更审批中用待定修订值口径）
+        var amount = contract.pendingAmount() != null ? contract.pendingAmount() : contract.getAmount();
+        var leadDays = contract.pendingLeadDays() != null ? contract.pendingLeadDays() : contract.getLeadDays();
+        var consistency = ContractConsistencyPolicy.check(draftText, amount, leadDays);
         var note = new StringBuilder();
         if (!Boolean.TRUE.equals(clauseValidation.get("valid"))) {
             note.append("必填条款缺失（金额/交期），审批被拦截。");
@@ -175,7 +168,9 @@ public class ContractService {
         } else if (status == null || status.isBlank()) {
             query = contracts.findAllByOrderByCreatedAtDesc(pageable);
         } else {
-            query = contracts.findByStatusOrderByCreatedAtDesc(status.strip().toUpperCase(Locale.ROOT), pageable);
+            // 统一用小写 wire 值过滤（不依赖 DB 排序规则大小写不敏感）
+            var wire = normalizeStatusFilter(status, "invalid_contract_status", "未知合同状态: ");
+            query = contracts.findByStatusOrderByCreatedAtDesc(wire, pageable);
         }
         var items = query.getContent().stream().map(this::view).toList();
         var value = new LinkedHashMap<String, Object>();
@@ -225,19 +220,25 @@ public class ContractService {
                     if (!Boolean.TRUE.equals(body.confirmed()) || body.notes() == null || body.notes().isBlank()) {
                         throw bad("approve_requires_confirmation", "批准合同必须勾选确认并填写人工备注");
                     }
-                    if (from == ContractStatus.PENDING_APPROVAL) {
+                    if (from == ContractStatus.PENDING_APPROVAL || from == ContractStatus.CHANGE_REQUEST) {
+                        // 变更批准前按待定修订值重新校验条款与一致性（未重新草拟会在此被拦下）
                         var clauseValidation = ContractClausePolicy.validate(contract.getClauses());
-                        var consistency = ContractConsistencyPolicy.check(
-                                contract.getDraftText(), contract.getAmount(), contract.getLeadDays());
+                        var amount = contract.pendingAmount() != null ? contract.pendingAmount() : contract.getAmount();
+                        var leadDays = contract.pendingLeadDays() != null
+                                ? contract.pendingLeadDays() : contract.getLeadDays();
+                        var consistency = ContractConsistencyPolicy.check(contract.getDraftText(), amount, leadDays);
                         if (!Boolean.TRUE.equals(clauseValidation.get("valid"))) {
                             throw conflict("contract_missing_required_clauses", "必填条款（金额/交期）缺失，不能批准");
                         }
                         if (!Boolean.TRUE.equals(consistency.get("consistent"))) {
                             throw conflict("contract_consistency_required",
-                                    "草拟文本金额/交期与定标结果不一致，请手工确认或重新草拟");
+                                    "草拟文本金额/交期与（修订后）定标口径不一致，请重新草拟或人工确认");
                         }
                     }
                     contractMachine.transition(id, from, ContractEvent.APPROVE, Map.of("notes", body.notes()));
+                    if (from == ContractStatus.CHANGE_REQUEST) {
+                        contract.applyPendingChange(); // 变更批准：落定修订后的金额/交期
+                    }
                     contract.approve(body.notes());
                     var order = orders.findByTaskId(contract.getTaskId()).orElse(null);
                     if (order != null) {
@@ -253,6 +254,7 @@ public class ContractService {
                         throw conflict("invalid_contract_transition", "合同状态 " + from + " 不允许驳回");
                     }
                     contractMachine.transition(id, from, ContractEvent.REJECT, Map.of());
+                    // 驳回目标按来源分流（PENDING_APPROVAL→DRAFT；CHANGE_REQUEST→恢复变更前状态）
                     contract.reject(body.notes());
                     audit.save(AuditEvent.forBusiness(
                             "contract", contract.getId(), "contract_rejected", operator,
@@ -285,21 +287,78 @@ public class ContractService {
                     if (body.notes() == null || body.notes().isBlank()) {
                         throw bad("change_requires_notes", "合同变更必须填写变更原因");
                     }
+                    if (body.newAmount() == null || body.newLeadDays() == null) {
+                        throw bad("change_requires_values", "合同变更必须提供修订后的金额与交期（new_amount / new_lead_days）");
+                    }
+                    if (body.newAmount().signum() <= 0 || body.newLeadDays() <= 0) {
+                        throw bad("invalid_change_values", "修订后的金额必须大于 0、交期必须大于 0 天");
+                    }
                     contractMachine.transition(id, from, ContractEvent.REQUEST_CHANGE, Map.of());
-                    contract.requestChange(body.notes());
+                    contract.requestChange(body.notes(), body.newAmount(), body.newLeadDays());
                     audit.save(AuditEvent.forBusiness(
                             "contract", contract.getId(), "contract_change_requested", operator,
-                            Map.of("contract_no", contract.getContractNo(), "notes", body.notes())));
+                            Map.of("contract_no", contract.getContractNo(), "notes", body.notes(),
+                                    "new_amount", plain(body.newAmount()), "new_lead_days", body.newLeadDays())));
                 }
                 default -> throw bad("invalid_contract_action",
                         "合同操作只能是 submit / approve / reject / execute / close / request_change");
             }
+            var saved = contracts.saveAndFlush(contract);
+            insightsCache.evictAll();
+            return view(saved);
         } catch (OptimisticLockingFailureException error) {
             throw conflict("contract_concurrent_modification", "合同已被其他操作修改，请刷新后重试");
         }
-        var saved = contracts.saveAndFlush(contract);
-        insightsCache.evictAll();
-        return view(saved);
+    }
+
+    // ------------------------------------------------------------------
+    // 重新草拟（M6：一致性校验失败/变更后的 DRAFT 与 CHANGE_REQUEST 出口）
+    // ------------------------------------------------------------------
+
+    /** 重新草拟：仅 DRAFT（初次失败重试）与 CHANGE_REQUEST（变更修订后重新起草）。 */
+    @Transactional
+    public ProcurementDtos.OperationAccepted regenDraft(String id) {
+        var contract = contracts.lockById(id)
+                .orElseThrow(() -> notFound("contract_not_found", "未找到合同"));
+        var from = ContractStatus.fromWire(contract.getStatus());
+        if (from != ContractStatus.DRAFT && from != ContractStatus.CHANGE_REQUEST) {
+            throw conflict("invalid_contract_regen",
+                    "只有草稿（DRAFT）或变更审批（CHANGE_REQUEST）状态允许重新草拟");
+        }
+        var task = tasks.findById(contract.getTaskId()).orElse(null);
+        var amount = contract.pendingAmount() != null ? contract.pendingAmount() : contract.getAmount();
+        var leadDays = contract.pendingLeadDays() != null ? contract.pendingLeadDays() : contract.getLeadDays();
+        var payload = draftPayload(contract, task, amount, leadDays);
+        var payloadSha = com.caijiatai.procurement.agent.CanonicalJson.sha256(payload);
+        var key = normalizeIdempotencyKey(null, payloadSha);
+        var existing = idempotency.findById(new IdempotencyRecord.Key("contract_regenerate", key));
+        if (existing.isPresent()) {
+            var op = commands.findById(existing.get().getOperationId()).orElseThrow();
+            return accepted(op, "已存在相同合同草拟请求");
+        }
+        var command = commands.save(AgentCommand.accept(
+                "draft_contract", contract.getTaskId(), 1, 0, payload));
+        idempotency.save(IdempotencyRecord.reserve("contract_regenerate", key, payloadSha, command.getOperationId()));
+        audit.save(AuditEvent.forBusiness(
+                "contract", contract.getId(), "contract_regen_requested", operator,
+                Map.of("contract_no", contract.getContractNo(),
+                        "amount", plain(amount), "lead_days", leadDays)));
+        return accepted(command, null);
+    }
+
+    /** 合同草拟命令载荷（金额/交期由调用方给定：定标口径或变更待定修订值）。 */
+    private LinkedHashMap<String, Object> draftPayload(
+            Contract contract, ProcurementTask task, BigDecimal amount, int leadDays) {
+        var payload = new LinkedHashMap<String, Object>();
+        payload.put("contract_id", contract.getId());
+        payload.put("contract_no", contract.getContractNo());
+        payload.put("task_id", contract.getTaskId());
+        payload.put("task_reference", task == null ? "" : task.getReference());
+        payload.put("supplier_name", contract.getSupplierName());
+        payload.put("item_name", contract.getItemName());
+        payload.put("amount", amount.stripTrailingZeros().toPlainString());
+        payload.put("lead_days", leadDays);
+        return payload;
     }
 
     // ------------------------------------------------------------------
@@ -358,6 +417,17 @@ public class ContractService {
 
     private static String normalizeIdempotencyKey(String key, String payloadSha) {
         return key == null || key.isBlank() ? payloadSha : key;
+    }
+
+    /** 状态筛选：入参（大写枚举名或小写 wire 值均可）统一映射回落库的小写 wire 值，非法值 400。 */
+    private static String normalizeStatusFilter(String status, String errorCode, String prefix) {
+        var raw = status.strip();
+        for (var value : ContractStatus.values()) {
+            if (value.name().equalsIgnoreCase(raw) || value.wireValue().equalsIgnoreCase(raw)) {
+                return value.wireValue();
+            }
+        }
+        throw bad(errorCode, prefix + status);
     }
 
     private static ProcurementDtos.OperationAccepted accepted(AgentCommand command, String message) {

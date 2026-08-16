@@ -46,7 +46,7 @@ public class Invoice {
     private BigDecimal taxRate;
     @Column(name = "supplier_name", nullable = false, length = 300)
     private String supplierName;
-    @Column(name = "artifact_id", nullable = false, length = 32)
+    @Column(name = "artifact_id", nullable = false, length = 36)
     private String artifactId;
     @Column(name = "source_sha256", nullable = false, length = 64)
     private String sourceSha256;

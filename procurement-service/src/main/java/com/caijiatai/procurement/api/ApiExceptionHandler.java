@@ -58,6 +58,15 @@ public final class ApiExceptionHandler {
         return response(HttpStatus.CONFLICT, "task_version_conflict", "采购任务已被其他操作修改", request, List.of());
     }
 
+    /** 注册式状态机非法流转统一 409（不依赖调用方先 can() 的隐式约定）。 */
+    @ExceptionHandler(com.caijiatai.procurement.platform.statemachine.IllegalStateTransition.class)
+    ResponseEntity<ErrorResponse> illegalTransition(
+            com.caijiatai.procurement.platform.statemachine.IllegalStateTransition error,
+            HttpServletRequest request) {
+        return response(HttpStatus.CONFLICT, "invalid_state_transition",
+                "业务状态不允许该流转: " + error.getMessage(), request, List.of());
+    }
+
     private ResponseEntity<ErrorResponse> response(
             HttpStatus status,
             String code,

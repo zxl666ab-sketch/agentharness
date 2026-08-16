@@ -24,11 +24,18 @@ public final class ThreeWayMatcher {
 
     private ThreeWayMatcher() {}
 
-    /** PO 侧输入（来自 purchase_order + 比价快照）。 */
+    /** PO/GRN 侧输入（来自 purchase_order + 比价快照；receivedQuantity 为实收量，可为 null）。 */
     public record PurchaseSide(
             BigDecimal quantity,
+            BigDecimal receivedQuantity /* 可为 null：无收货记录时回退 PO 数量 */,
             BigDecimal landedTotal,
-            BigDecimal expectedTaxRate /* 可能为 null → 跳过税率比对 */) {}
+            BigDecimal expectedTaxRate /* 可能为 null → 跳过税率比对 */) {
+
+        /** 数量比对口径：有收货记录（GRN）用实收量，否则回退 PO 数量。 */
+        public BigDecimal effectiveQuantity() {
+            return receivedQuantity != null ? receivedQuantity : quantity;
+        }
+    }
 
     public record Diff(String field, String expected, String actual, String diff) {}
 
@@ -55,21 +62,22 @@ public final class ThreeWayMatcher {
     public static MatchResult match(PurchaseSide purchase, Invoice invoice) {
         var diffs = new ArrayList<Diff>();
         boolean matched = true;
+        var effectiveQuantity = purchase.effectiveQuantity();
 
-        if (purchase.quantity() != null && invoice.getQuantity() != null) {
-            if (!within(invoice.getQuantity(), purchase.quantity(), QUANTITY_TOLERANCE)) {
-                diffs.add(new Diff("quantity", plain(purchase.quantity()), plain(invoice.getQuantity()),
-                        delta(invoice.getQuantity(), purchase.quantity())));
+        if (effectiveQuantity != null && invoice.getQuantity() != null) {
+            if (!within(invoice.getQuantity(), effectiveQuantity, QUANTITY_TOLERANCE)) {
+                diffs.add(new Diff("quantity", plain(effectiveQuantity), plain(invoice.getQuantity()),
+                        delta(invoice.getQuantity(), effectiveQuantity)));
             }
         }
 
         BigDecimal expectedUnitPrice = null;
         BigDecimal actualUnitPrice = null;
-        if (purchase.landedTotal() != null && purchase.quantity() != null
+        if (purchase.landedTotal() != null && effectiveQuantity != null
                 && invoice.getTotalAmount() != null && invoice.getQuantity() != null
-                && purchase.quantity().signum() != 0 && invoice.getQuantity().signum() != 0) {
-            // 统一含税口径：PO 到货总价/数量 vs 发票价税合计/数量
-            expectedUnitPrice = purchase.landedTotal().divide(purchase.quantity(), 6, RoundingMode.HALF_UP);
+                && effectiveQuantity.signum() != 0 && invoice.getQuantity().signum() != 0) {
+            // 统一含税口径：PO 到货总价/实收数量 vs 发票价税合计/数量
+            expectedUnitPrice = purchase.landedTotal().divide(effectiveQuantity, 6, RoundingMode.HALF_UP);
             actualUnitPrice = invoice.getTotalAmount().divide(invoice.getQuantity(), 6, RoundingMode.HALF_UP);
             if (!within(actualUnitPrice, expectedUnitPrice, UNIT_PRICE_TOLERANCE)) {
                 diffs.add(new Diff("unit_price", plain(expectedUnitPrice), plain(actualUnitPrice),

@@ -56,4 +56,10 @@ public final class ContractController {
             @RequestBody ContractDtos.ContractAction body) {
         return contracts.action(id, action, body);
     }
+
+    /** 重新草拟（DRAFT 失败重试 / CHANGE_REQUEST 变更修订后重起草）。 */
+    @PostMapping(path = "/contracts/{id}/regen-draft")
+    public ResponseEntity<ProcurementDtos.OperationAccepted> regenDraft(@PathVariable String id) {
+        return ResponseEntity.status(202).body(contracts.regenDraft(id));
+    }
 }

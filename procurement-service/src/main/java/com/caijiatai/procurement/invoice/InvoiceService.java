@@ -19,8 +19,11 @@ import com.caijiatai.procurement.task.ProcurementTask;
 import com.caijiatai.procurement.task.ProcurementTaskRepository;
 import java.io.ByteArrayInputStream;
 import java.math.BigDecimal;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -95,12 +98,26 @@ public class InvoiceService {
             throw bad("invalid_invoice_file", "发票文件不能为空且不超过 5MB");
         }
         try {
+            // 幂等查重前置：基于可先计算的载荷摘要（order+文件名+文件内容哈希），
+            // 命中直接返回，避免重复上传产生孤儿制品。
+            var fileBytes = file.getBytes();
+            var contentSha = sha256Hex(fileBytes);
+            var keyBasis = com.caijiatai.procurement.agent.CanonicalJson.sha256(java.util.Map.of(
+                    "order_id", orderId,
+                    "filename", file.getOriginalFilename() == null ? "" : file.getOriginalFilename(),
+                    "file_sha256", contentSha));
+            var key = normalizeIdempotencyKey(idempotencyKey, keyBasis);
+            var existing = idempotency.findById(new IdempotencyRecord.Key("invoice_upload", key));
+            if (existing.isPresent()) {
+                var op = commands.findById(existing.get().getOperationId()).orElseThrow();
+                return accepted(op, "已存在相同发票上传操作");
+            }
             var artifact = artifactStore.store(
                     "invoice_original",
                     orderId,
                     file.getOriginalFilename(),
                     file.getContentType(),
-                    new ByteArrayInputStream(file.getBytes()),
+                    new ByteArrayInputStream(fileBytes),
                     Map.of("source", "invoice_upload"));
             var payload = new LinkedHashMap<String, Object>();
             payload.put("artifact_id", artifact.getId());
@@ -111,18 +128,11 @@ public class InvoiceService {
             payload.put("order_quantity", order.getQuantity() == null ? null : order.getQuantity().toPlainString());
             payload.put("order_landed_total",
                     order.getLandedTotal() == null ? null : order.getLandedTotal().toPlainString());
-            payload.put("expected_tax_rate",
-                    expectedTaxRate(order) == null ? null : expectedTaxRate(order).toPlainString());
-            var payloadSha = com.caijiatai.procurement.agent.CanonicalJson.sha256(payload);
-            var key = normalizeIdempotencyKey(idempotencyKey, payloadSha);
-            var existing = idempotency.findById(new IdempotencyRecord.Key("invoice_upload", key));
-            if (existing.isPresent()) {
-                var op = commands.findById(existing.get().getOperationId()).orElseThrow();
-                return accepted(op, "已存在相同发票上传操作");
-            }
+            var expectedRate = expectedTaxRate(order);
+            payload.put("expected_tax_rate", expectedRate == null ? null : expectedRate.toPlainString());
             var command = commands.save(AgentCommand.accept(
                     "parse_invoice", orderId, 1, 0, payload));
-            idempotency.save(IdempotencyRecord.reserve("invoice_upload", key, payloadSha, command.getOperationId()));
+            idempotency.save(IdempotencyRecord.reserve("invoice_upload", key, contentSha, command.getOperationId()));
             audit.save(AuditEvent.forBusiness(
                     "invoice", orderId, "invoice_upload_accepted", operator,
                     Map.of("operation_id", command.getOperationId(), "artifact_id", artifact.getId())));
@@ -192,7 +202,20 @@ public class InvoiceService {
             return; // 解释缺失不阻断（非阻塞参与点）
         }
         invoice.applyExplanation((Map<String, Object>) explanation);
-        invoices.save(invoice);
+        try {
+            invoices.save(invoice);
+        } catch (OptimisticLockingFailureException error) {
+            // 并发整改冲突：重读最新版本合并解释后重试一次，仍失败则按 409 语义
+            // 终止该命令（outbox 走 terminalFailure，避免无界重试/500）。
+            var latest = invoices.findById(invoice.getId())
+                    .orElseThrow(() -> notFound("invoice_not_found", "未找到发票"));
+            latest.applyExplanation((Map<String, Object>) explanation);
+            try {
+                invoices.save(latest);
+            } catch (OptimisticLockingFailureException again) {
+                throw conflict("invoice_concurrent_modification", "发票已被其他操作修改，请刷新后重试");
+            }
+        }
         audit.save(AuditEvent.forBusiness(
                 "invoice", invoice.getId(), "invoice_explained", "agent",
                 Map.of("invoice_no", invoice.getInvoiceNo())));
@@ -205,8 +228,16 @@ public class InvoiceService {
     @Transactional
     public void match(Invoice invoice, PurchaseOrder order, Map<String, Object> context) {
         var purchase = new ThreeWayMatcher.PurchaseSide(
-                order.getQuantity(), order.getLandedTotal(), expectedTaxRate(order));
+                order.getQuantity(), order.getReceivedQuantity(), order.getLandedTotal(), expectedTaxRate(order));
         var result = ThreeWayMatcher.match(purchase, invoice);
+        // 主链路流转也走注册式状态机（REGISTERED--MATCH-->MATCHED / --HOLD-->DIFF_HOLD，
+        // DIFF_HOLD--MATCH-->MATCHED），保证所有状态迁移都经引擎校验。
+        var from = InvoiceStatus.fromWire(invoice.getStatus());
+        if (result.matched() && invoiceMachine.can(from, InvoiceEvent.MATCH)) {
+            invoiceMachine.transition(invoice.getId(), from, InvoiceEvent.MATCH, Map.of());
+        } else if (!result.matched() && invoiceMachine.can(from, InvoiceEvent.HOLD)) {
+            invoiceMachine.transition(invoice.getId(), from, InvoiceEvent.HOLD, Map.of());
+        }
         invoice.applyMatchResult(result.matched(), result.toMap(), null);
         if (result.matched()) {
             audit.save(AuditEvent.forBusiness(
@@ -284,10 +315,10 @@ public class InvoiceService {
         } else if (status == null || status.isBlank()) {
             query = invoices.findAllByOrderByCreatedAtDesc(pageable);
         } else {
-            query = invoices.findByStatusOrderByCreatedAtDesc(
-                    status.strip().toUpperCase(java.util.Locale.ROOT), pageable);
-        }
-        var items = query.getContent().stream().map(invoice -> view(invoice, false)).toList();
+            // 统一用小写 wire 值过滤（不依赖 DB 排序规则大小写不敏感）
+            var wire = normalizeStatusFilter(status, "invalid_invoice_status", "未知发票状态: ");
+            query = invoices.findByStatusOrderByCreatedAtDesc(wire, pageable);
+        }        var items = query.getContent().stream().map(invoice -> view(invoice, false)).toList();
         var value = new LinkedHashMap<String, Object>();
         value.put("items", items);
         value.put("page", query.getNumber());
@@ -372,12 +403,12 @@ public class InvoiceService {
                 }
                 default -> throw bad("invalid_invoice_action", "发票操作只能是 void / correct / force_match / reconcile");
             }
+            var saved = invoices.saveAndFlush(invoice);
+            insightsCache.evictAll();
+            return view(saved, true);
         } catch (OptimisticLockingFailureException error) {
             throw conflict("invoice_concurrent_modification", "发票已被其他操作修改，请刷新后重试");
         }
-        var saved = invoices.saveAndFlush(invoice);
-        insightsCache.evictAll();
-        return view(saved, true);
     }
 
     /** 付款联动：订单存在未匹配/未核销发票时拒绝付款（409）。 */
@@ -431,7 +462,8 @@ public class InvoiceService {
             comparison.put("po", po);
             var grn = new LinkedHashMap<String, Object>();
             grn.put("received_quantity", order == null ? null : plain(order.getReceivedQuantity()));
-            grn.put("received_at", order == null ? null : String.valueOf(order.getArrivalDate()));
+            grn.put("received_at", order == null || order.getArrivalDate() == null
+                    ? null : order.getArrivalDate().toString());
             comparison.put("grn", grn);
             var invoiceSide = new LinkedHashMap<String, Object>();
             invoiceSide.put("quantity", plain(invoice.getQuantity()));
@@ -491,6 +523,25 @@ public class InvoiceService {
 
     private static String normalizeIdempotencyKey(String key, String payloadSha) {
         return key == null || key.isBlank() ? payloadSha : key;
+    }
+
+    /** 状态筛选：入参（大写枚举名或小写 wire 值均可）统一映射回落库的小写 wire 值，非法值 400。 */
+    private String normalizeStatusFilter(String status, String errorCode, String prefix) {
+        var raw = status.strip();
+        for (var value : InvoiceStatus.values()) {
+            if (value.name().equalsIgnoreCase(raw) || value.wireValue().equalsIgnoreCase(raw)) {
+                return value.wireValue();
+            }
+        }
+        throw bad(errorCode, prefix + status);
+    }
+
+    private static String sha256Hex(byte[] bytes) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        } catch (NoSuchAlgorithmException error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     private static ProcurementDtos.OperationAccepted accepted(AgentCommand command, String message) {

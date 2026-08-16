@@ -144,7 +144,8 @@ public class Contract {
     }
 
     public void reject(String note) {
-        this.status = ContractStatus.DRAFT.wireValue();
+        // 驳回语义按来源分流：PENDING_APPROVAL → DRAFT；变更审批（CHANGE_REQUEST）→ 恢复变更前状态
+        this.status = previousStatus().wireValue();
         if (note != null) {
             this.notes = note;
         }
@@ -164,20 +165,88 @@ public class Contract {
         this.updatedAt = Instant.now();
     }
 
-    public void requestChange(String notes) {
-        // 变更留痕：当前条款快照写入历史
+    public void requestChange(String notes, BigDecimal newAmount, Integer newLeadDays) {
+        // 变更留痕：变更前状态 + 旧条款快照 + 待定修订值写入历史（应用后标记 applied）
+        var snapshot = new ArrayList<>(this.changeHistory);
+        var entry = new LinkedHashMap<String, Object>();
+        entry.put("captured_at", Instant.now().toString());
+        entry.put("reason", notes == null ? "" : notes);
+        entry.put("from_status", this.status);
+        entry.put("new_amount", newAmount.stripTrailingZeros().toPlainString());
+        entry.put("new_lead_days", newLeadDays);
         if (!this.clauses.isEmpty()) {
-            var snapshot = new ArrayList<>(this.changeHistory);
-            snapshot.add(Map.of(
-                    "captured_at", Instant.now().toString(),
-                    "reason", notes == null ? "" : notes,
-                    "clauses", new ArrayList<>(this.clauses)));
-            this.changeHistory = snapshot;
+            entry.put("clauses", new ArrayList<>(this.clauses));
         }
+        snapshot.add(entry);
+        this.changeHistory = snapshot;
         this.status = ContractStatus.CHANGE_REQUEST.wireValue();
         if (notes != null) {
             this.notes = notes;
         }
         this.updatedAt = Instant.now();
+    }
+
+    /** 最近一次变更申请快照（含 from_status / new_amount / new_lead_days）。 */
+    private Map<String, Object> latestChange() {
+        if (changeHistory == null || changeHistory.isEmpty()) {
+            return Map.of();
+        }
+        return changeHistory.get(changeHistory.size() - 1);
+    }
+
+    /** 待定修订金额（变更审批中）：无则返回 null（用当前金额口径校验）。 */
+    public BigDecimal pendingAmount() {
+        var value = latestChange().get("new_amount");
+        if (!(value instanceof String s) || s.isBlank()) {
+            return null;
+        }
+        try {
+            return new BigDecimal(s);
+        } catch (NumberFormatException error) {
+            return null;
+        }
+    }
+
+    /** 待定修订交期天数（变更审批中）：无则返回 null。 */
+    public Integer pendingLeadDays() {
+        var value = latestChange().get("new_lead_days");
+        return value instanceof Number number ? number.intValue() : null;
+    }
+
+    /** 变更批准：把待定金额/交期落到正式字段，并在历史快照标记已应用。 */
+    public void applyPendingChange() {
+        var pendingAmount = pendingAmount();
+        if (pendingAmount != null) {
+            this.amount = pendingAmount;
+        }
+        var pendingLead = pendingLeadDays();
+        if (pendingLead != null) {
+            this.leadDays = pendingLead;
+        }
+        if (!changeHistory.isEmpty()) {
+            var snapshot = new ArrayList<>(changeHistory);
+            var last = new LinkedHashMap<String, Object>(snapshot.get(snapshot.size() - 1));
+            last.put("applied", true);
+            last.put("applied_at", Instant.now().toString());
+            snapshot.set(snapshot.size() - 1, last);
+            this.changeHistory = snapshot;
+        }
+        this.updatedAt = Instant.now();
+    }
+
+    /** 驳回目标：CHANGE_REQUEST → 恢复变更前状态（快照缺失兜底 EFFECTIVE）；其余 → DRAFT。 */
+    private ContractStatus previousStatus() {
+        if (!ContractStatus.CHANGE_REQUEST.wireValue().equals(this.status)) {
+            return ContractStatus.DRAFT;
+        }
+        var from = latestChange().get("from_status");
+        if (from instanceof String value) {
+            try {
+                return ContractStatus.fromWire(value);
+            } catch (IllegalArgumentException error) {
+                return ContractStatus.EFFECTIVE;
+            }
+        }
+        return ContractStatus.EFFECTIVE;
     }
 }
