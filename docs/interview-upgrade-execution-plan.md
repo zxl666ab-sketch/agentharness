@@ -24,7 +24,7 @@
 | P2-3 语义缓存 | ✅ | 2026-08-16 | `docs/evidence/p2-3-semantic-cache.md` |
 | P3-1 发票三单匹配 | ✅ | 2026-08-16 | `docs/evidence/p3-1-invoice-three-way.md`（五服务演示路径实测） |
 | P3-2 合同管理 | ✅ | 2026-08-16 | `docs/evidence/p3-2-contract-management.md`（五服务演示路径实测） |
-| P3-3 供应商准入 | ⏳ | — | — |
+| P3-3 供应商准入 | 📝 设计笔记（可选阶段，按 §6.5 时间盒降级） | 2026-08-16 | `docs/evidence/p3-3-supplier-admission-design.md` |
 
 ---
 
