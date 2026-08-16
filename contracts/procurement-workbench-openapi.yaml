@@ -397,6 +397,88 @@ paths:
           content:
             application/json:
               schema: {$ref: './procurement-workbench.schema.json#/$defs/CorrectionPage'}
+  /api/procurement/invoices:
+    post:
+      operationId: uploadInvoice
+      parameters:
+        - name: order_id
+          in: query
+          required: true
+          schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+      responses:
+        '202':
+          description: Invoice artifact stored; Agent parses and Java three-way match follows.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/ProcurementRunAccepted'}
+        '409': {description: Duplicate invoice no, invalid parse result, or idempotency conflict.}
+    get:
+      operationId: listInvoices
+      parameters:
+        - name: status
+          in: query
+          schema: {$ref: './procurement-workbench.schema.json#/$defs/InvoiceStatus'}
+        - name: order_id
+          in: query
+          schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Invoice page with three-way match context.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/InvoicePage'}
+  /api/procurement/invoices/{invoiceId}:
+    get:
+      operationId: getInvoice
+      parameters:
+        - name: invoiceId
+          in: path
+          required: true
+          schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+      responses:
+        '200':
+          description: Invoice detail with three-way comparison and diff explanation.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/InvoiceView'}
+        '404': {description: Unknown invoice.}
+  /api/procurement/invoices/{invoiceId}/actions:
+    post:
+      operationId: actOnInvoice
+      parameters:
+        - name: invoiceId
+          in: path
+          required: true
+          schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+        - name: action
+          in: query
+          required: true
+          schema: {type: string, enum: [void, correct, force_match, reconcile]}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: './procurement-workbench.schema.json#/$defs/InvoiceActionInput'}
+      responses:
+        '200':
+          description: Invoice after the state-machine-validated action.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/InvoiceView'}
+        '400': {description: Missing required notes/confirmation or unknown action.}
+        '409': {description: Invalid transition, concurrent modification, or payment blocked by unmatched invoice.}
 components:
   parameters:
     BusinessId:

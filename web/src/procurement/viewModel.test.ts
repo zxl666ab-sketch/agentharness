@@ -43,6 +43,7 @@ describe("procurement view model", () => {
       "人工审批",
       "采购订单",
       "收货确认",
+      "发票匹配",
       "对账",
       "付款",
     ]);
@@ -54,14 +55,17 @@ describe("procurement view model", () => {
     expect(closedLoopStep("approved")).toBe(6);
   });
 
-  it("extends approved tasks through order / settlement lifecycle", () => {
+  it("extends approved tasks through order / invoice / settlement lifecycle", () => {
     expect(closedLoopProgress("approved", null)).toBe(6);
     expect(closedLoopProgress("approved", { status: "PENDING_SHIPMENT" })).toBe(6);
     expect(closedLoopProgress("approved", { status: "SHIPPED" })).toBe(7);
     expect(closedLoopProgress("approved", { status: "RECEIVED" })).toBe(8);
-    expect(closedLoopProgress("approved", { status: "RECEIVED", settlement_status: "SETTLED" })).toBe(8);
-    expect(closedLoopProgress("approved", { status: "RECEIVED", settlement_status: "PAID" })).toBe(9);
-    expect(closedLoopProgress("approved", { status: "CLOSED" })).toBe(9);
+    expect(closedLoopProgress("approved", { status: "RECEIVED", invoice_status: "MATCHED" })).toBe(9);
+    expect(closedLoopProgress("approved", { status: "RECEIVED", invoice_status: "RECONCILED" })).toBe(9);
+    expect(closedLoopProgress("approved", { status: "RECEIVED", settlement_status: "SETTLED" })).toBe(9);
+    expect(closedLoopProgress("approved", { status: "RECEIVED", settlement_status: "PAID" })).toBe(10);
+    expect(closedLoopProgress("approved", { status: "RECEIVED", invoice_status: "MATCHED", settlement_status: "PAID" })).toBe(10);
+    expect(closedLoopProgress("approved", { status: "CLOSED" })).toBe(10);
     expect(closedLoopProgress("analyzed", { status: "SHIPPED" })).toBe(5);
   });
 

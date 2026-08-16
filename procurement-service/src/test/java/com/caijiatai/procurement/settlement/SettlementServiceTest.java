@@ -24,8 +24,10 @@ class SettlementServiceTest {
     private final SettlementRepository settlements = mock(SettlementRepository.class);
     private final OrderRepository orders = mock(OrderRepository.class);
     private final AuditEventRepository audit = mock(AuditEventRepository.class);
+    private final com.caijiatai.procurement.invoice.InvoiceService invoices =
+            mock(com.caijiatai.procurement.invoice.InvoiceService.class);
     private final SettlementService service = new SettlementService(
-            settlements, orders, audit, new OrderStateMachineConfig().settlementStateMachine());
+            settlements, orders, audit, new OrderStateMachineConfig().settlementStateMachine(), invoices);
 
     private PurchaseSettlement unsettled() {
         return PurchaseSettlement.derive("order-1", "ST-20260814-ABC123", "华东优包",
@@ -61,12 +63,31 @@ class SettlementServiceTest {
         settlement.settle(null);
         when(settlements.lockById("s1")).thenReturn(Optional.of(settlement));
         when(settlements.saveAndFlush(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(invoices.hasUnresolvedInvoices("order-1")).thenReturn(false);
 
         var result = service.transition(
                 "s1", "pay", Instant.parse("2026-08-14T00:00:00Z"), "银行转账", "采购员");
 
         assertThat(result.get("status")).isEqualTo("PAID");
         assertThat(result.get("paid_at")).isEqualTo("2026-08-14T00:00:00Z");
+    }
+
+    @Test
+    void payIsBlockedByUnmatchedInvoice() {
+        var settlement = unsettled();
+        settlement.settle(null);
+        when(settlements.lockById("s1")).thenReturn(Optional.of(settlement));
+        when(invoices.hasUnresolvedInvoices("order-1")).thenReturn(true);
+
+        assertThatThrownBy(() -> service.transition(
+                "s1", "pay", Instant.parse("2026-08-14T00:00:00Z"), null, "采购员"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> {
+                    var api = (ApiException) error;
+                    assertThat(api.code()).isEqualTo("unmatched_invoice_blocks_payment");
+                    assertThat(api.status().value()).isEqualTo(409);
+                });
+        verify(audit, never()).save(any(AuditEvent.class));
     }
 
     @Test

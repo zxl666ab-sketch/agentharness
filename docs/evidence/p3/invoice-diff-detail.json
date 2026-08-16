@@ -1,0 +1,73 @@
+﻿{
+    "id":  "f41b1ec126ea4ae39bc37402e170b326",
+    "order_id":  "51ebf147a8744e6590d135f41db1e195",
+    "invoice_code":  "144032601234",
+    "invoice_no":  "202608160901",
+    "issue_date":  "2026-08-16",
+    "quantity":  "15000",
+    "unit":  null,
+    "unit_price":  null,
+    "amount_excluding_tax":  "6902.65",
+    "tax_amount":  "897.35",
+    "total_amount":  "7800",
+    "tax_rate":  "0.13",
+    "supplier_name":  "åä¸ä¼å\u0085",
+    "parser_version":  "",
+    "status":  "diff_hold",
+    "match_result":  {
+                         "diffs":  [
+                                       {
+                                           "diff":  "0.020000",
+                                           "field":  "unit_price",
+                                           "actual":  "0.52",
+                                           "expected":  "0.5"
+                                       },
+                                       {
+                                           "diff":  "300.000000000000000000",
+                                           "field":  "total_amount",
+                                           "actual":  "7800",
+                                           "expected":  "7500"
+                                       }
+                                   ],
+                         "matched":  false,
+                         "actual_unit_price":  "0.520000",
+                         "expected_unit_price":  "0.500000"
+                     },
+    "match_explanation":  {
+                              "reason":  "ä¸åå¹é\u0085å­å¨ 2 é¡¹å·®å¼ï¼åä»·ä¸ä¸è´ï¼è®¢å/æ¶è´§ä¸º 0.5ï¼åç¥¨ä¸º 0.52ï¼å·®å¼ 0.020000ï¼ï¼ä»·ç¨åè®¡ä¸ä¸è´ï¼è®¢å/æ¶è´§ä¸º 7500ï¼åç¥¨ä¸º 7800ï¼å·®å¼ 300.000000000000000000ï¼ã",
+                              "source":  "deterministic_agent",
+                              "suggestions":  [
+                                                  "è¯·æ ¸å¯¹åä»·å£å¾ï¼å«ç¨/ä¸å«ç¨ï¼ä¸è®¢åå°è´§åä»·",
+                                                  "è¯·æ ¸å¯¹éé¢åè®¡ä¸è®¢åå°è´§æ»ä»·"
+                                              ]
+                          },
+    "notes":  null,
+    "version":  2,
+    "created_at":  "2026-08-16T09:11:01.331604Z",
+    "updated_at":  "2026-08-16T09:11:01.859437Z",
+    "matched_at":  "2026-08-16T09:11:01.339813Z",
+    "reconciled_at":  null,
+    "order_no":  "PO-RFQ-20260813-834927",
+    "task_reference":  "RFQ-20260813-834927",
+    "order_quantity":  "15000",
+    "order_received_quantity":  "15000",
+    "order_landed_total":  "7500",
+    "expected_tax_rate":  "0.13",
+    "three_way":  {
+                      "po":  {
+                                 "quantity":  "15000",
+                                 "received_quantity":  "15000",
+                                 "landed_total":  "7500"
+                             },
+                      "grn":  {
+                                  "received_quantity":  "15000",
+                                  "received_at":  "2026-07-20T08:00:00Z"
+                              },
+                      "invoice":  {
+                                      "quantity":  "15000",
+                                      "unit_price":  null,
+                                      "total_amount":  "7800",
+                                      "tax_rate":  "0.13"
+                                  }
+                  }
+}

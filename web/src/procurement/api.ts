@@ -9,6 +9,10 @@ import type {
   EvaluationResult,
   InsightTrendRow,
   InsightsOverview,
+  InvoiceActionInput,
+  InvoicePage,
+  InvoiceStatus,
+  InvoiceView,
   OrderPage,
   OrderStatus,
   OrderView,
@@ -231,6 +235,31 @@ export const procurementApi = {
     const query = new URLSearchParams({ page: String(page), size: String(size) });
     return requestJson<CorrectionPage>(`/api/procurement/corrections?${query}`);
   },
+  invoices: (status?: InvoiceStatus, orderId?: string, page = 0, size = 50) => {
+    const query = new URLSearchParams({ page: String(page), size: String(size) });
+    if (status) query.set("status", status);
+    if (orderId) query.set("order_id", orderId);
+    return requestJson<InvoicePage>(`/api/procurement/invoices?${query}`);
+  },
+  invoice: (id: string) => requestJson<InvoiceView>(`/api/procurement/invoices/${id}`),
+  uploadInvoice: async (orderId: string, file: File) => {
+    const form = new FormData();
+    form.append("order_id", orderId);
+    form.append("file", file, file.name);
+    const accepted = await requestJson<ProcurementRunAccepted>("/api/procurement/invoices", {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey() },
+      body: form,
+    });
+    await waitForOperation(accepted.operation_id);
+    return accepted;
+  },
+  invoiceAction: (id: string, action: "void" | "correct" | "force_match" | "reconcile", input: InvoiceActionInput) =>
+    requestJson<InvoiceView>(`/api/procurement/invoices/${id}/actions?action=${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
   correctRequirement: (requestId: string, input: CreateProcurementRequest) =>
     requestJson<ProcurementRequest>(
       `/api/procurement/requests/${requestId}/requirement`,

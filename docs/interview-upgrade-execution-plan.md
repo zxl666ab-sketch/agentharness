@@ -22,7 +22,7 @@
 | P2-1 LLM 网关限流/熔断/降级 | ✅ | 2026-08-16 | `docs/evidence/p2-1-llm-gateway.md` + `docs/evidence/p2/p2-1.json` |
 | P2-2 冲突裁决流程化 + 修正回灌 | ✅ | 2026-08-16 | `docs/evidence/p2-2-conflict-adjudication.md` |
 | P2-3 语义缓存 | ✅ | 2026-08-16 | `docs/evidence/p2-3-semantic-cache.md` |
-| P3-1 发票三单匹配 | ⏳ | — | — |
+| P3-1 发票三单匹配 | ✅ | 2026-08-16 | `docs/evidence/p3-1-invoice-three-way.md`（五服务演示路径实测） |
 | P3-2 合同管理 | ⏳ | — | — |
 | P3-3 供应商准入 | ⏳ | — | — |
 

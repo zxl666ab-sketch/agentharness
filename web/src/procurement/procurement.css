@@ -421,6 +421,34 @@
 .proc-next-step-blocker { flex: 0 1 auto; color: var(--warning); font-size: var(--text-xs); font-weight: 600; }
 .proc-next-step .proc-button { margin-left: auto; }
 
+.proc-invoice-upload { display: flex; gap: 10px; padding: 10px 0 4px; }
+.proc-invoice-upload select { min-width: 320px; padding: 7px 9px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; font-size: var(--text-xs); }
+.proc-invoice-layout { display: grid; min-height: 0; flex: 1; gap: 12px; grid-template-columns: minmax(300px, 380px) minmax(0, 1fr); overflow: auto; }
+.proc-invoice-list { display: flex; flex-direction: column; gap: 8px; overflow: auto; }
+.proc-invoice-card { display: flex; flex-direction: column; gap: 5px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); cursor: pointer; font: inherit; text-align: left; }
+.proc-invoice-card:hover, .proc-invoice-card.selected { border-color: var(--accent); }
+.proc-invoice-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.proc-invoice-card-head code { font-family: var(--mono); font-size: 10px; }
+.proc-invoice-card-facts { display: flex; flex-direction: column; gap: 2px; color: var(--text-muted); font-size: 10px; }
+.proc-invoice-diff { color: var(--danger); font-weight: 700; }
+.proc-invoice-detail { display: flex; min-width: 0; flex-direction: column; gap: 12px; overflow: auto; }
+.proc-invoice-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: 8px; }
+.proc-invoice-facts > span { display: flex; min-width: 0; flex-direction: column; gap: 2px; padding: 8px 10px; border-right: 1px solid var(--border); }
+.proc-invoice-facts > span:nth-child(4n) { border-right: 0; }
+.proc-invoice-facts small { color: var(--text-muted); font-size: 10px; }
+.proc-invoice-facts strong { overflow: hidden; font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.proc-invoice-diffs { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+.proc-invoice-diffs li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border)); border-radius: 6px; background: var(--danger-soft); font-size: 10px; }
+.proc-invoice-diffs i { color: var(--danger); font-style: normal; font-weight: 700; }
+.proc-invoice-matched { display: inline-flex; align-items: center; gap: 6px; margin: 8px 0 0; color: var(--accent); font-size: var(--text-xs); font-weight: 600; }
+.proc-invoice-explanation { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-subtle); }
+.proc-invoice-explanation strong { font-size: var(--text-xs); }
+.proc-invoice-explanation p { margin: 0; font-size: var(--text-xs); }
+.proc-invoice-explanation ul { margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 10px; }
+.proc-invoice-explanation small { color: var(--text-muted); font-size: 9px; }
+.proc-invoice-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.proc-invoice-confirm { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: var(--text-xs); }
+
 .proc-ai-recovery {
   display: grid;
   flex: 0 0 auto;

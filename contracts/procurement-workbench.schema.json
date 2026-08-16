@@ -197,6 +197,96 @@
         "total": { "type": "integer", "minimum": 0 }
       }
     },
+    "InvoiceStatus": {
+      "type": "string",
+      "enum": ["REGISTERED", "MATCHED", "DIFF_HOLD", "VOIDED", "RECONCILED"]
+    },
+    "InvoiceMatchDiff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "expected", "actual", "diff"],
+      "properties": {
+        "field": { "type": "string" },
+        "expected": { "type": "string" },
+        "actual": { "type": "string" },
+        "diff": { "type": "string" }
+      }
+    },
+    "InvoiceView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "order_id", "invoice_no", "total_amount", "supplier_name", "parser_version", "status", "version", "created_at", "updated_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "order_id": { "type": "string" },
+        "invoice_code": { "type": ["string", "null"] },
+        "invoice_no": { "type": "string" },
+        "issue_date": { "type": ["string", "null"] },
+        "quantity": { "type": ["string", "null"] },
+        "unit": { "type": ["string", "null"] },
+        "unit_price": { "type": ["string", "null"] },
+        "amount_excluding_tax": { "type": ["string", "null"] },
+        "tax_amount": { "type": ["string", "null"] },
+        "total_amount": { "type": "string" },
+        "tax_rate": { "type": ["string", "null"] },
+        "supplier_name": { "type": "string" },
+        "parser_version": { "type": "string" },
+        "status": { "$ref": "#/$defs/InvoiceStatus" },
+        "match_result": { "type": ["object", "null"], "additionalProperties": true },
+        "match_explanation": { "type": ["object", "null"], "additionalProperties": true },
+        "notes": { "type": ["string", "null"] },
+        "version": { "type": "integer", "minimum": 0 },
+        "created_at": { "$ref": "#/$defs/DateTime" },
+        "updated_at": { "$ref": "#/$defs/DateTime" },
+        "matched_at": { "type": ["string", "null"] },
+        "reconciled_at": { "type": ["string", "null"] },
+        "order_no": { "type": ["string", "null"] },
+        "task_reference": { "type": ["string", "null"] },
+        "order_quantity": { "type": ["string", "null"] },
+        "order_received_quantity": { "type": ["string", "null"] },
+        "order_landed_total": { "type": ["string", "null"] },
+        "expected_tax_rate": { "type": ["string", "null"] },
+        "three_way": { "type": ["object", "null"], "additionalProperties": true }
+      }
+    },
+    "InvoicePage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "page", "size", "total"],
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/$defs/InvoiceView" } },
+        "page": { "type": "integer", "minimum": 0 },
+        "size": { "type": "integer", "minimum": 1 },
+        "total": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "InvoiceActionInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "quantity": { "type": ["string", "null"] },
+        "unit_price": { "type": ["string", "null"] },
+        "amount_excluding_tax": { "type": ["string", "null"] },
+        "tax_amount": { "type": ["string", "null"] },
+        "total_amount": { "type": ["string", "null"] },
+        "tax_rate": { "type": ["string", "null"] },
+        "confirmed": { "type": "boolean" },
+        "notes": { "type": ["string", "null"], "maxLength": 2000 }
+      }
+    },
+    "ProcurementRunAccepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation_id", "purchase_request_id", "status", "location"],
+      "properties": {
+        "operation_id": { "type": "string" },
+        "purchase_request_id": { "type": "string" },
+        "session_id": { "type": ["string", "null"] },
+        "run_id": { "type": ["string", "null"] },
+        "status": { "type": "string" },
+        "location": { "type": "string" }
+      }
+    },
     "OrderStatus": {
       "type": "string",
       "enum": ["PENDING_SHIPMENT", "SHIPPED", "RECEIVED", "CLOSED"]

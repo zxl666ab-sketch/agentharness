@@ -1,5 +1,8 @@
 package com.caijiatai.procurement.order;
 
+import com.caijiatai.procurement.invoice.InvoiceEvent;
+import com.caijiatai.procurement.invoice.InvoiceStateMachineConfig;
+import com.caijiatai.procurement.invoice.InvoiceStatus;
 import com.caijiatai.procurement.platform.statemachine.StateMachine;
 import com.caijiatai.procurement.platform.statemachine.StateMachineRegistry;
 import com.caijiatai.procurement.settlement.SettlementEvent;
@@ -9,6 +12,7 @@ import org.springframework.context.annotation.Configuration;
 
 /**
  * 订单/对账状态机定义（冻结设计 4.2/4.3）：注册式声明合法流转，引擎统一校验。
+ * P3-1：发票状态机在同一平台注册表中注册。
  */
 @Configuration
 public class OrderStateMachineConfig {
@@ -37,10 +41,12 @@ public class OrderStateMachineConfig {
     @Bean
     public StateMachineRegistry stateMachineRegistry(
             StateMachine<OrderStatus, OrderEvent> orderMachine,
-            StateMachine<SettlementStatus, SettlementEvent> settlementMachine) {
+            StateMachine<SettlementStatus, SettlementEvent> settlementMachine,
+            StateMachine<InvoiceStatus, InvoiceEvent> invoiceMachine) {
         var registry = new StateMachineRegistry();
         registry.register(ORDER_MACHINE, orderMachine);
         registry.register(SETTLEMENT_MACHINE, settlementMachine);
+        registry.register(InvoiceStateMachineConfig.INVOICE_MACHINE, invoiceMachine);
         return registry;
     }
 }

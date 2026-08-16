@@ -1,6 +1,7 @@
 package com.caijiatai.procurement.settlement;
 
 import com.caijiatai.procurement.api.ApiException;
+import com.caijiatai.procurement.invoice.InvoiceService;
 import com.caijiatai.procurement.order.OrderRepository;
 import com.caijiatai.procurement.platform.statemachine.StateMachine;
 import com.caijiatai.procurement.report.AuditEvent;
@@ -17,6 +18,7 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * 对账付款服务（K8，冻结设计 4.3）：UNSETTLED --settle--> SETTLED --pay--> PAID。
  * 每次流转写审计事件 settlement_settled / settlement_paid。
+ * P3-1：付款前校验订单发票三单匹配状态（未匹配/差异挂起 → 409）。
  */
 @Service
 public class SettlementService {
@@ -24,16 +26,19 @@ public class SettlementService {
     private final OrderRepository orders;
     private final AuditEventRepository audit;
     private final StateMachine<SettlementStatus, SettlementEvent> settlementMachine;
+    private final InvoiceService invoices;
 
     public SettlementService(
             SettlementRepository settlements,
             OrderRepository orders,
             AuditEventRepository audit,
-            StateMachine<SettlementStatus, SettlementEvent> settlementMachine) {
+            StateMachine<SettlementStatus, SettlementEvent> settlementMachine,
+            InvoiceService invoices) {
         this.settlements = settlements;
         this.orders = orders;
         this.audit = audit;
         this.settlementMachine = settlementMachine;
+        this.invoices = invoices;
     }
 
     @Transactional(readOnly = true)
@@ -73,6 +78,11 @@ public class SettlementService {
         }
         if (event == SettlementEvent.PAY && paidAt == null) {
             throw bad("paid_at_required", "付款必须填写付款时间");
+        }
+        // P3-1 付款联动：订单存在未匹配/差异挂起发票时拒绝付款（409）
+        if (event == SettlementEvent.PAY && invoices.hasUnresolvedInvoices(settlement.getOrderId())) {
+            throw conflict("unmatched_invoice_blocks_payment",
+                    "订单存在未匹配或差异挂起的发票，必须先完成三单匹配（或作废发票）才能付款");
         }
         var target = settlementMachine.transition(id, from, event, Map.of());
         try {

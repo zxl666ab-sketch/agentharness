@@ -1,0 +1,259 @@
+{
+  "schema_version": 1,
+  "dataset": "ecommerce-invoice-v1",
+  "dataset_label": "发票字段抽取（三单匹配输入）合成数据集 — synthetic，非真实发票",
+  "synthetic": true,
+  "generated_at": "2026-08-16T00:00:00Z",
+  "case_count": 16,
+  "layouts": ["xlsx_cn", "pdf_en"],
+  "cases": [
+    {
+      "id": "inv-01",
+      "layout": "xlsx_cn",
+      "expected": {
+        "invoice_code": "144032600111",
+        "invoice_no": "202608160001",
+        "issue_date": "2026-08-16",
+        "supplier_name": "华东优包",
+        "quantity": "1000",
+        "unit_price": "4.60177",
+        "amount_excluding_tax": "4601.77",
+        "tax_amount": "598.23",
+        "total_amount": "5200",
+        "tax_rate": "0.13"
+      }
+    },
+    {
+      "id": "inv-02",
+      "layout": "xlsx_cn",
+      "expected": {
+        "invoice_code": "144032600222",
+        "invoice_no": "202608160002",
+        "issue_date": "2026-08-17",
+        "supplier_name": "蓝海包装",
+        "quantity": "500",
+        "unit_price": "8.2",
+        "amount_excluding_tax": "4100",
+        "tax_amount": "533",
+        "total_amount": "4633",
+        "tax_rate": "0.13"
+      }
+    },
+    {
+      "id": "inv-03",
+      "layout": "xlsx_cn",
+      "expected": {
+        "invoice_code": "144032600333",
+        "invoice_no": "202608160003",
+        "issue_date": "2026-08-18",
+        "supplier_name": "顺达纸品",
+        "quantity": "2000",
+        "unit_price": "0.65",
+        "amount_excluding_tax": "1300",
+        "tax_amount": "78",
+        "total_amount": "1378",
+        "tax_rate": "0.06"
+      }
+    },
+    {
+      "id": "inv-04",
+      "layout": "xlsx_cn",
+      "expected": {
+        "invoice_code": "144032600444",
+        "invoice_no": "202608160004",
+        "issue_date": "2026-08-19",
+        "supplier_name": "绿色供应链",
+        "quantity": "3000",
+        "unit_price": "1.333333",
+        "amount_excluding_tax": "4000",
+        "tax_amount": "520",
+        "total_amount": "4520",
+        "tax_rate": "0.13"
+      }
+    },
+    {
+      "id": "inv-05",
+      "layout": "xlsx_cn",
+      "expected": {
+        "invoice_code": "144032600555",
+        "invoice_no": "202608160005",
+        "issue_date": "2026-08-20",
+        "supplier_name": "宏达包装",
+        "quantity": "800",
+        "unit_price": "6.25",
+        "amount_excluding_tax": "5000",
+        "tax_amount": "650",
+        "total_amount": "5650",
+        "tax_rate": "0.13"
+      }
+    },
+    {
+      "id": "inv-06",
+      "layout": "xlsx_cn",
+      "expected": {
+        "invoice_code": "144032600666",
+        "invoice_no": "202608160006",
+        "issue_date": "2026-08-21",
+        "supplier_name": "新艺印刷",
+        "quantity": "1500",
+        "unit_price": "3.333333",
+        "amount_excluding_tax": "5000",
+        "tax_amount": "300",
+        "total_amount": "5300",
+        "tax_rate": "0.06"
+      }
+    },
+    {
+      "id": "inv-07",
+      "layout": "xlsx_cn",
+      "expected": {
+        "invoice_code": "144032600777",
+        "invoice_no": "202608160007",
+        "issue_date": "2026-08-22",
+        "supplier_name": "众合物资",
+        "quantity": "1200",
+        "unit_price": "2.5",
+        "amount_excluding_tax": "3000",
+        "tax_amount": "390",
+        "total_amount": "3390",
+        "tax_rate": "0.13"
+      }
+    },
+    {
+      "id": "inv-08",
+      "layout": "xlsx_cn",
+      "expected": {
+        "invoice_code": "144032600888",
+        "invoice_no": "202608160008",
+        "issue_date": "2026-08-23",
+        "supplier_name": "金泰塑业",
+        "quantity": "600",
+        "unit_price": "10",
+        "amount_excluding_tax": "6000",
+        "tax_amount": "780",
+        "total_amount": "6780",
+        "tax_rate": "0.13"
+      }
+    },
+    {
+      "id": "inv-09",
+      "layout": "pdf_en",
+      "expected": {
+        "invoice_code": "144032600999",
+        "invoice_no": "202608160009",
+        "issue_date": "2026-08-16",
+        "supplier_name": "EastPack",
+        "quantity": "1000",
+        "amount_excluding_tax": "4601.77",
+        "tax_amount": "598.23",
+        "total_amount": "5200",
+        "tax_rate": "0.13"
+      }
+    },
+    {
+      "id": "inv-10",
+      "layout": "pdf_en",
+      "expected": {
+        "invoice_code": "144032601010",
+        "invoice_no": "202608160010",
+        "issue_date": "2026-08-17",
+        "supplier_name": "BlueOcean",
+        "quantity": "500",
+        "amount_excluding_tax": "4100",
+        "tax_amount": "533",
+        "total_amount": "4633",
+        "tax_rate": "0.13"
+      }
+    },
+    {
+      "id": "inv-11",
+      "layout": "pdf_en",
+      "expected": {
+        "invoice_code": "144032601111",
+        "invoice_no": "202608160011",
+        "issue_date": "2026-08-18",
+        "supplier_name": "ShundaPaper",
+        "quantity": "2000",
+        "amount_excluding_tax": "1300",
+        "tax_amount": "78",
+        "total_amount": "1378",
+        "tax_rate": "0.06"
+      }
+    },
+    {
+      "id": "inv-12",
+      "layout": "pdf_en",
+      "expected": {
+        "invoice_code": "144032601212",
+        "invoice_no": "202608160012",
+        "issue_date": "2026-08-19",
+        "supplier_name": "GreenChain",
+        "quantity": "3000",
+        "amount_excluding_tax": "4000",
+        "tax_amount": "520",
+        "total_amount": "4520",
+        "tax_rate": "0.13"
+      }
+    },
+    {
+      "id": "inv-13",
+      "layout": "pdf_en",
+      "expected": {
+        "invoice_code": "144032601313",
+        "invoice_no": "202608160013",
+        "issue_date": "2026-08-20",
+        "supplier_name": "Hongda",
+        "quantity": "800",
+        "amount_excluding_tax": "5000",
+        "tax_amount": "650",
+        "total_amount": "5650",
+        "tax_rate": "0.13"
+      }
+    },
+    {
+      "id": "inv-14",
+      "layout": "pdf_en",
+      "expected": {
+        "invoice_code": "144032601414",
+        "invoice_no": "202608160014",
+        "issue_date": "2026-08-21",
+        "supplier_name": "XinyiPrint",
+        "quantity": "1500",
+        "amount_excluding_tax": "5000",
+        "tax_amount": "300",
+        "total_amount": "5300",
+        "tax_rate": "0.06"
+      }
+    },
+    {
+      "id": "inv-15",
+      "layout": "pdf_en",
+      "expected": {
+        "invoice_code": "144032601515",
+        "invoice_no": "202608160015",
+        "issue_date": "2026-08-22",
+        "supplier_name": "Zhonghe",
+        "quantity": "1200",
+        "amount_excluding_tax": "3000",
+        "tax_amount": "390",
+        "total_amount": "3390",
+        "tax_rate": "0.13"
+      }
+    },
+    {
+      "id": "inv-16",
+      "layout": "pdf_en",
+      "expected": {
+        "invoice_code": "144032601616",
+        "invoice_no": "202608160016",
+        "issue_date": "2026-08-23",
+        "supplier_name": "Jintai",
+        "quantity": "600",
+        "amount_excluding_tax": "6000",
+        "tax_amount": "780",
+        "total_amount": "6780",
+        "tax_rate": "0.13"
+      }
+    }
+  ]
+}

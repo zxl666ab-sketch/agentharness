@@ -40,9 +40,33 @@ public final class SyntheticAgentClient implements AgentDispatcher {
             case "approve_decision" -> approval(command);
             case "import_quote", "reopen_task", "resume_run" -> Map.of(
                     "run_id", sha256hex(command.getOperationId() + ":run"));
+            case "parse_invoice" -> parseInvoice(command);
+            case "explain_invoice_diff" -> explainInvoiceDiff(command);
             default -> Map.of();
         };
         return new AgentDispatcher.DispatchResult(200, Map.of("status", "completed", "result", result));
+    }
+
+    /** 演示模式：发票字段由 Java 侧合成（真实模式由 Python 确定性解析）。 */
+    private Map<String, Object> parseInvoice(AgentCommand command) {
+        var payload = command.getPayload();
+        var invoice = new LinkedHashMap<String, Object>();
+        invoice.put("invoice_code", "INV-CODE-" + command.getOperationId().substring(0, 8));
+        invoice.put("invoice_no", "INV-" + command.getOperationId().substring(0, 12));
+        invoice.put("issue_date", java.time.LocalDate.now().toString());
+        invoice.put("supplier_name", "演示供应商");
+        invoice.put("total_amount", text(payload.get("order_landed_total")));
+        invoice.put("quantity", text(payload.get("order_quantity")));
+        invoice.put("parser_version", "invoice-v1");
+        return Map.of("invoice", invoice);
+    }
+
+    private Map<String, Object> explainInvoiceDiff(AgentCommand command) {
+        var diffs = command.getPayload().get("diffs");
+        return Map.of("explanation", Map.of(
+                "reason", "三单匹配存在差异，请核对发票与订单/收货数据（演示模式）。",
+                "suggestions", java.util.List.of("请核对金额合计与订单到货总价"),
+                "source", "synthetic_agent"));
     }
 
     private Map<String, Object> approval(AgentCommand command) {

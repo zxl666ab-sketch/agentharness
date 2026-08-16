@@ -31,7 +31,7 @@ export const STATUS_TONES: Record<ProcurementStatus, string> = {
   cancelled: "neutral",
 };
 
-/** 完整业务闭环：创建需求 → 报价 → 复核 → 比价 → 审批 → 订单 → 收货 → 对账 → 付款 */
+/** 完整业务闭环：创建需求 → 报价 → 复核 → 比价 → 审批 → 订单 → 收货 → 发票 → 对账 → 付款 */
 export const CLOSED_LOOP_STEPS = [
   "创建需求",
   "上传报价",
@@ -40,6 +40,7 @@ export const CLOSED_LOOP_STEPS = [
   "人工审批",
   "采购订单",
   "收货确认",
+  "发票匹配",
   "对账",
   "付款",
 ] as const;
@@ -77,10 +78,10 @@ export function closedLoopStep(status: ProcurementStatus): number {
   }
 }
 
-/** 已批准任务可依据订单/对账生命周期继续推进（6 订单 → 7 收货 → 8 对账 → 9 付款）。 */
+/** 已批准任务可依据订单/对账/发票生命周期继续推进（6 订单 → 7 收货 → 8 发票 → 9 对账 → 10 付款）。 */
 export function closedLoopProgress(
   status: ProcurementStatus,
-  order: { status: string; settlement_status?: string | null } | null | undefined,
+  order: { status: string; settlement_status?: string | null; invoice_status?: string | null } | null | undefined,
 ): number {
   const base = closedLoopStep(status);
   if (status !== "approved" || !order) return base;
@@ -88,9 +89,14 @@ export function closedLoopProgress(
     case "SHIPPED":
       return 7;
     case "RECEIVED":
-      return order.settlement_status === "PAID" ? 9 : 8;
+      if (order.invoice_status === "RECONCILED" || order.invoice_status === "MATCHED") {
+        return order.settlement_status === "PAID" ? 10 : 9;
+      }
+      if (order.settlement_status === "PAID") return 10;
+      if (order.settlement_status === "SETTLED") return 9;
+      return 8;
     case "CLOSED":
-      return 9;
+      return 10;
     default:
       return 6;
   }

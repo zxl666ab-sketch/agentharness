@@ -43,13 +43,15 @@ RPC_RESPONSES_TOPIC = "caijiatai.rpc.responses"
 
 SUPPORTED_OPERATIONS = frozenset(
     {
-        "analyze",
-        "create_structured",
-        "approve_decision",
-        "reopen_task",
-        "resume_run",
-        "import_quote",
         "start_conversation",
+        "import_quote",
+        "resume_run",
+        "analyze",
+        "approve_decision",
+        "create_structured",
+        "reopen_task",
+        "parse_invoice",
+        "explain_invoice_diff",
     }
 )
 

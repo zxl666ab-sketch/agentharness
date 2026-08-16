@@ -1,0 +1,147 @@
+{
+  "dataset": "ecommerce-invoice-v1",
+  "dataset_label": "发票字段抽取（三单匹配输入）合成数据集 — synthetic，非真实发票",
+  "synthetic": true,
+  "case_count": 16,
+  "field_extraction": {
+    "accuracy": 1.0,
+    "correct": 144,
+    "total": 144
+  },
+  "diff_explanation_numeric_consistency": {
+    "passed": true,
+    "numbers_in_explanation": [
+      "3",
+      "1000",
+      "900",
+      "-100",
+      "5200.00",
+      "5300.00",
+      "100.00",
+      "0.13",
+      "0.09",
+      "-0.04"
+    ],
+    "violations": [],
+    "suggestion_count": 3
+  },
+  "acceptance": {
+    "field_extraction_at_least_99pct": true,
+    "numeric_consistency": true
+  },
+  "per_case": [
+    {
+      "id": "inv-01",
+      "layout": "xlsx_cn",
+      "correct": 9,
+      "total": 9,
+      "missed": []
+    },
+    {
+      "id": "inv-02",
+      "layout": "xlsx_cn",
+      "correct": 9,
+      "total": 9,
+      "missed": []
+    },
+    {
+      "id": "inv-03",
+      "layout": "xlsx_cn",
+      "correct": 9,
+      "total": 9,
+      "missed": []
+    },
+    {
+      "id": "inv-04",
+      "layout": "xlsx_cn",
+      "correct": 9,
+      "total": 9,
+      "missed": []
+    },
+    {
+      "id": "inv-05",
+      "layout": "xlsx_cn",
+      "correct": 9,
+      "total": 9,
+      "missed": []
+    },
+    {
+      "id": "inv-06",
+      "layout": "xlsx_cn",
+      "correct": 9,
+      "total": 9,
+      "missed": []
+    },
+    {
+      "id": "inv-07",
+      "layout": "xlsx_cn",
+      "correct": 9,
+      "total": 9,
+      "missed": []
+    },
+    {
+      "id": "inv-08",
+      "layout": "xlsx_cn",
+      "correct": 9,
+      "total": 9,
+      "missed": []
+    },
+    {
+      "id": "inv-09",
+      "layout": "pdf_en",
+      "correct": 9,
+      "total": 9,
+      "missed": []
+    },
+    {
+      "id": "inv-10",
+      "layout": "pdf_en",
+      "correct": 9,
+      "total": 9,
+      "missed": []
+    },
+    {
+      "id": "inv-11",
+      "layout": "pdf_en",
+      "correct": 9,
+      "total": 9,
+      "missed": []
+    },
+    {
+      "id": "inv-12",
+      "layout": "pdf_en",
+      "correct": 9,
+      "total": 9,
+      "missed": []
+    },
+    {
+      "id": "inv-13",
+      "layout": "pdf_en",
+      "correct": 9,
+      "total": 9,
+      "missed": []
+    },
+    {
+      "id": "inv-14",
+      "layout": "pdf_en",
+      "correct": 9,
+      "total": 9,
+      "missed": []
+    },
+    {
+      "id": "inv-15",
+      "layout": "pdf_en",
+      "correct": 9,
+      "total": 9,
+      "missed": []
+    },
+    {
+      "id": "inv-16",
+      "layout": "pdf_en",
+      "correct": 9,
+      "total": 9,
+      "missed": []
+    }
+  ],
+  "generated_at": "2026-08-16T08:49:56.801538Z"
+}

@@ -719,6 +719,75 @@ export type CorrectionPage = {
   total: number;
 };
 
+export type InvoiceStatus = "REGISTERED" | "MATCHED" | "DIFF_HOLD" | "VOIDED" | "RECONCILED";
+
+export type InvoiceMatchDiff = {
+  field: string;
+  expected: string;
+  actual: string;
+  diff: string;
+};
+
+export type InvoiceView = {
+  id: string;
+  order_id: string;
+  invoice_code: string | null;
+  invoice_no: string;
+  issue_date: string | null;
+  quantity: string | null;
+  unit: string | null;
+  unit_price: string | null;
+  amount_excluding_tax: string | null;
+  tax_amount: string | null;
+  total_amount: string;
+  tax_rate: string | null;
+  supplier_name: string;
+  parser_version: string;
+  status: InvoiceStatus;
+  match_result: {
+    matched: boolean;
+    expected_unit_price?: string | null;
+    actual_unit_price?: string | null;
+    diffs?: InvoiceMatchDiff[];
+  } | null;
+  match_explanation: { reason?: string; suggestions?: string[]; source?: string } | null;
+  notes: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  matched_at: string | null;
+  reconciled_at: string | null;
+  order_no: string | null;
+  task_reference: string | null;
+  order_quantity: string | null;
+  order_received_quantity: string | null;
+  order_landed_total: string | null;
+  expected_tax_rate: string | null;
+  three_way?: {
+    po: { quantity: string | null; received_quantity: string | null; landed_total: string | null };
+    grn: { received_quantity: string | null; received_at: string | null };
+    invoice: { quantity: string | null; unit_price: string | null; total_amount: string | null; tax_rate: string | null };
+  };
+};
+
+export type InvoicePage = {
+  items: InvoiceView[];
+  page: number;
+  size: number;
+  total: number;
+};
+
+export type InvoiceActionInput = {
+  quantity?: string | null;
+  unit_price?: string | null;
+  amount_excluding_tax?: string | null;
+  tax_amount?: string | null;
+  total_amount?: string | null;
+  tax_rate?: string | null;
+  confirmed?: boolean;
+  notes?: string | null;
+};
+
 export type PlatformInfo = {
   service: string;
   backend_version: string;

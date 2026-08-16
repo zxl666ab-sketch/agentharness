@@ -28,7 +28,7 @@ export function writeRole(role: DemoRole) {
  * 管理员：全部 + 系统管理（审计日志/系统信息）
  */
 const VISIBLE_VIEWS: Record<DemoRole, WorkbenchView[]> = {
-  buyer: ["workbench", "tasks", "ai", "reviews", "suppliers", "orders", "reports"],
+  buyer: ["workbench", "tasks", "ai", "reviews", "suppliers", "orders", "invoices", "reports"],
   approver: ["workbench", "ai", "reviews"],
   admin: [
     "workbench",
@@ -37,6 +37,7 @@ const VISIBLE_VIEWS: Record<DemoRole, WorkbenchView[]> = {
     "reviews",
     "suppliers",
     "orders",
+    "invoices",
     "reports",
     "audit",
     "system",

@@ -1,0 +1,60 @@
+{
+  "checks": [
+    {
+      "name": "P3-1 invoice list rendered",
+      "ok": true,
+      "detail": "cards=3"
+    },
+    {
+      "name": "P3-1 diff-hold invoice present",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P3-1 three-way comparison shown",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P3-1 structured diffs shown",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P3-1 agent explanation shown",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P3-1 diff actions visible",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P3-1 reconciled invoice shows state",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P3-1 matched invoice shows pass note",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P3-1 progress bar has 10 closed-loop steps",
+      "ok": true,
+      "detail": "steps=['创建需求', '上传报价', '字段复核', '4\\n供应商比价', '5\\n人工审批', '6\\n采购订单', '7\\n收货确认', '8\\n发票匹配', '9\\n对账', '10\\n付款']"
+    },
+    {
+      "name": "P3-1 a fully paid task shows 10/10 progress",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "P3-1 zero console errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "console_errors": []
+}

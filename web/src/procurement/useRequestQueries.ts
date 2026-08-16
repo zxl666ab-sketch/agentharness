@@ -80,7 +80,18 @@ export function useRequestQueries(state: WorkbenchState) {
     queryKey: ["procurement-task-order", selectedId],
     queryFn: async () => {
       const page = await procurementApi.orders(undefined, 0, 100);
-      return page.items.find((item) => item.task_id === selectedId) || null;
+      const order = page.items.find((item) => item.task_id === selectedId) || null;
+      if (!order) return null;
+      // P3-1：附带发票匹配状态（发票中心数据），驱动 10 步闭环进度
+      try {
+        const invoicePage = await procurementApi.invoices(undefined, order.id, 0, 5);
+        const active = invoicePage.items.find((item) => item.status !== "VOIDED");
+        return active
+          ? { ...order, invoice_status: active.status === "RECONCILED" ? "RECONCILED" : active.status === "MATCHED" ? "MATCHED" : null }
+          : { ...order, invoice_status: null };
+      } catch {
+        return order;
+      }
     },
     enabled: !!selectedId && detailQuery.data?.status === "approved",
     refetchInterval: 10_000,

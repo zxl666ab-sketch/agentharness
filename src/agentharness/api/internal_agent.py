@@ -30,6 +30,7 @@ from agentharness.procurement.agent_tools import (
     ProcurementAgentTools,
 )
 from agentharness.procurement.evaluation import evaluate_frozen_cases
+from agentharness.procurement.invoice_parsing import build_diff_explanation, parse_invoice
 from agentharness.procurement.semantic_cache import SemanticCache
 from agentharness.providers.gateway import GatewayAdapter
 from agentharness.providers.openai_adapter import OpenAIResponsesAdapter
@@ -73,6 +74,8 @@ class AgentCommandBody(BaseModel):
         "approve_decision",
         "create_structured",
         "reopen_task",
+        "parse_invoice",
+        "explain_invoice_diff",
     ]
     aggregate_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     generation: int = Field(ge=1)
@@ -150,7 +153,35 @@ class InternalAgentCommands:
             return await self._resume(body)
         if body.operation_type in {"create_structured", "reopen_task"}:
             return await self._bind_new_task(body)
+        if body.operation_type == "parse_invoice":
+            return await self._parse_invoice(body)
+        if body.operation_type == "explain_invoice_diff":
+            return await self._explain_invoice_diff(body)
         raise ValueError(f"unsupported operation type: {body.operation_type}")
+
+    async def _parse_invoice(self, body: AgentCommandBody) -> dict[str, Any]:
+        """P3-1：确定性发票字段抽取（Java 侧三单匹配只消费 invoice 键）。"""
+        artifact_id = str(body.payload.get("artifact_id") or "")
+        filename = str(body.payload.get("filename") or "")
+        expected_sha = str(body.payload.get("sha256") or "")
+        if not artifact_id.startswith("jb") or not filename:
+            raise ValueError("invalid Java invoice artifact reference")
+        content = await self._java_bytes(f"/internal/v1/artifacts/{artifact_id}/raw")
+        if expected_sha and hashlib.sha256(content).hexdigest() != expected_sha:
+            raise ValueError("invoice artifact SHA-256 mismatch")
+        parsed = await asyncio.to_thread(parse_invoice, filename, content)
+        invoice = parsed.get("invoice") or {}
+        if not str(invoice.get("invoice_no") or "").strip() or invoice.get("total_amount") is None:
+            raise ValueError("invoice parse missing required fields (invoice_no / total_amount)")
+        return {"invoice": invoice, "parser_version": parsed.get("parser_version"), "processing_ms": parsed.get("processing_ms")}
+
+    async def _explain_invoice_diff(self, body: AgentCommandBody) -> dict[str, Any]:
+        """P3-1 模式 C：Java 结构化差异 → 自然语言原因与处理建议（数值只来自注入的 diffs，
+        满足「解释中每个数字必须存在于结构化差异」的评测硬校验）。"""
+        diffs = body.payload.get("diffs")
+        if not isinstance(diffs, list) or not diffs:
+            raise ValueError("explain_invoice_diff requires structured diffs")
+        return {"explanation": build_diff_explanation(diffs)}
 
     async def _start_conversation(self, body: AgentCommandBody) -> dict[str, Any]:
         message_text = str(body.payload.get("message") or "").strip()

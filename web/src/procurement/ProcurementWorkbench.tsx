@@ -28,6 +28,7 @@ import { AiTaskRecovery } from "./AiTaskRecovery";
 import { ComparisonView } from "./ComparisonView";
 import { ConfigDrawer } from "./ConfigDrawer";
 import { DeleteDialog } from "./DeleteDialog";
+import { InvoiceCenter } from "./InvoiceCenter";
 import { NextStepBar } from "./NextStepBar";
 import { OrderCenter } from "./OrderCenter";
 import {
@@ -267,6 +268,8 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
             <SupplierCenter onOpenTask={openTask} />
           ) : view === "orders" ? (
             <OrderCenter highlightTaskId={orderTask} onBackToTask={(taskId) => openTask(taskId)} />
+          ) : view === "invoices" ? (
+            <InvoiceCenter />
           ) : view === "reports" ? (
             <ReportsCenter />
           ) : view === "audit" ? (

@@ -5,6 +5,7 @@ export const WORKBENCH_VIEWS = [
   "reviews",
   "suppliers",
   "orders",
+  "invoices",
   "reports",
   "audit",
   "system",
