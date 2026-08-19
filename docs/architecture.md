@@ -10,7 +10,7 @@ flowchart LR
     Browser["React 浏览器工作台"] -->|"HTTP/SSE 仅 127.0.0.1:8741"| Java["Spring Boot Procurement Service"]
     Java <-->|"Kafka（唯一通道）"| Kafka["Kafka KRaft 单节点"]
     Kafka <-->|"commands/results/rpc/events"| Python["Python Agent 微服务"]
-    Java -->|"JPA / Flyway V1-V7"| MySQL["MySQL 8 caijiatai_business"]
+    Java -->|"JPA / Flyway V1–V16"| MySQL["MySQL 8 caijiatai_business"]
     Python -->|"Run / Checkpoint / Lease / Approval"| RuntimeStore["持久化 Harness Runtime"]
     Java <--> Redis["Redis 任务上下文缓存"]
     Python <--> Redis

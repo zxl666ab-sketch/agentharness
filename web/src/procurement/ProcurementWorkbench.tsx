@@ -19,7 +19,7 @@ import {
   Wifi,
   ChevronUp,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { AuditLogCenter } from "./AuditLogCenter";
 import { AuditView } from "./AuditView";
@@ -30,6 +30,7 @@ import { ConfigDrawer } from "./ConfigDrawer";
 import { ContractCenter } from "./ContractCenter";
 import { DeleteDialog } from "./DeleteDialog";
 import { InvoiceCenter } from "./InvoiceCenter";
+import { HumanInteractionPanel } from "./HumanInteractionPanel";
 import { NextStepBar } from "./NextStepBar";
 import { OrderCenter } from "./OrderCenter";
 import {
@@ -50,9 +51,11 @@ import { errorText, useWorkbenchActions } from "./useWorkbenchActions";
 import { useRequestQueries } from "./useRequestQueries";
 import { useWorkbenchState } from "./useWorkbenchState";
 import {
-  CLOSED_LOOP_STEPS,
-  closedLoopProgress,
+  FULFILLMENT_STEPS,
+  PROCUREMENT_DECISION_STEPS,
   contractStatusLabel,
+  fulfillmentProgress,
+  procurementDecisionProgress,
   statusLabel,
   statusTone,
 } from "./viewModel";
@@ -69,8 +72,10 @@ function requestDate(value: string) {
   return new Date(value).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
 }
 
-function quantityText(value: number | string) {
-  return typeof value === "number" ? value.toLocaleString("zh-CN") : String(value);
+function quantityUnitText(value: number | string | null, unit: string | null) {
+  if (value == null || String(value).trim() === "" || !unit?.trim()) return "待补充";
+  const quantity = typeof value === "number" ? value.toLocaleString("zh-CN") : String(value);
+  return `${quantity} ${unit}`;
 }
 
 function specificationText(specifications: ProcurementRequest["specifications"]) {
@@ -97,7 +102,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
     openCreate, selectAiTask, selectReview, navigate,
   } = state;
   const {
-    metaQuery, configQuery, requestsQuery, allAiTasksQuery, reviewsQuery, detailQuery,
+    metaQuery, configQuery, requestsQuery, allAiTasksQuery, reviewsQuery, detailQuery, interactionsQuery,
     aiTaskQuery, reportQuery, taskOrderQuery, taskContractQuery, requests, allAiTasks, reviews,
     filtered, visibleRequests, totalTaskPages,
   } = queries;
@@ -112,11 +117,26 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
 
   useEscape(!!deleteTarget, () => setDeleteTarget(null), deleteBusy);
   useEscape(showConfig, () => setShowConfig(false), configBusy);
+  useEffect(() => {
+    const allowedView = visibleViewOrDefault(role, view);
+    if (allowedView !== view) openView(allowedView);
+  }, [openView, role, view]);
 
   const detail = detailQuery.data || null;
   const taskOrder = taskOrderQuery.data ?? null;
   const taskContract = taskContractQuery.data ?? null;
-  const progressDone = detail ? closedLoopProgress(detail.status, taskOrder) : 0;
+  const latestInteraction = interactionsQuery.data?.[0] ?? null;
+  const structuredInteractionActive = interactionsQuery.data?.some((item) =>
+    item.status === "WAITING" || item.status === "ANSWERED"
+  ) ?? false;
+  const fulfillmentStage = detail?.status === "approved";
+  const progressSteps = fulfillmentStage ? FULFILLMENT_STEPS : PROCUREMENT_DECISION_STEPS;
+  const progressCurrent = detail
+    ? fulfillmentStage ? fulfillmentProgress(taskOrder) : procurementDecisionProgress(detail.status)
+    : 0;
+  useEffect(() => {
+    if (detail?.id) setConversationOpen(true);
+  }, [detail?.id, setConversationOpen]);
 
   return (
     <div className="proc-app">
@@ -205,7 +225,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                 >
                   <span className="proc-request-row"><code>{request.reference}</code><small>{requestDate(request.updated_at)}</small></span>
                   <strong>{request.title}</strong>
-                  <span className="proc-request-row"><small>{request.quote_count} 家报价 · {quantityText(request.quantity)} {request.unit}</small><i className={statusTone(request.status)}>{statusLabel(request.status)}</i></span>
+                  <span className="proc-request-row"><small>{request.quote_count} 家报价 · {quantityUnitText(request.quantity, request.unit)}</small><i className={statusTone(request.status)}>{statusLabel(request.status)}</i></span>
                 </button>
                 <button
                   className="proc-request-delete proc-icon-button"
@@ -239,13 +259,16 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
               aiTasks={allAiTasks}
               reviews={reviews}
               loading={requestsQuery.isPending || allAiTasksQuery.isPending || reviewsQuery.isPending}
-              onCreate={openCreate}
+              createBusy={busy === "conversation"}
+              createError={actionError}
+              maxFileBytes={metaQuery.data?.max_file_bytes ?? 5 * 1024 * 1024}
+              maxTotalBytes={metaQuery.data?.max_conversation_upload_bytes ?? 20 * 1024 * 1024}
+              maxQuotes={Math.min(metaQuery.data?.max_quotes_per_request ?? 10, 10)}
+              onStart={startConversation}
               onOpenTask={openTask}
               onOpenTasks={openTaskFilter}
               onOpenView={openView}
               onOpenOrders={() => openView("orders")}
-              onOpenSuppliers={() => openView("suppliers")}
-              onOpenReports={() => openView("reports")}
             />
           ) : view === "ai" ? (
             <AiTaskCenter
@@ -299,22 +322,37 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                 </div>
                 <div className="proc-request-facts">
                   <span><small>物料</small><strong>{detail.item_name}</strong></span>
-                  <span><small>采购量</small><strong>{quantityText(detail.quantity)} {detail.unit}</strong></span>
+                  <span><small>采购量</small><strong>{quantityUnitText(detail.quantity, detail.unit)}</strong></span>
                   <span><small>规格</small><strong>{specificationText(detail.specifications)}</strong></span>
                   <span><small>最长交期</small><strong>{String(detail.constraints.max_lead_days ?? "-")} 天</strong></span>
                 </div>
-                <ol className="proc-progress" aria-label="采购进度">
-                  {CLOSED_LOOP_STEPS.map((step, index) => {
-                    const done = index + 1 <= progressDone;
+                <div className="proc-progress-context">
+                  <span>{fulfillmentStage ? "采购方案已确认 · 当前履约阶段" : "当前采购决策阶段"}</span>
+                </div>
+                <ol className={`proc-progress ${fulfillmentStage ? "fulfillment" : "decision"}`} aria-label={fulfillmentStage ? "履约进度" : "采购决策进度"}>
+                  {progressSteps.map((step, index) => {
+                    const position = index + 1;
+                    const done = position < progressCurrent || (fulfillmentStage && position === 6 && taskOrder?.settlement?.status === "PAID");
+                    const current = position === progressCurrent && !done;
                     return (
-                      <li key={step} className={done ? "done" : ""}>
-                        <span>{done ? <CheckCircle2 size={14} /> : index + 1}</span>
+                      <li key={step} className={done ? "done" : current ? "current" : ""} aria-current={current ? "step" : undefined}>
+                        <span>{done ? <CheckCircle2 size={14} /> : position}</span>
                         <strong>{step}</strong>
                       </li>
                     );
                   })}
                 </ol>
               </header>
+
+              {latestInteraction ? (
+                <HumanInteractionPanel interaction={latestInteraction} />
+              ) : detail.status === "waiting_human" && interactionsQuery.isError ? (
+                <section className="proc-interaction-load-error" role="alert">
+                  <AlertTriangle size={18} />
+                  <div><strong>待回答问题加载失败</strong><p>{errorText(interactionsQuery.error)}</p></div>
+                  <button className="proc-button secondary" type="button" onClick={() => void interactionsQuery.refetch()}>重新加载</button>
+                </section>
+              ) : null}
 
               <NextStepBar request={detail} order={taskOrder ?? null} onAction={handleNextStep} />
 
@@ -356,7 +394,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                     onClick={() => setConversationOpen((open) => !open)}
                   >
                     <Bot size={15} />
-                    <strong>采购 Agent 对话</strong>
+                    <strong>Agent 会话</strong>
                     <span className="proc-conversation-toggle-status"><i className={statusTone(detail.status)} />{statusLabel(detail.status)}</span>
                     {conversationOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                   </button>
@@ -364,6 +402,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                     <div id="proc-conversation-panel">
                       <ProcurementConversation
                         request={detail}
+                        structuredInteractionActive={structuredInteractionActive}
                         actionError={actionError}
                         onResume={resume}
                         onRecover={analyze}

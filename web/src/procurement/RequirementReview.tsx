@@ -85,7 +85,7 @@ function initialState(request: ProcurementRequest): FormState {
   return {
     title: request.title,
     itemName: request.item_name,
-    itemUnit: request.unit,
+    itemUnit: asText(request.unit),
     quantity: asText(request.quantity),
     width: asText(specifications.width_mm),
     length: asText(specifications.length_mm),

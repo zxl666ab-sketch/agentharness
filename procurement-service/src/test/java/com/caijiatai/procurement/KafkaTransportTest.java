@@ -7,6 +7,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.caijiatai.procurement.agent.AgentCommand;
+import com.caijiatai.procurement.agent.AgentCommandRepository;
 import com.caijiatai.procurement.agent.CanonicalJson;
 import com.caijiatai.procurement.agent.KafkaCommandPublisher;
 import com.caijiatai.procurement.agent.KafkaRpcServer;
@@ -49,7 +50,7 @@ class KafkaTransportTest {
     @Container
     static final ConfluentKafkaContainer KAFKA = new ConfluentKafkaContainer("confluentinc/cp-kafka:7.8.0");
 
-    private KafkaTemplate<String, byte[]> template() {
+    private TestKafka template() {
         var props = new java.util.HashMap<String, Object>();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers());
         props.put(org.apache.kafka.clients.producer.ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
@@ -58,7 +59,16 @@ class KafkaTransportTest {
                 ByteArraySerializer.class);
         props.put(org.apache.kafka.clients.producer.ProducerConfig.ACKS_CONFIG, "all");
         var factory = new DefaultKafkaProducerFactory<String, byte[]>(props);
-        return new KafkaTemplate<>(factory);
+        return new TestKafka(new KafkaTemplate<>(factory), factory);
+    }
+
+    private record TestKafka(
+            KafkaTemplate<String, byte[]> template,
+            DefaultKafkaProducerFactory<String, byte[]> factory) implements AutoCloseable {
+        @Override
+        public void close() {
+            factory.destroy();
+        }
     }
 
     private AppProperties properties() {
@@ -71,8 +81,8 @@ class KafkaTransportTest {
     @Test
     void commandPublisherSignsAndSendsKafkaMessage() throws Exception {
         var topic = "caijiatai.commands";
-        var template = template();
-        var publisher = new KafkaCommandPublisher(template, properties());
+        try (var kafka = template()) {
+        var publisher = new KafkaCommandPublisher(kafka.template(), properties());
         var command = AgentCommand.accept("analyze", "a".repeat(32), 1, 0,
                 Map.ofEntries(
                         Map.entry("task_id", "a".repeat(32)),
@@ -109,20 +119,21 @@ class KafkaTransportTest {
         assertThat(envelope.get("file_ids")).isEqualTo(List.of("jb" + "d".repeat(32)));
         assertThat(envelope.get("payload_sha256")).isEqualTo(command.getPayloadSha256());
         assertThat(envelope.get("signature")).isEqualTo(MessageCodec.signEnvelope(HMAC, envelope));
+        }
     }
 
     @Test
     void rpcServerListEventsReturnsSignedResponse() {
         var topic = "caijiatai.rpc.requests";
         var responses = "caijiatai.rpc.responses";
-        var template = template();
+        try (var kafka = template()) {
 
         var events = mock(RuntimeEventRepository.class);
         when(events.findByGlobalSeqGreaterThanOrderByGlobalSeqAsc(anyLong(), any(Pageable.class)))
                 .thenReturn(List.of(RuntimeEvent.create(1L, "t".repeat(32), "r".repeat(32),
                         "run_started", Map.of("k", "v"), Instant.parse("2026-08-11T00:00:00Z"))));
         var server = new KafkaRpcServer(
-                template, properties(),
+                kafka.template(), properties(),
                 mock(ProcurementTaskRepository.class),
                 mock(ProcurementQuoteRepository.class),
                 mock(BusinessArtifactRepository.class),
@@ -130,7 +141,9 @@ class KafkaTransportTest {
                 events,
                 mock(TaskViewMapper.class),
                 mock(ReferencePriceService.class),
-                mock(PendingDecisionRepository.class));
+                mock(PendingDecisionRepository.class),
+                mock(AgentCommandRepository.class),
+                mock(com.caijiatai.procurement.interaction.HumanInteractionRepository.class));
 
         var correlationId = UUID.randomUUID().toString().replace("-", "");
         var payload = Map.<String, Object>of("after_seq", 0L, "limit", 10);
@@ -165,5 +178,6 @@ class KafkaTransportTest {
         assertThat(response.get("signature")).isEqualTo(MessageCodec.signEnvelope(HMAC, response));
         var result = (Map<?, ?>) response.get("result");
         assertThat((List<?>) result.get("events")).hasSize(1);
+        }
     }
 }

@@ -41,7 +41,8 @@ public final class ReferencePriceService {
         var matches = new ArrayList<Map<String, Object>>();
         for (var order : orders.findAllByLandedTotalNotNullOrderByCreatedAtDesc()) {
             var task = tasks.findById(order.getTaskId()).orElse(null);
-            if (task == null || order.getLandedTotal() == null) {
+            if (task == null || task.getQuantity() == null || task.getQuantity().signum() <= 0
+                    || order.getLandedTotal() == null) {
                 continue;
             }
             var sameItem = isSimilarItem(wantedItem, normalize(task.getItemName()));

@@ -31,7 +31,7 @@
 | 确定性评测 | 617/620（99.52%）、31/31、冻结黄金契约 Java/Python 双侧回归、评测资源冻结纪律 | 学生项目几乎绝版 |
 | Agent 运行时治理 | RunEngine / RunLifecycle / LeaseManager / Checkpoint / ToolInvocationExecutor（重放策略、并行安全、审批范围）/ ContextPlanner（token 预算 + 压缩）/ VerificationLoop / EffectScheduler | **被严重低估，见 2.2** |
 | 安全治理 | sandbox、redaction、allow-once 人工审批、SSRF/egress 防护、Prompt 注入对抗测试 | 超标 |
-| Java 经典考点 | 注册式状态机引擎、三层并发防护（幂等/乐观锁/分布式锁 Lua）、惰性派生 tradeoff、双超时调度、BigDecimal、Flyway V1–V11 | 已齐 |
+| Java 经典考点 | 注册式状态机引擎、三层并发防护、决定/订单事务一致性、分批收货幂等、发票核销门禁、双超时调度、BigDecimal、Flyway V1–V19 | 已齐 |
 | 工程化 | GitHub Actions CI、Testcontainers 集成测试、契约测试、Playwright 无头验收、演示数据 synthetic 纪律 | 超标 |
 
 ### 1.2 含金量缺口（按面试被问概率排序）
@@ -110,12 +110,12 @@
 #### P0-1 压测 + 调优闭环（4-5 天）
 - 工具：k6（轻量、脚本化、可出 JSON 报告），README 说明。
 - 四个必测接口（各有面试故事）：
-  1. `GET /api/procurement/orders` —— **惰性派生并发路径**：验证 UNIQUE(task_id) 幂等在并发下只落一条；
+  1. `POST /api/procurement/orders/{id}/transition` —— **分批收货幂等路径**：验证相同键重放不重复累计；
   2. `POST /api/procurement/requests/{id}/decision` —— **三层防护竞争路径**：并发审批只成功一个；
   3. `GET /api/procurement/insights/overview` —— 缓存命中 vs 穿透对比；
   4. `GET /api/procurement/requests` —— 列表分页。
 - 产出指标：QPS、p50/p95/p99、错误率；对比组：缓存开/关、锁开/关（Noop）。
-- 做 **2 个真实优化**（候选：insights 聚合索引、深分页 offset→keyset、惰性派生 reconcile 的 N+1），记录 before/after。
+- 做 **2 个真实优化**（候选：insights 聚合索引、深分页 offset→keyset、履约聚合投影的 N+1），记录 before/after。
 - 交付：`docs/performance-report.md` + `output/loadtest/` 数据 + README 链接。压测期间记录 1 个 GC/内存观察点（JVM 考点）。
 
 #### P0-2 可观测性三件套（2 天）
@@ -165,7 +165,7 @@
 
 - **一句话定位**："Java 业务主机 + 受治理 Python Agent + Kafka 可靠消息 + 冻结评测——确定性优先的双引擎采购平台。"
 - **五个必答问题**（新增）：
-  1. 你的系统能扛多少并发？→ P0-1 数字（QPS/p95）+ 惰性派生并发幂等实测；
+  1. 你的系统能扛多少并发？→ P0-1 数字（QPS/p95）+ 分批收货/付款幂等实测；
   2. Java 21 给你带来了什么？→ 虚拟线程实验（P0-3）；
   3. 你怎么评估 LLM 输出质量？→ 冻结评测 + 引用一致性硬校验 + LLM-as-Judge（P0-4）；
   4. 你了解 MCP 吗？→ P1-1 实测；

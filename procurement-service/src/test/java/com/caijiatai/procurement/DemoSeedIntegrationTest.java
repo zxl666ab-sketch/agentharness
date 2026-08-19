@@ -64,6 +64,7 @@ class DemoSeedIntegrationTest {
     @Autowired com.caijiatai.procurement.order.OrderRepository orderRepository;
     @Autowired com.caijiatai.procurement.settlement.SettlementService settlementService;
     @Autowired com.caijiatai.procurement.settlement.SettlementRepository settlementRepository;
+    @Autowired com.caijiatai.procurement.invoice.InvoiceRepository invoiceRepository;
     @Autowired AppProperties properties;
     @Autowired ObjectMapper mapper;
 
@@ -192,7 +193,7 @@ class DemoSeedIntegrationTest {
         var runner = new DemoSeedRunner(
                 demoProperties, taskService, tasks, quotes, artifactStore, audit,
                 comparison, pendingDecisions, decisions, orderService, settlementService,
-                settlementRepository, jdbc, mapper);
+                settlementRepository, invoiceRepository, jdbc, mapper);
         runner.run(null);
 
         assertThat(tasks.count()).isEqualTo(6);
@@ -265,7 +266,7 @@ class DemoSeedIntegrationTest {
         var runner = new DemoSeedRunner(
                 demoProperties, taskService, tasks, quotes, artifactStore, audit,
                 comparison, pendingDecisions, decisions, orderService, settlementService,
-                settlementRepository, jdbc, mapper);
+                settlementRepository, invoiceRepository, jdbc, mapper);
         runner.run(null);
 
         var approved = tasks.findAll().stream()
@@ -301,6 +302,9 @@ class DemoSeedIntegrationTest {
                 .map(row -> String.valueOf(row.get("status"))).sorted().toList();
         assertThat(orderStatuses).containsExactly("RECEIVED", "RECEIVED", "RECEIVED", "RECEIVED", "SHIPPED");
         assertThat(settlementRepository.count()).isEqualTo(4);
+        assertThat(invoiceRepository.count()).isEqualTo(4);
+        assertThat(invoiceRepository.findAll()).allSatisfy(invoice ->
+                assertThat(invoice.getStatus()).isEqualTo("reconciled"));
         var settlementStatuses = jdbc.queryForList("select status from purchase_settlement").stream()
                 .map(row -> String.valueOf(row.get("status"))).sorted().toList();
         assertThat(settlementStatuses).containsExactly("PAID", "PAID", "SETTLED", "SETTLED");
@@ -312,5 +316,6 @@ class DemoSeedIntegrationTest {
         assertThat(decisions.count()).isEqualTo(5);
         assertThat(orderRepository.count()).isEqualTo(5);
         assertThat(settlementRepository.count()).isEqualTo(4);
+        assertThat(invoiceRepository.count()).isEqualTo(4);
     }
 }

@@ -449,7 +449,11 @@ public class AiTaskService {
     }
 
     private void validateAnalysisInput(ProcurementTask business) {
-        if (!business.isRequirementConfirmed()) {
+        if (!business.isRequirementConfirmed()
+                || business.getQuantity() == null
+                || business.getQuantity().signum() <= 0
+                || business.getUnit() == null
+                || business.getUnit().isBlank()) {
             throw conflict("requirement_review_required", "采购需求必须先由采购员保存确认");
         }
         var taskQuotes = quotes.findByTaskIdOrderByCreatedAtAsc(business.getId());

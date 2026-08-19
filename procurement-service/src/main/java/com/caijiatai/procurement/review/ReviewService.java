@@ -11,6 +11,7 @@ import com.caijiatai.procurement.ai.AiTaskStatus;
 import com.caijiatai.procurement.ai.AiTaskViewMapper;
 import com.caijiatai.procurement.api.ApiException;
 import com.caijiatai.procurement.approval.ApprovalService;
+import com.caijiatai.procurement.approval.PendingDecisionRepository;
 import com.caijiatai.procurement.cache.TaskContextCache;
 import com.caijiatai.procurement.comparison.ComparisonSnapshot;
 import com.caijiatai.procurement.comparison.ComparisonSnapshotRepository;
@@ -41,6 +42,7 @@ public class ReviewService {
     private final ReviewRecordRepository reviews;
     private final IdempotencyRecordRepository idempotency;
     private final ApprovalService approvals;
+    private final PendingDecisionRepository pendingDecisions;
     private final AuditEventRepository audit;
     private final TaskContextCache contextCache;
     private final ReviewViewMapper views;
@@ -54,6 +56,7 @@ public class ReviewService {
             ReviewRecordRepository reviews,
             IdempotencyRecordRepository idempotency,
             ApprovalService approvals,
+            PendingDecisionRepository pendingDecisions,
             AuditEventRepository audit,
             TaskContextCache contextCache,
             ReviewViewMapper views,
@@ -65,6 +68,7 @@ public class ReviewService {
         this.reviews = reviews;
         this.idempotency = idempotency;
         this.approvals = approvals;
+        this.pendingDecisions = pendingDecisions;
         this.audit = audit;
         this.contextCache = contextCache;
         this.views = views;
@@ -245,6 +249,35 @@ public class ReviewService {
                 review.finalizeDirectDecision(decision);
                 return;
             }
+        }
+    }
+
+    @Transactional
+    public void failPendingDecision(String operationId, String reason) {
+        var failureReason = reason == null || reason.isBlank()
+                ? "Agent 未返回正式决定" : reason.strip();
+        var pending = pendingDecisions.findByOperationId(operationId).orElse(null);
+        if (pending == null || "completed".equals(pending.getStatus())) {
+            return;
+        }
+        var firstFailure = !"stale".equals(pending.getStatus());
+        pending.stale();
+        reviews.findByPendingDecisionId(pending.getId())
+                .ifPresent(review -> review.markStale(failureReason));
+        var business = businessTasks.lockById(pending.getTaskId()).orElse(null);
+        if (business == null) {
+            return;
+        }
+        business.restoreAnalyzedAfterFailedApproval(pending.getSnapshotId());
+        contextCache.evict(business.getId());
+        if (firstFailure) {
+            audit.save(AuditEvent.create(
+                    business.getId(), pending.getQuoteId(), pending.getRunId(),
+                    "procurement_decision_failed", "agent",
+                    Map.of(
+                            "pending_decision_id", pending.getId(),
+                            "operation_id", operationId,
+                            "error", failureReason)));
         }
     }
 

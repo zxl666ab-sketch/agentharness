@@ -1,5 +1,6 @@
 export const PROCUREMENT_STATUSES = [
   "draft",
+  "waiting_human",
   "collecting",
   "review",
   "ready",
@@ -14,6 +15,69 @@ export type ProcurementBusinessStatus = (typeof PROCUREMENT_STATUSES)[number];
 
 // Compatibility only: new execution state belongs to AiTaskStatus, not procurement status.
 export type ProcurementStatus = ProcurementBusinessStatus | "analyzing";
+
+export type HumanInteractionStatus =
+  | "WAITING"
+  | "ANSWERED"
+  | "APPLIED"
+  | "STALE"
+  | "EXPIRED"
+  | "CANCELLED";
+
+export type HumanInteractionOption =
+  | string
+  | { value: string; label?: string; description?: string; source?: string };
+
+export type HumanInteractionField = {
+  name: string;
+  label: string;
+  type: "string" | "number" | "boolean" | "date" | "single_choice" | "multiple_choice";
+  required?: boolean;
+  unit?: string;
+  options?: HumanInteractionOption[];
+};
+
+export type HumanInteractionAnswerSchema = {
+  type: "string" | "number" | "boolean" | "date" | "single_choice" | "multiple_choice" | "field_review" | "file_upload";
+  label?: string;
+  options?: HumanInteractionOption[];
+  fields?: HumanInteractionField[];
+};
+
+export type HumanInteraction = {
+  id: string;
+  task_id: string;
+  run_id: string | null;
+  checkpoint_id: string | null;
+  generation: number;
+  kind: string;
+  question: string;
+  reason: string;
+  business_step: string;
+  related_fields: string[];
+  related_artifact_ids: string[];
+  answer_schema: HumanInteractionAnswerSchema;
+  status: HumanInteractionStatus;
+  answer: unknown;
+  answer_note: string | null;
+  answer_artifact_ids: string[] | null;
+  answered_by: string | null;
+  answered_at: string | null;
+  applied_at: string | null;
+  expires_at: string | null;
+  cancel_reason: string | null;
+  operation_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type HumanInteractionArtifact = {
+  artifact_id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  sha256: string;
+};
 
 export const AI_TASK_STATUSES = [
   "PENDING",
@@ -368,8 +432,8 @@ export type ProcurementRequestSummary = {
   schema_version?: 1 | 2;
   category: string;
   item_name: string;
-  quantity: number | string;
-  unit: string;
+  quantity: number | string | null;
+  unit: string | null;
   specifications: Record<string, string | number | boolean | RequirementSpecification>;
   constraints: Record<string, unknown>;
   status: ProcurementStatus;
@@ -403,7 +467,7 @@ export type ProcurementRunAccepted = {
   purchase_request_id: string;
   session_id: string | null;
   run_id: string | null;
-  status: "accepted";
+  status: string;
   location: string;
 };
 
@@ -414,11 +478,13 @@ export type ProcurementOperation = {
   generation: number;
   expected_task_version: number;
   payload_sha256: string;
-  status: "pending" | "dispatching" | "accepted" | "completed" | "failed";
+  status: "pending" | "dispatching" | "published" | "accepted" | "completed" | "failed" | "cancelled";
   attempt_count: number;
   retryable: boolean;
   last_error?: string | null;
   result?: Record<string, unknown> | null;
+  accepted_at?: string | null;
+  completed_at?: string | null;
 };
 
 export type ProcurementMeta = {
@@ -561,7 +627,7 @@ export type SupplierProfile = {
   updated_at: string;
 };
 
-export type OrderStatus = "PENDING_SHIPMENT" | "SHIPPED" | "RECEIVED" | "CLOSED";
+export type OrderStatus = "PENDING_SHIPMENT" | "SHIPPED" | "PARTIALLY_RECEIVED" | "RECEIVED" | "CLOSED";
 export type SettlementStatus = "UNSETTLED" | "SETTLED" | "PAID";
 
 export type OrderArtifact = {
@@ -603,6 +669,8 @@ export type OrderView = {
   task_reference: string | null;
   task_title: string | null;
   artifacts: OrderArtifact[];
+  invoice_count: number;
+  invoice_status: InvoiceStatus | null;
   settlement: OrderSettlement | null;
   created_at: string;
   updated_at: string;
@@ -627,6 +695,7 @@ export type SettlementView = {
   version: number;
   order_no: string | null;
   task_id: string | null;
+  invoice_reconciled: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -653,6 +722,7 @@ export type InsightsOverview = {
     orders: number;
     orders_pending_shipment: number;
     orders_shipped: number;
+    orders_partially_received?: number;
     orders_received: number;
     orders_closed: number;
     settlements_unsettled: number;

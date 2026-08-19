@@ -9,6 +9,7 @@ import com.caijiatai.procurement.cache.TaskContextCache;
 import com.caijiatai.procurement.comparison.ComparisonService;
 import com.caijiatai.procurement.contract.ContractService;
 import com.caijiatai.procurement.invoice.InvoiceService;
+import com.caijiatai.procurement.interaction.HumanInteractionService;
 import com.caijiatai.procurement.quote.ProcurementQuote;
 import com.caijiatai.procurement.quote.ProcurementQuoteRepository;
 import com.caijiatai.procurement.report.AuditEvent;
@@ -42,6 +43,7 @@ public final class AgentResultApplication {
     private final TaskContextCache contextCache;
     private final InvoiceService invoices;
     private final ContractService contracts;
+    private final HumanInteractionService interactions;
 
     public AgentResultApplication(
             ProcurementTaskRepository tasks,
@@ -55,7 +57,8 @@ public final class AgentResultApplication {
             ReviewService reviews,
             TaskContextCache contextCache,
             InvoiceService invoices,
-            ContractService contracts) {
+            ContractService contracts,
+            HumanInteractionService interactions) {
         this.tasks = tasks;
         this.quotes = quotes;
         this.artifacts = artifacts;
@@ -68,6 +71,7 @@ public final class AgentResultApplication {
         this.contextCache = contextCache;
         this.invoices = invoices;
         this.contracts = contracts;
+        this.interactions = interactions;
     }
 
     public void apply(AgentCommand command, Map<String, Object> envelope) {
@@ -86,6 +90,7 @@ public final class AgentResultApplication {
                     cacheRuntimeReport(command, result);
                 }
                 case "resume_run" -> resume(command, result);
+                case "human_interaction_answer" -> applyInteractionAnswer(command, result);
                 case "create_structured", "reopen_task" -> bind(command, result);
                 case "parse_invoice" -> invoices.applyParseResult(command, result);
                 case "explain_invoice_diff" -> invoices.applyExplanation(command, result);
@@ -118,6 +123,10 @@ public final class AgentResultApplication {
                 audit.save(AuditEvent.create(
                         task.getId(), null, task.getAnalysisRunId(), "analysis_failed", "agent",
                         Map.of("operation_id", command.getOperationId(), "error", error)));
+                return;
+            }
+            if ("approve_decision".equals(command.getOperationType())) {
+                reviews.failPendingDecision(command.getOperationId(), error);
                 return;
             }
             if ("start_conversation".equals(command.getOperationType())) {
@@ -153,6 +162,20 @@ public final class AgentResultApplication {
 
     private void startConversation(AgentCommand command, Map<String, Object> result) {
         var task = lock(command);
+        var sessionId = text(result.get("session_id"));
+        var runId = text(result.get("run_id"));
+        if (sessionId.matches("[0-9a-f]{32}") && runId.matches("[0-9a-f]{32}")) {
+            task.bindAgent(sessionId, runId);
+        }
+        var interaction = map(result.get("interaction"));
+        if (!interaction.isEmpty()) {
+            interactions.createFromAgent(task.getId(), runId, task.getGeneration(), interaction);
+            task.setStatus(TaskStatus.WAITING_HUMAN);
+            audit.save(AuditEvent.create(
+                    task.getId(), null, runId, "conversation_waiting_human", "agent",
+                    Map.of("operation_id", command.getOperationId())));
+            return;
+        }
         var requirement = map(result.get("requirement"));
         if (requirement.isEmpty()) {
             throw invalidResult("Agent 未返回结构化采购需求");
@@ -174,11 +197,6 @@ public final class AgentResultApplication {
                 decimal(constraints.get("max_landed_unit_cost")));
         task.applyRequirement(schemaVersion, title, category, itemName, quantity, unit,
                 specifications, constraints);
-        var sessionId = text(result.get("session_id"));
-        var runId = text(result.get("run_id"));
-        if (sessionId.matches("[0-9a-f]{32}") && runId.matches("[0-9a-f]{32}")) {
-            task.bindAgent(sessionId, runId);
-        }
         for (var raw : list(result.get("quotes"))) {
             persistQuote(task, map(raw));
         }
@@ -224,6 +242,60 @@ public final class AgentResultApplication {
         audit.save(AuditEvent.create(
                 task.getId(), null, runId, "agent_run_resumed", "agent",
                 Map.of("operation_id", command.getOperationId())));
+    }
+
+    private void applyInteractionAnswer(AgentCommand command, Map<String, Object> result) {
+        var task = lock(command);
+        var interactionId = text(result.getOrDefault("interaction_id", command.getPayload().get("interaction_id")));
+        interactions.applied(interactionId);
+        var sessionId = text(result.get("session_id"));
+        var runId = text(result.getOrDefault("run_id", task.getAnalysisRunId()));
+        if (sessionId.matches("[0-9a-f]{32}") && runId.matches("[0-9a-f]{32}")) {
+            task.bindAgent(sessionId, runId);
+        } else if (runId.matches("[0-9a-f]{32}")) {
+            task.bindAnalysisRun(runId);
+        }
+        var requirement = map(result.get("requirement"));
+        if (!requirement.isEmpty()) {
+            var schemaVersion = integer(requirement.getOrDefault("schema_version", 1));
+            var category = text(requirement.getOrDefault("category", "ecommerce_packaging"));
+            var itemName = text(requirement.get("item_name")).strip();
+            var title = text(requirement.get("title")).strip();
+            if (title.isBlank() || title.length() > 200) {
+                throw invalidResult("Agent 恢复后未返回有效采购标题");
+            }
+            var quantity = number(requirement.get("quantity"));
+            var unit = text(requirement.get("unit")).strip();
+            var specifications = normalizeSpecifications(map(requirement.get("specifications")));
+            var constraints = map(requirement.get("constraints"));
+            RequirementValidator.validate(schemaVersion, category, itemName, quantity, unit, specifications,
+                    decimal(constraints.get("size_tolerance_mm")),
+                    decimal(constraints.get("thickness_tolerance_um")),
+                    decimal(constraints.get("max_landed_unit_cost")));
+            task.applyRequirement(schemaVersion, title, category, itemName, quantity, unit,
+                    specifications, constraints);
+            task.requireRequirementReview();
+            for (var raw : list(result.get("quotes"))) {
+                var quote = map(raw);
+                var artifactId = text(quote.get("artifact_id"));
+                if (!quotes.existsByTaskIdAndSourceArtifactId(task.getId(), artifactId)) {
+                    persistQuote(task, quote);
+                }
+            }
+        }
+        var nextQuestion = map(result.get("interaction"));
+        if (!nextQuestion.isEmpty()) {
+            interactions.createFromAgent(task.getId(), runId, task.getGeneration(), nextQuestion);
+            task.setStatus(TaskStatus.WAITING_HUMAN);
+        } else if (!requirement.isEmpty() || TaskStatus.WAITING_HUMAN.wireValue().equals(task.getStatus())) {
+            task.setStatus(TaskStatus.REVIEW);
+        }
+        audit.save(AuditEvent.create(
+                task.getId(), null, runId, "human_interaction_result_applied", "agent",
+                Map.of(
+                        "interaction_id", interactionId,
+                        "operation_id", command.getOperationId(),
+                        "rebuilt", Boolean.TRUE.equals(result.get("rebuilt")))));
     }
 
     private void bind(AgentCommand command, Map<String, Object> result) {

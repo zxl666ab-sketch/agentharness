@@ -33,7 +33,7 @@ public record AppProperties(
             throw new IllegalArgumentException("app.internal-hmac-key must be at least 32 bytes");
         }
         if (demoSeed == null) {
-            demoSeed = new DemoSeed(false, Path.of("..", "output", "procurement-scenarios"));
+            demoSeed = new DemoSeed(false, (String) null);
         }
         if (outbox == null) {
             outbox = new Outbox(500);
@@ -48,5 +48,24 @@ public record AppProperties(
         }
     }
 
-    public record DemoSeed(boolean enabled, Path root) {}
+    /**
+     * Keep the configured seed path as text during Spring binding. Spring Boot 4.1
+     * otherwise treats a relative {@link Path} placeholder as a resource path and
+     * rejects the default before the application context can start.
+     */
+    public record DemoSeed(boolean enabled, String root) {
+        public DemoSeed {
+            if (root == null || root.isBlank()) {
+                root = Path.of("..", "output", "procurement-scenarios").toString();
+            }
+        }
+
+        public DemoSeed(boolean enabled, Path root) {
+            this(enabled, root == null ? null : root.toString());
+        }
+
+        public Path rootPath() {
+            return Path.of(root);
+        }
+    }
 }

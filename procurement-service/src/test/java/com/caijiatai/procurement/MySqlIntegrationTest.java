@@ -29,7 +29,11 @@ import com.caijiatai.procurement.approval.PendingDecisionRepository;
 import com.caijiatai.procurement.approval.ProcurementDecisionRepository;
 import com.caijiatai.procurement.artifact.ArtifactStore;
 import com.caijiatai.procurement.comparison.ComparisonService;
+import com.caijiatai.procurement.comparison.ComparisonEngine;
 import com.caijiatai.procurement.comparison.ComparisonSnapshotRepository;
+import com.caijiatai.procurement.interaction.HumanInteractionDtos;
+import com.caijiatai.procurement.interaction.HumanInteractionRepository;
+import com.caijiatai.procurement.interaction.HumanInteractionService;
 import com.caijiatai.procurement.quote.ProcurementQuote;
 import com.caijiatai.procurement.quote.ProcurementQuoteRepository;
 import com.caijiatai.procurement.report.ProcurementReportService;
@@ -51,9 +55,14 @@ import java.io.ByteArrayInputStream;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -105,12 +114,15 @@ class MySqlIntegrationTest {
     @Autowired AiTaskService aiTaskService;
     @Autowired ProcurementTaskService taskService;
     @Autowired ComparisonService comparisonService;
+    @Autowired ComparisonEngine comparisonEngine;
     @Autowired ApprovalService approvalService;
     @Autowired ArtifactStore artifactStore;
     @Autowired AgentResultApplication resultApplication;
     @Autowired ProcurementReportService reportService;
     @Autowired ReviewRecordRepository reviewRecords;
     @Autowired ReviewService reviewService;
+    @Autowired HumanInteractionRepository humanInteractions;
+    @Autowired HumanInteractionService humanInteractionService;
     @Autowired EntityManagerFactory entityManagerFactory;
     @Autowired PlatformTransactionManager transactionManager;
 
@@ -153,6 +165,125 @@ class MySqlIntegrationTest {
         saved.setStatus(TaskStatus.READY);
         saved = tasks.saveAndFlush(saved);
         assertThat(saved.getVersion()).isEqualTo(1);
+    }
+
+    @Test
+    void humanInteractionAnswerIsIdempotentAndPayloadBound() {
+        var fixture = waitingInteraction(null);
+        var body = interactionAnswer("5000", "300×400 mm", "15", List.of());
+
+        var first = humanInteractionService.answer(fixture.interactionId(), body, "answer-once");
+        var replay = humanInteractionService.answer(fixture.interactionId(), body, "answer-once");
+
+        assertThat(replay.operationId()).isEqualTo(first.operationId());
+        assertThat(commands.findAll()).hasSize(1);
+        assertThat(humanInteractions.findById(fixture.interactionId()).orElseThrow().getStatus())
+                .isEqualTo("ANSWERED");
+        assertThatThrownBy(() -> humanInteractionService.answer(
+                fixture.interactionId(),
+                interactionAnswer("6000", "300×400 mm", "15", List.of()),
+                "answer-once"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> assertThat(((ApiException) error).code())
+                        .isEqualTo("idempotency_payload_conflict"));
+    }
+
+    @Test
+    void humanInteractionRejectsSecondAnswerAndInvalidFieldReviewValues() {
+        var invalid = waitingInteraction(null);
+        assertThatThrownBy(() -> humanInteractionService.answer(
+                invalid.interactionId(),
+                new HumanInteractionDtos.Answer(
+                        Map.of("quantity", "不是数字", "unit", "个"), null, List.of()),
+                "invalid-fields"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> assertThat(((ApiException) error).code())
+                        .isEqualTo("interaction_answer_invalid"));
+        assertThatThrownBy(() -> humanInteractionService.answer(
+                invalid.interactionId(),
+                new HumanInteractionDtos.Answer(
+                        Map.of("quantity", 5000, "unit", "个", "size", "300×400 mm"),
+                        null, List.of()),
+                "missing-lead-time"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> assertThat(((ApiException) error).code())
+                        .isEqualTo("interaction_answer_invalid"));
+
+        var accepted = interactionAnswer("5000", "300×400 mm", "15", List.of());
+        humanInteractionService.answer(invalid.interactionId(), accepted, "first-answer");
+        assertThatThrownBy(() -> humanInteractionService.answer(
+                invalid.interactionId(), accepted, "second-key"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> assertThat(((ApiException) error).code())
+                        .isEqualTo("interaction_not_waiting"));
+    }
+
+    @Test
+    void humanInteractionExpiresAndBecomesStaleWhenInputGenerationChanges() {
+        var expired = waitingInteraction(Instant.now().minusSeconds(1));
+        assertThatThrownBy(() -> humanInteractionService.answer(
+                expired.interactionId(),
+                interactionAnswer("5000", "300×400 mm", "15", List.of()),
+                "expired-answer"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> assertThat(((ApiException) error).code()).isEqualTo("interaction_expired"));
+        assertThat(humanInteractions.findById(expired.interactionId()).orElseThrow().getStatus())
+                .isEqualTo("EXPIRED");
+
+        var stale = waitingInteraction(null);
+        transactions.executeWithoutResult(ignored -> {
+            var task = tasks.lockById(stale.taskId()).orElseThrow();
+            task.invalidateAnalysis();
+        });
+        assertThatThrownBy(() -> humanInteractionService.answer(
+                stale.interactionId(),
+                interactionAnswer("5000", "300×400 mm", "15", List.of()),
+                "stale-answer"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> assertThat(((ApiException) error).code()).isEqualTo("interaction_stale"));
+        assertThat(humanInteractions.findById(stale.interactionId()).orElseThrow().getStatus())
+                .isEqualTo("STALE");
+    }
+
+    @Test
+    void humanInteractionOnlyAcceptsArtifactsOwnedByItsTask() {
+        var fixture = waitingInteraction(null);
+        var other = tasks.saveAndFlush(newTask());
+        var artifact = artifactStore.store(
+                "human_interaction_attachment", other.getId(), "other.pdf", "application/pdf",
+                new ByteArrayInputStream("other".getBytes(StandardCharsets.UTF_8)),
+                Map.of("interaction_id", "other"));
+
+        assertThatThrownBy(() -> humanInteractionService.answer(
+                fixture.interactionId(),
+                interactionAnswer("5000", "300×400 mm", "15", List.of(artifact.getId())),
+                "cross-task-artifact"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> assertThat(((ApiException) error).code())
+                        .isEqualTo("artifact_task_mismatch"));
+        assertThat(humanInteractions.findById(fixture.interactionId()).orElseThrow().getStatus())
+                .isEqualTo("WAITING");
+    }
+
+    @Test
+    void concurrentHumanInteractionAnswersAllowExactlyOneWinner() throws Exception {
+        var fixture = waitingInteraction(null);
+        var ready = new CountDownLatch(2);
+        var start = new CountDownLatch(1);
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var first = executor.submit(() -> concurrentAnswer(
+                    fixture.interactionId(), "parallel-a", "5000", ready, start));
+            var second = executor.submit(() -> concurrentAnswer(
+                    fixture.interactionId(), "parallel-b", "6000", ready, start));
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+            var results = List.of(first.get(10, TimeUnit.SECONDS), second.get(10, TimeUnit.SECONDS));
+
+            assertThat(results).containsExactlyInAnyOrder("accepted", "interaction_not_waiting");
+        }
+        assertThat(commands.findAll()).hasSize(1);
+        assertThat(humanInteractions.findById(fixture.interactionId()).orElseThrow().getStatus())
+                .isEqualTo("ANSWERED");
     }
 
     @Test
@@ -308,6 +439,23 @@ class MySqlIntegrationTest {
 
         assertThat(tasks.findById(taskId).orElseThrow().isRequirementConfirmed()).isTrue();
         assertThat(taskService.analyze(taskId, "review-gate-after-confirm").operationId()).isNotBlank();
+    }
+
+    @Test
+    void analysisRejectsAConfirmedFlagWhenRequirementFactsAreStillUnknown() {
+        var taskId = transactions.execute(ignored -> {
+            var task = ProcurementTask.draft("帮我采购一批白色快递袋");
+            task.confirmRequirement();
+            task.setStatus(TaskStatus.READY);
+            task = tasks.saveAndFlush(task);
+            addQuote(task.getId(), "Alpha Packaging", "520", "alpha");
+            addQuote(task.getId(), "Beta Packaging", "600", "beta");
+            return task.getId();
+        });
+
+        assertThatThrownBy(() -> taskService.analyze(taskId, "unknown-requirement-facts"))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.code()).isEqualTo("requirement_review_required"));
     }
 
     @Test
@@ -664,6 +812,10 @@ class MySqlIntegrationTest {
 
         assertThat(replay.getId()).isEqualTo(first.getId());
         assertThat(decisions.count()).isEqualTo(1);
+        assertThat(jdbc.queryForObject(
+                "select count(*) from purchase_order where task_id = ?",
+                Integer.class,
+                fixture.taskId())).isEqualTo(1);
         assertThat(tasks.findById(fixture.taskId()).orElseThrow().getStatus()).isEqualTo("approved");
         assertThat(jdbc.queryForObject(
                 "select count(*) from business_artifact where task_id = ? and kind in ('purchase_order_draft', 'supplier_confirmation_email')",
@@ -676,6 +828,81 @@ class MySqlIntegrationTest {
             var supplier = (Map<?, ?>) raw;
             assertThat(supplier.get("approved_purchase_count")).isEqualTo(1);
         });
+    }
+
+    @Test
+    void approvalRecalculationUsesTheSnapshotBusinessDateAcrossUtcDays() {
+        var taskId = preparedAnalyzableTask();
+        transactions.executeWithoutResult(ignored -> {
+            var task = tasks.lockById(taskId).orElseThrow();
+            comparisonService.analyze(task, RUN_ID);
+        });
+        var snapshot = snapshots.findFirstByTaskIdOrderBySnapshotVersionDesc(taskId).orElseThrow();
+        var snapshotDate = LocalDate.now(ZoneOffset.UTC).minusDays(1);
+        var historical = comparisonEngine.compare(
+                tasks.findById(taskId).orElseThrow(),
+                quotes.findByTaskIdOrderByCreatedAtAsc(taskId),
+                snapshotDate);
+        jdbc.update(
+                "update comparison_snapshot set input_sha256 = ?, created_at = ? where id = ?",
+                historical.inputSha256(),
+                java.sql.Timestamp.from(snapshotDate.atTime(12, 0).toInstant(ZoneOffset.UTC)),
+                snapshot.getId());
+        var quoteId = String.valueOf(((List<?>) historical.result().get("quotes")).stream()
+                .map(item -> (Map<?, ?>) item)
+                .filter(item -> Boolean.TRUE.equals(item.get("eligible")))
+                .findFirst().orElseThrow().get("quote_id"));
+        var requested = approvalService.request(
+                taskId,
+                new ProcurementDtos.Decision(
+                        "approved", snapshot.getId(), historical.inputSha256(), quoteId, true, "跨日复核"),
+                "approval-across-utc-day");
+
+        var decision = approvalService.finalizeFromAgent(
+                requested.command(), approvalResult(requested.pending()));
+
+        assertThat(decision.getQuoteId()).isEqualTo(quoteId);
+        assertThat(pendingDecisions.findById(requested.pending().getId()).orElseThrow().getStatus())
+                .isEqualTo("completed");
+        assertThat(tasks.findById(taskId).orElseThrow().getStatus()).isEqualTo("approved");
+    }
+
+    @Test
+    void terminalApprovalFailureReleasesTheHumanReviewForRetry() {
+        var fixture = pendingReview(false);
+        reviewService.action(
+                fixture.review().getId(),
+                new ReviewDtos.ActionRequest(
+                        ReviewAction.APPROVE_SUGGESTION,
+                        fixture.review().getVersion(),
+                        "采购员甲",
+                        null,
+                        Map.of(),
+                        "已核对报价原件与到货成本"),
+                "review-terminal-failure");
+        var submitted = reviewRecords.findById(fixture.review().getId()).orElseThrow();
+        var snapshotId = submitted.getSnapshotId();
+        var pending = pendingDecisions.findById(submitted.getPendingDecisionId()).orElseThrow();
+        var client = mock(AgentDispatcher.class);
+        when(client.dispatch(any())).thenReturn(new AgentDispatcher.DispatchResult(
+                200, Map.of("status", "failed", "error", "provider failure")));
+
+        transactions.executeWithoutResult(ignored -> new AgentOutboxWorker(
+                commands, tasks, client, resultApplication, aiTaskService).dispatch());
+
+        var failedReview = reviewRecords.findById(fixture.review().getId()).orElseThrow();
+        var restoredTask = tasks.findById(fixture.taskId()).orElseThrow();
+        assertThat(commands.findById(pending.getOperationId()).orElseThrow().getStatus()).isEqualTo("failed");
+        assertThat(pendingDecisions.findById(pending.getId()).orElseThrow().getStatus()).isEqualTo("stale");
+        assertThat(failedReview.getStatus()).isEqualTo(ReviewStatus.STALE);
+        assertThat(failedReview.getStaleReason()).contains("provider failure");
+        assertThat(restoredTask.getStatus()).isEqualTo("analyzed");
+        assertThat(restoredTask.getCurrentSnapshotId()).isEqualTo(snapshotId);
+        assertThat(decisions.findByTaskId(fixture.taskId())).isEmpty();
+        assertThat(jdbc.queryForObject(
+                "select count(*) from procurement_audit_event where task_id = ? and event_type = 'procurement_decision_failed'",
+                Integer.class,
+                fixture.taskId())).isEqualTo(1);
     }
 
     @Test
@@ -831,6 +1058,57 @@ class MySqlIntegrationTest {
         var pending = pendingDecisions.findById(requested.pending().getId()).orElseThrow();
         var command = commands.findById(requested.command().getOperationId()).orElseThrow();
         return new PendingFixture(taskId, pending, command, approvalResult(pending));
+    }
+
+    private HumanInteractionFixture waitingInteraction(Instant expiresAt) {
+        var task = tasks.saveAndFlush(newTask());
+        var candidate = new LinkedHashMap<String, Object>();
+        candidate.put("kind", "missing_requirement_fields");
+        candidate.put("question", "为了继续解析报价，请补充采购数量、单位、尺寸和最长交期。");
+        candidate.put("reason", "这些字段会影响供应商资格、到货成本或交期判断。");
+        candidate.put("business_step", "上传与解析");
+        candidate.put("related_fields", List.of("quantity", "unit", "size", "max_lead_days"));
+        candidate.put("related_artifact_ids", List.of());
+        candidate.put("checkpoint_id", RUN_ID);
+        candidate.put("answer_schema", Map.of(
+                "type", "field_review",
+                "fields", List.of(
+                        Map.of("name", "quantity", "label", "采购数量", "type", "number", "required", true),
+                        Map.of("name", "unit", "label", "采购单位", "type", "string", "required", true),
+                        Map.of("name", "size", "label", "尺寸", "type", "string", "required", true),
+                        Map.of("name", "max_lead_days", "label", "最长交期", "type", "number", "required", true))));
+        if (expiresAt != null) candidate.put("expires_at", expiresAt.toString());
+        var interaction = humanInteractionService.createFromAgent(
+                task.getId(), RUN_ID, task.getGeneration(), candidate);
+        return new HumanInteractionFixture(task.getId(), interaction.getId());
+    }
+
+    private HumanInteractionDtos.Answer interactionAnswer(
+            String quantity, String size, String leadDays, List<String> artifactIds) {
+        return new HumanInteractionDtos.Answer(
+                Map.of(
+                        "quantity", new BigDecimal(quantity),
+                        "unit", "个",
+                        "size", size,
+                        "max_lead_days", new BigDecimal(leadDays)),
+                "测试回答",
+                artifactIds);
+    }
+
+    private String concurrentAnswer(
+            String interactionId, String key, String quantity,
+            CountDownLatch ready, CountDownLatch start) throws InterruptedException {
+        ready.countDown();
+        if (!start.await(5, TimeUnit.SECONDS)) return "timeout";
+        try {
+            humanInteractionService.answer(
+                    interactionId,
+                    interactionAnswer(quantity, "300×400 mm", "15", List.of()),
+                    key);
+            return "accepted";
+        } catch (ApiException error) {
+            return error.code();
+        }
     }
 
     private AgentDispatcher.DispatchResult analysisResponse(
@@ -1053,4 +1331,6 @@ class MySqlIntegrationTest {
             Map<String, Object> agentResult) {}
 
     private record ReviewFixture(String taskId, ReviewRecord review) {}
+
+    private record HumanInteractionFixture(String taskId, String interactionId) {}
 }

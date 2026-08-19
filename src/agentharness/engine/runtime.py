@@ -1088,6 +1088,10 @@ class RunEngine:
                 tool_acc = {}
                 order = []
                 ended_tool_ids = set()
+                truncate_excess_tool_calls = bool(
+                    request.metadata.get("truncate_excess_tool_calls_per_turn")
+                )
+                ignored_tool_ids: set[str] = set()
                 turn_usage = Usage()
                 turn_usage_charged = False
                 error_msg = None
@@ -1133,11 +1137,16 @@ class RunEngine:
                         elif item.type == StreamItemType.tool_call_start:
                             had_provider_output = True
                             tc_id = item.tool_call_id or new_id()
+                            if tc_id in ignored_tool_ids:
+                                continue
                             if tc_id in tool_acc:
                                 error_msg = f"duplicate tool call id: {tc_id}"
                                 error_kind = "provider_protocol"
                                 break
                             if len(order) >= budget.max_tool_calls_per_turn:
+                                if truncate_excess_tool_calls:
+                                    ignored_tool_ids.add(tc_id)
+                                    continue
                                 error_msg = "max_tool_calls_per_turn exceeded"
                                 error_kind = "budget"
                                 break
@@ -1174,6 +1183,8 @@ class RunEngine:
                         elif item.type == StreamItemType.tool_call_delta:
                             had_provider_output = True
                             tc_id = item.tool_call_id or ""
+                            if tc_id in ignored_tool_ids:
+                                continue
                             if tc_id in tool_acc and item.arguments_delta:
                                 raw_size = len(tool_acc[tc_id].arguments_raw.encode("utf-8"))
                                 raw_size += len(item.arguments_delta.encode("utf-8"))
@@ -1187,12 +1198,17 @@ class RunEngine:
                         elif item.type == StreamItemType.tool_call_end:
                             had_provider_output = True
                             tc_id = item.tool_call_id or new_id()
+                            if tc_id in ignored_tool_ids:
+                                continue
                             if tc_id in ended_tool_ids:
                                 error_msg = f"duplicate tool call end: {tc_id}"
                                 error_kind = "provider_protocol"
                                 break
                             if tc_id not in tool_acc:
                                 if len(order) >= budget.max_tool_calls_per_turn:
+                                    if truncate_excess_tool_calls:
+                                        ignored_tool_ids.add(tc_id)
+                                        continue
                                     error_msg = "max_tool_calls_per_turn exceeded"
                                     error_kind = "budget"
                                     break

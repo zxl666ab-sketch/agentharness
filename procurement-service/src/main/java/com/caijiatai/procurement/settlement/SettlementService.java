@@ -1,5 +1,8 @@
 package com.caijiatai.procurement.settlement;
 
+import com.caijiatai.procurement.agent.CanonicalJson;
+import com.caijiatai.procurement.agent.IdempotencyRecord;
+import com.caijiatai.procurement.agent.IdempotencyRecordRepository;
 import com.caijiatai.procurement.api.ApiException;
 import com.caijiatai.procurement.invoice.InvoiceService;
 import com.caijiatai.procurement.order.OrderRepository;
@@ -9,6 +12,7 @@ import com.caijiatai.procurement.report.AuditEventRepository;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
@@ -18,7 +22,7 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * 对账付款服务（K8，冻结设计 4.3）：UNSETTLED --settle--> SETTLED --pay--> PAID。
  * 每次流转写审计事件 settlement_settled / settlement_paid。
- * P3-1：付款前校验订单发票三单匹配状态（未匹配/差异挂起 → 409）。
+ * 对账和付款均要求订单至少有一张有效发票，且所有有效发票都已核销。
  */
 @Service
 public class SettlementService {
@@ -27,18 +31,21 @@ public class SettlementService {
     private final AuditEventRepository audit;
     private final StateMachine<SettlementStatus, SettlementEvent> settlementMachine;
     private final InvoiceService invoices;
+    private final IdempotencyRecordRepository idempotency;
 
     public SettlementService(
             SettlementRepository settlements,
             OrderRepository orders,
             AuditEventRepository audit,
             StateMachine<SettlementStatus, SettlementEvent> settlementMachine,
-            InvoiceService invoices) {
+            InvoiceService invoices,
+            IdempotencyRecordRepository idempotency) {
         this.settlements = settlements;
         this.orders = orders;
         this.audit = audit;
         this.settlementMachine = settlementMachine;
         this.invoices = invoices;
+        this.idempotency = idempotency;
     }
 
     @Transactional(readOnly = true)
@@ -63,6 +70,12 @@ public class SettlementService {
     @Transactional
     public Map<String, Object> transition(
             String id, String action, Instant paidAt, String notes, String actor) {
+        return transition(id, action, paidAt, notes, actor, "internal-" + UUID.randomUUID());
+    }
+
+    @Transactional
+    public Map<String, Object> transition(
+            String id, String action, Instant paidAt, String notes, String actor, String idempotencyKey) {
         var settlement = settlements.lockById(id)
                 .orElseThrow(() -> notFound("settlement_not_found", "未找到对账单"));
         SettlementEvent event;
@@ -70,6 +83,22 @@ public class SettlementService {
             event = SettlementEvent.fromAction(action);
         } catch (RuntimeException error) {
             throw bad("invalid_settlement_action", "对账操作只能是 settle / pay");
+        }
+        var key = requireIdempotencyKey(idempotencyKey);
+        var scope = "settlement_transition:" + id;
+        var requestSha = CanonicalJson.sha256(Map.of(
+                "action", event.name(),
+                "paid_at", paidAt == null ? "" : paidAt.toString(),
+                "notes", notes == null ? "" : notes.strip()));
+        var replay = idempotency.findById(new IdempotencyRecord.Key(scope, key));
+        if (replay.isPresent()) {
+            if (!replay.get().getPayloadSha256().equals(requestSha)) {
+                throw conflict("idempotency_payload_conflict", "同一幂等键已用于其他对账流转载荷");
+            }
+            if (replay.get().getResponse() == null) {
+                throw conflict("idempotency_result_missing", "对账流转的幂等结果尚不可用，请稍后重试");
+            }
+            return new LinkedHashMap<>(replay.get().getResponse());
         }
         var from = SettlementStatus.fromWire(settlement.getStatus());
         if (!settlementMachine.can(from, event)) {
@@ -79,10 +108,10 @@ public class SettlementService {
         if (event == SettlementEvent.PAY && paidAt == null) {
             throw bad("paid_at_required", "付款必须填写付款时间");
         }
-        // P3-1 付款联动：订单存在未匹配/差异挂起发票时拒绝付款（409）
-        if (event == SettlementEvent.PAY && invoices.hasUnresolvedInvoices(settlement.getOrderId())) {
-            throw conflict("unmatched_invoice_blocks_payment",
-                    "订单存在未匹配或差异挂起的发票，必须先完成三单匹配（或作废发票）才能付款");
+        if (!invoices.isReconciledForSettlement(settlement.getOrderId())) {
+            var actionName = event == SettlementEvent.PAY ? "付款" : "对账";
+            throw conflict("invoice_reconciliation_required",
+                    "订单必须至少有一张有效发票，且全部完成三单匹配与核销后才能" + actionName);
         }
         var target = settlementMachine.transition(id, from, event, Map.of());
         try {
@@ -109,7 +138,11 @@ public class SettlementService {
                 order == null ? null : order.getTaskId(), null, null,
                 SettlementEvent.PAY.equals(event) ? "settlement_paid" : "settlement_settled", actor,
                 payload));
-        return view(settlement);
+        var response = view(settlement);
+        var record = IdempotencyRecord.reserve(scope, key, requestSha, null);
+        record.complete(200, response);
+        idempotency.save(record);
+        return response;
     }
 
     private Map<String, Object> view(PurchaseSettlement settlement) {
@@ -128,6 +161,7 @@ public class SettlementService {
         var order = orders.findById(settlement.getOrderId()).orElse(null);
         value.put("order_no", order == null ? null : order.getOrderNo());
         value.put("task_id", order == null ? null : order.getTaskId());
+        value.put("invoice_reconciled", invoices.isReconciledForSettlement(settlement.getOrderId()));
         return value;
     }
 
@@ -141,5 +175,16 @@ public class SettlementService {
 
     private ApiException notFound(String code, String message) {
         return new ApiException(HttpStatus.NOT_FOUND, code, message);
+    }
+
+    private String requireIdempotencyKey(String value) {
+        if (value == null || value.isBlank()) {
+            throw bad("idempotency_key_required", "对账流转必须提供 Idempotency-Key");
+        }
+        var key = value.strip();
+        if (key.length() < 8 || key.length() > 128) {
+            throw bad("invalid_idempotency_key", "Idempotency-Key 长度必须在 8 到 128 个字符之间");
+        }
+        return key;
     }
 }

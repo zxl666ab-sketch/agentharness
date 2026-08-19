@@ -11,8 +11,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.caijiatai.procurement.api.ApiException;
+import com.caijiatai.procurement.agent.IdempotencyRecordRepository;
+import com.caijiatai.procurement.agent.IdempotencyRecord;
 import com.caijiatai.procurement.artifact.BusinessArtifactRepository;
 import com.caijiatai.procurement.comparison.ComparisonSnapshotRepository;
+import com.caijiatai.procurement.invoice.InvoiceRepository;
 import com.caijiatai.procurement.quote.ProcurementQuote;
 import com.caijiatai.procurement.quote.ProcurementQuoteRepository;
 import com.caijiatai.procurement.report.AuditEvent;
@@ -27,9 +30,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 
 class OrderServiceTest {
@@ -40,8 +43,10 @@ class OrderServiceTest {
     private final ComparisonSnapshotRepository snapshots = mock(ComparisonSnapshotRepository.class);
     private final BusinessArtifactRepository artifacts = mock(BusinessArtifactRepository.class);
     private final AuditEventRepository audit = mock(AuditEventRepository.class);
+    private final IdempotencyRecordRepository idempotency = mock(IdempotencyRecordRepository.class);
+    private final InvoiceRepository invoices = mock(InvoiceRepository.class);
     private final OrderService service = new OrderService(
-            orders, settlements, tasks, quotes, snapshots, artifacts, audit,
+            orders, settlements, tasks, quotes, snapshots, artifacts, audit, idempotency, invoices,
             new OrderStateMachineConfig().orderStateMachine());
 
     private ProcurementTask task;
@@ -59,6 +64,8 @@ class OrderServiceTest {
         when(settlements.findByOrderId(any())).thenReturn(Optional.empty());
         when(orders.saveAndFlush(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(settlements.saveAndFlush(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(idempotency.findById(any())).thenReturn(Optional.empty());
+        when(invoices.findByOrderIdOrderByCreatedAtAsc(any())).thenReturn(List.of());
     }
 
     private ProcurementQuote quote(String id, String supplier) {
@@ -125,18 +132,6 @@ class OrderServiceTest {
 
         assertThat(service.ensureOrderForApprovedTask(task)).isNull();
         verify(orders, never()).saveAndFlush(any());
-    }
-
-    @Test
-    void derivationSwallowsDuplicateKeyRaceAndReturnsExistingOrder() {
-        var existing = pendingOrder();
-        when(orders.findByTaskId(task.getId())).thenReturn(Optional.empty(), Optional.of(existing));
-        when(orders.saveAndFlush(any()))
-                .thenThrow(new DataIntegrityViolationException("Duplicate entry for uq_purchase_order_task"));
-
-        var order = service.ensureOrderForApprovedTask(task);
-
-        assertThat(order).isSameAs(existing);
     }
 
     @Test
@@ -207,6 +202,88 @@ class OrderServiceTest {
     }
 
     @Test
+    void partialReceiptAccumulatesBatchesAndDerivesSettlementOnlyWhenComplete() {
+        var order = PurchaseOrder.derive(task.getId(), "PO-" + task.getReference(),
+                "华东优包", "快递袋", new BigDecimal("100"), "piece", new BigDecimal("50.00"));
+        order.ship();
+        when(orders.lockById("o1")).thenReturn(Optional.of(order));
+        when(orders.findById("o1")).thenReturn(Optional.of(order));
+
+        var partial = service.transition(
+                "o1", "receive", new BigDecimal("30"),
+                Instant.parse("2026-08-14T00:00:00Z"), "第一批", "采购员");
+
+        assertThat(partial.get("status")).isEqualTo("PARTIALLY_RECEIVED");
+        assertThat(partial.get("received_quantity")).isEqualTo("30");
+        verify(settlements, never()).saveAndFlush(any());
+
+        var completed = service.transition(
+                "o1", "receive", new BigDecimal("70"),
+                Instant.parse("2026-08-15T00:00:00Z"), "第二批", "采购员");
+
+        assertThat(completed.get("status")).isEqualTo("RECEIVED");
+        assertThat(completed.get("received_quantity")).isEqualTo("100");
+        verify(settlements).saveAndFlush(any(PurchaseSettlement.class));
+        verify(audit, times(3)).save(any(AuditEvent.class));
+    }
+
+    @Test
+    void sameReceiptPayloadReplayDoesNotAccumulateOrAuditTwice() {
+        var order = PurchaseOrder.derive(task.getId(), "PO-" + task.getReference(),
+                "华东优包", "快递袋", new BigDecimal("100"), "piece", new BigDecimal("50.00"));
+        order.ship();
+        when(orders.lockById("o1")).thenReturn(Optional.of(order));
+        when(orders.findById("o1")).thenReturn(Optional.of(order));
+        var stored = new AtomicReference<IdempotencyRecord>();
+        var idempotencyId = new IdempotencyRecord.Key("order_transition:o1", "receipt-key-0001");
+        when(idempotency.findById(idempotencyId)).thenAnswer(ignored -> Optional.ofNullable(stored.get()));
+        when(idempotency.save(any())).thenAnswer(invocation -> {
+            stored.set(invocation.getArgument(0));
+            return invocation.getArgument(0);
+        });
+
+        var first = service.transition(
+                "o1", "receive", new BigDecimal("30.0"),
+                Instant.parse("2026-08-20T00:00:00Z"), "第一批", "采购员", "receipt-key-0001");
+        var replay = service.transition(
+                "o1", "receive", new BigDecimal("30.00"),
+                Instant.parse("2026-08-20T00:00:00Z"), "第一批", "采购员", "receipt-key-0001");
+
+        assertThat(first).isEqualTo(replay);
+        assertThat(order.getReceivedQuantity()).isEqualByComparingTo("30");
+        verify(audit, times(1)).save(any(AuditEvent.class));
+        verify(idempotency, times(1)).save(any(IdempotencyRecord.class));
+    }
+
+    @Test
+    void sameReceiptKeyWithDifferentPayloadIsRejected() {
+        var order = PurchaseOrder.derive(task.getId(), "PO-" + task.getReference(),
+                "华东优包", "快递袋", new BigDecimal("100"), "piece", new BigDecimal("50.00"));
+        order.ship();
+        when(orders.lockById("o1")).thenReturn(Optional.of(order));
+        when(orders.findById("o1")).thenReturn(Optional.of(order));
+        var stored = new AtomicReference<IdempotencyRecord>();
+        var idempotencyId = new IdempotencyRecord.Key("order_transition:o1", "receipt-key-0002");
+        when(idempotency.findById(idempotencyId)).thenAnswer(ignored -> Optional.ofNullable(stored.get()));
+        when(idempotency.save(any())).thenAnswer(invocation -> {
+            stored.set(invocation.getArgument(0));
+            return invocation.getArgument(0);
+        });
+        service.transition(
+                "o1", "receive", new BigDecimal("30"),
+                Instant.parse("2026-08-20T00:00:00Z"), null, "采购员", "receipt-key-0002");
+
+        assertThatThrownBy(() -> service.transition(
+                "o1", "receive", new BigDecimal("40"),
+                Instant.parse("2026-08-20T00:00:00Z"), null, "采购员", "receipt-key-0002"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> assertThat(((ApiException) error).code())
+                        .isEqualTo("idempotency_payload_conflict"));
+        assertThat(order.getReceivedQuantity()).isEqualByComparingTo("30");
+        verify(audit, times(1)).save(any(AuditEvent.class));
+    }
+
+    @Test
     void closeFromPendingCancelsWithoutSettlement() {
         var order = pendingOrder();
         when(orders.lockById("o1")).thenReturn(Optional.of(order));
@@ -216,6 +293,21 @@ class OrderServiceTest {
 
         assertThat(result.get("status")).isEqualTo("CLOSED");
         verify(settlements, never()).saveAndFlush(any());
+    }
+
+    @Test
+    void receivedOrderCannotCloseBeforePayment() {
+        var order = pendingOrder();
+        order.ship();
+        order.receive(order.getQuantity(), Instant.parse("2026-08-20T00:00:00Z"), null);
+        when(orders.lockById("o1")).thenReturn(Optional.of(order));
+
+        assertThatThrownBy(() -> service.transition(
+                "o1", "close", null, null, "提前关闭", "采购员", "close-key-0001"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> assertThat(((ApiException) error).code())
+                        .isEqualTo("payment_required_before_close"));
+        verify(audit, never()).save(any(AuditEvent.class));
     }
 
     @Test
@@ -234,21 +326,13 @@ class OrderServiceTest {
     }
 
     @Test
-    void reconcileApprovedTasksDerivesForEveryApprovedTask() {
-        var other = ProcurementTask.structured(1, "气泡膜采购", "ecommerce_packaging", "气泡膜",
-                new BigDecimal("300"), "piece", Map.of(), Map.of());
-        other.finalizeDecision("quote-2", false);
-        when(tasks.findByStatusOrderByUpdatedAtDesc("approved")).thenReturn(List.of(task, other));
-        when(orders.findByTaskId(task.getId())).thenReturn(Optional.of(pendingOrder()));
-        when(orders.findByTaskId(other.getId())).thenReturn(Optional.empty());
-        var otherQuote = ProcurementQuote.create(
-                other.getId(), "artifact-quote-2", "华南气泡包装", "quote-2.xlsx", "xlsx",
-                "sha256-quote-2", Map.of("fields", Map.of(), "review_fields", List.of()),
-                "ready", "v1", BigDecimal.ZERO);
-        when(quotes.findByIdAndTaskId("quote-2", other.getId())).thenReturn(Optional.of(otherQuote));
+    void approvedTaskWithoutLandedCostCannotCreateFormalOrder() {
+        when(orders.findByTaskId(task.getId())).thenReturn(Optional.empty());
 
-        service.reconcileApprovedTasks();
-
-        verify(orders, times(1)).saveAndFlush(any());
+        assertThatThrownBy(() -> service.ensureOrderForApprovedTask(task))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> assertThat(((ApiException) error).code())
+                        .isEqualTo("order_requires_landed_cost"));
+        verify(orders, never()).saveAndFlush(any());
     }
 }

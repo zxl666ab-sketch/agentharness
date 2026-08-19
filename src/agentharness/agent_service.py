@@ -46,6 +46,7 @@ SUPPORTED_OPERATIONS = frozenset(
         "start_conversation",
         "import_quote",
         "resume_run",
+        "human_interaction_answer",
         "analyze",
         "approve_decision",
         "create_structured",

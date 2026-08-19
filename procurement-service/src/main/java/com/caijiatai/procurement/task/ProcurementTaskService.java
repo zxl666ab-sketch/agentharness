@@ -18,6 +18,7 @@ import com.caijiatai.procurement.artifact.ProcurementAttachment;
 import com.caijiatai.procurement.artifact.ProcurementAttachmentRepository;
 import com.caijiatai.procurement.comparison.ComparisonSnapshotRepository;
 import com.caijiatai.procurement.config.AppProperties;
+import com.caijiatai.procurement.interaction.HumanInteractionService;
 import com.caijiatai.procurement.quote.CorrectionConflictPolicy;
 import com.caijiatai.procurement.quote.ProcurementQuoteRepository;
 import com.caijiatai.procurement.quote.QuoteCorrection;
@@ -66,6 +67,7 @@ public class ProcurementTaskService {
     private final TaskContextCache contextCache;
     private final AiTaskService aiTasks;
     private final ReviewService reviews;
+    private final HumanInteractionService interactions;
     private final String operator;
 
     public ProcurementTaskService(
@@ -85,6 +87,7 @@ public class ProcurementTaskService {
             TaskContextCache contextCache,
             AiTaskService aiTasks,
             ReviewService reviews,
+            HumanInteractionService interactions,
             AppProperties properties) {
         this.tasks = tasks;
         this.attachments = attachments;
@@ -102,6 +105,7 @@ public class ProcurementTaskService {
         this.contextCache = contextCache;
         this.aiTasks = aiTasks;
         this.reviews = reviews;
+        this.interactions = interactions;
         this.operator = properties.localOperator();
     }
 
@@ -450,6 +454,7 @@ public class ProcurementTaskService {
     private void invalidate(ProcurementTask task) {
         aiTasks.markBusinessStale(task.getId(), "INPUT_GENERATION_CHANGED");
         reviews.markBusinessStale(task.getId(), "INPUT_GENERATION_CHANGED");
+        interactions.staleWaiting(task.getId());
         task.invalidateAnalysis();
         pendingDecisions.findByTaskIdAndStatusIn(task.getId(), List.of("pending", "approved"))
                 .forEach(PendingDecision::stale);

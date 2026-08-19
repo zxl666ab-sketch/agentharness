@@ -143,6 +143,17 @@ public class AgentCommand {
         nextAttemptAt = Instant.now().plusSeconds(Math.max(0, seconds));
     }
 
+    public void requeue() {
+        if (!"failed".equals(status) && !"cancelled".equals(status)) {
+            return;
+        }
+        status = "pending";
+        nextAttemptAt = Instant.now();
+        completedAt = null;
+        publishedAt = null;
+        lastError = null;
+    }
+
     public void fail(String error) {
         status = "failed";
         lastError = error == null ? "agent command failed" : error.substring(0, Math.min(error.length(), 1000));

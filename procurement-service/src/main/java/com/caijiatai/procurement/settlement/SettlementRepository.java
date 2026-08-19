@@ -17,6 +17,10 @@ public interface SettlementRepository extends JpaRepository<PurchaseSettlement, 
     @Query("select settlement from PurchaseSettlement settlement where settlement.id = :id")
     Optional<PurchaseSettlement> lockById(@Param("id") String id);
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select settlement from PurchaseSettlement settlement where settlement.orderId = :orderId")
+    Optional<PurchaseSettlement> lockByOrderId(@Param("orderId") String orderId);
+
     Page<PurchaseSettlement> findAllByOrderByCreatedAtDesc(Pageable pageable);
 
     Page<PurchaseSettlement> findByStatusOrderByCreatedAtDesc(String status, Pageable pageable);

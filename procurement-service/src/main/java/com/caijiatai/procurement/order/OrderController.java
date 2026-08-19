@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 
 /** 采购订单/对账接口（K2/K8，路径见冻结设计 4.11）。 */
@@ -39,8 +40,6 @@ public final class OrderController {
             @RequestParam(required = false) String status,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size) {
-        // 冻结触发点：查询时惰性派生已批准任务订单（幂等）
-        orders.reconcileApprovedTasks();
         return orders.list(status, page, size);
     }
 
@@ -57,14 +56,17 @@ public final class OrderController {
 
     @PostMapping("/orders/{id}/transition")
     public Map<String, Object> transitionOrder(
-            @PathVariable String id, @RequestBody OrderTransitionRequest body) {
+            @PathVariable String id,
+            @RequestHeader(name = "Idempotency-Key") String idempotencyKey,
+            @RequestBody OrderTransitionRequest body) {
         var value = orders.transition(
                 id,
                 body.action(),
                 body.received_quantity(),
                 body.arrival_date(),
                 body.notes(),
-                operator);
+                operator,
+                idempotencyKey);
         insightsCache.evictAll();
         return value;
     }
@@ -84,8 +86,11 @@ public final class OrderController {
 
     @PostMapping("/settlements/{id}/transition")
     public Map<String, Object> transitionSettlement(
-            @PathVariable String id, @RequestBody SettlementTransitionRequest body) {
-        var value = settlements.transition(id, body.action(), body.paid_at(), body.notes(), operator);
+            @PathVariable String id,
+            @RequestHeader(name = "Idempotency-Key") String idempotencyKey,
+            @RequestBody SettlementTransitionRequest body) {
+        var value = settlements.transition(
+                id, body.action(), body.paid_at(), body.notes(), operator, idempotencyKey);
         insightsCache.evictAll();
         return value;
     }

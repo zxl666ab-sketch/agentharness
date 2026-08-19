@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -42,9 +43,55 @@ PROCUREMENT_TOOL_NAMES = [
 
 DEFAULT_QUOTE_FX_RATES = {"USD": "7.2"}
 
+
+def _requirement_interaction(message: str, error: str, run_id: str) -> dict[str, Any]:
+    """Turn incomplete procurement text into a durable, structured question.
+
+    This deliberately does not guess business values. Java validates the returned
+    answer schema and owns the eventual business-field write.
+    """
+
+    fields: list[dict[str, Any]] = []
+
+    def add(name: str, label: str, field_type: str, unit: str | None = None) -> None:
+        if any(item["name"] == name for item in fields):
+            return
+        item: dict[str, Any] = {
+            "name": name,
+            "label": label,
+            "type": field_type,
+            "required": True,
+        }
+        if unit:
+            item["unit"] = unit
+        fields.append(item)
+
+    if "采购数量" in error or not re.search(r"[\d,]+\s*(?:个|件|套|箱|卷|张|吨|千克|公斤|kg)", message, re.I):
+        add("quantity", "采购数量", "number")
+        add("unit", "采购单位", "string")
+    if "包装尺寸" in error or ("快递袋" in message and not re.search(r"\d+(?:\.\d+)?\s*[xX×*]\s*\d+", message)):
+        add("size", "尺寸（例如 300×400 mm）", "string")
+    if "厚度" in error:
+        add("thickness", "厚度", "number", "μm")
+    if not re.search(r"(?:交期|交货期|\d+\s*天内)[^\n]*\d+|\d+\s*天内", message):
+        add("max_lead_days", "最长交期", "number", "天")
+    if not fields:
+        add("clarification", "补充说明", "string")
+    labels = "、".join(str(item["label"]) for item in fields)
+    return {
+        "kind": "missing_requirement_fields",
+        "question": f"为了继续解析报价，请补充：{labels}。",
+        "reason": "这些字段会影响供应商资格、到货成本或交期判断；系统不会使用猜测值。",
+        "business_step": "上传与解析",
+        "related_fields": [item["name"] for item in fields],
+        "related_artifact_ids": [],
+        "checkpoint_id": run_id,
+        "answer_schema": {"type": "field_review", "fields": fields},
+    }
+
 PROCUREMENT_AGENT_SYSTEM_PROMPT = """你是采购工作台中的受限采购 Agent。
 
-你只能调用已提供的采购工具，绝不能直接给出采购决定、修改业务数据、访问网络、文件系统、浏览器或其他工具。每个阶段都必须调用要求的采购工具，不能用普通文本结束任务。
+你只能调用已提供的采购工具，绝不能直接给出采购决定、修改业务数据、访问网络、文件系统、浏览器或其他工具。每个阶段都必须调用要求的采购工具，不能用普通文本结束任务。每次模型回复只能调用一个工具；收到该工具结果后，再在下一次回复调用后续工具，绝不能在同一回复中并行或批量调用多个工具。
 
 工作顺序：
 1. 初始会话：先调用 procurement_capture_requirement，再调用 procurement_parse_uploaded_quotes，最后调用 procurement_request_review。
@@ -162,38 +209,56 @@ class ProcurementAgentTools:
         self, ctx: ToolContext, arguments: dict[str, Any]
     ) -> ToolResult:
         metadata = self._run_metadata(ctx.run_id)
+        message = str(metadata.get("procurement_source_message") or "").strip()
         proposed = arguments.get("requirement")
-        if proposed is None:
-            message = str(metadata.get("procurement_source_message") or "").strip()
-            if not message:
-                raise ValueError("procurement source message is missing")
-            # P2-3 语义缓存：相同需求消息（精确 SHA-256 + schema 版本）→ 确定性复用
-            message_sha = hashlib.sha256(message.encode("utf-8")).hexdigest()
-            cached = self.semantic_cache.get_requirement(message_sha, REQUIREMENT_SCHEMA_VERSION)
-            if cached is not None:
-                requirement = cached
-                source = "semantic_cache"
-            else:
-                requirement = extract_requirement(
-                    [Message(role=MessageRole.user, content=message)]
-                )
-                self.semantic_cache.put_requirement(
-                    message_sha, REQUIREMENT_SCHEMA_VERSION, requirement
-                )
-                source = "deterministic_offline_adapter"
-        else:
-            try:
-                requirement = _validate_model_requirement(proposed)
-                source = "model_tool_call"
-            except RequirementModelError as exc:
-                message = str(metadata.get("procurement_source_message") or "").strip()
+        try:
+            if proposed is None:
                 if not message:
-                    raise
-                requirement = extract_requirement(
-                    [Message(role=MessageRole.user, content=message)]
+                    raise ValueError("procurement source message is missing")
+                # P2-3 语义缓存：相同需求消息（精确 SHA-256 + schema 版本）→ 确定性复用
+                message_sha = hashlib.sha256(message.encode("utf-8")).hexdigest()
+                cached = self.semantic_cache.get_requirement(
+                    message_sha, REQUIREMENT_SCHEMA_VERSION
                 )
-                source = "deterministic_validation_fallback"
-                metadata["procurement_model_requirement_error"] = str(exc)
+                if cached is not None:
+                    requirement = cached
+                    source = "semantic_cache"
+                else:
+                    requirement = extract_requirement(
+                        [Message(role=MessageRole.user, content=message)]
+                    )
+                    self.semantic_cache.put_requirement(
+                        message_sha, REQUIREMENT_SCHEMA_VERSION, requirement
+                    )
+                    source = "deterministic_offline_adapter"
+            else:
+                try:
+                    requirement = _validate_model_requirement(proposed)
+                    source = "model_tool_call"
+                except RequirementModelError as exc:
+                    if not message:
+                        raise
+                    requirement = extract_requirement(
+                        [Message(role=MessageRole.user, content=message)]
+                    )
+                    source = "deterministic_validation_fallback"
+                    metadata["procurement_model_requirement_error"] = str(exc)
+        except (RequirementModelError, ValueError) as exc:
+            interaction = _requirement_interaction(message, str(exc), ctx.run_id)
+            self.storage.merge_run_metadata(
+                ctx.run_id,
+                {
+                    "procurement_stage": "capture",
+                    "procurement_pending_interaction": interaction,
+                },
+            )
+            return ToolResult(
+                tool_call_id="",
+                name="procurement_capture_requirement",
+                content=_json_content({"interaction": interaction}),
+                pause_status="require_human",
+                pause_reason=str(interaction["question"]),
+            )
         self.storage.merge_run_metadata(
             ctx.run_id,
             {

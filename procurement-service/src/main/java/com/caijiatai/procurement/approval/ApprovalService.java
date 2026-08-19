@@ -11,6 +11,7 @@ import com.caijiatai.procurement.cache.TaskContextCache;
 import com.caijiatai.procurement.comparison.ComparisonEngine;
 import com.caijiatai.procurement.comparison.ComparisonSnapshotRepository;
 import com.caijiatai.procurement.config.AppProperties;
+import com.caijiatai.procurement.order.OrderService;
 import com.caijiatai.procurement.quote.ProcurementQuoteRepository;
 import com.caijiatai.procurement.report.AuditEvent;
 import com.caijiatai.procurement.report.AuditEventRepository;
@@ -20,6 +21,7 @@ import com.caijiatai.procurement.task.TaskStatus;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -42,6 +44,7 @@ public class ApprovalService {
     private final ArtifactStore artifacts;
     private final AuditEventRepository audit;
     private final TaskContextCache contextCache;
+    private final OrderService orderService;
     private final String operator;
 
     public ApprovalService(
@@ -56,6 +59,7 @@ public class ApprovalService {
             ArtifactStore artifacts,
             AuditEventRepository audit,
             TaskContextCache contextCache,
+            OrderService orderService,
             AppProperties properties) {
         this.tasks = tasks;
         this.quotes = quotes;
@@ -68,6 +72,7 @@ public class ApprovalService {
         this.artifacts = artifacts;
         this.audit = audit;
         this.contextCache = contextCache;
+        this.orderService = orderService;
         this.operator = properties.localOperator();
     }
 
@@ -174,6 +179,7 @@ public class ApprovalService {
     public ProcurementDecision finalizeFromAgent(AgentCommand command, Map<String, Object> result) {
         var pending = pendingDecisions.findByOperationId(command.getOperationId())
                 .orElseThrow(() -> invalidApproval("待决审批不存在"));
+        var task = tasks.lockById(pending.getTaskId()).orElseThrow(this::stale);
         var existing = decisions.findByPendingDecisionId(pending.getId());
         if (existing.isPresent()) {
             return existing.get();
@@ -198,7 +204,6 @@ public class ApprovalService {
         requireEquals("approval_decision", "formal_java_confirmation", approval.get("decision"));
         requireEquals("confirmation_source", "java_control_plane", approval.get("confirmation_source"));
         requireEquals("arguments_sha256", CanonicalJson.sha256(expectedBinding), approval.get("arguments_sha256"));
-        var task = tasks.lockById(pending.getTaskId()).orElseThrow(() -> stale());
         if (task.getVersion() != pending.getTaskVersion()
                 || task.getGeneration() != command.getGeneration()
                 || !Objects.equals(task.getCurrentSnapshotId(), pending.getSnapshotId())) {
@@ -206,7 +211,11 @@ public class ApprovalService {
             throw stale();
         }
         var snapshot = snapshots.findByIdAndTaskId(pending.getSnapshotId(), task.getId()).orElseThrow(this::stale);
-        var recalculated = engine.compare(task, quotes.findByTaskIdOrderByCreatedAtAsc(task.getId()));
+        var snapshotDate = snapshot.getCreatedAt().atZone(ZoneOffset.UTC).toLocalDate();
+        var recalculated = engine.compare(
+                task,
+                quotes.findByTaskIdOrderByCreatedAtAsc(task.getId()),
+                snapshotDate);
         if (!recalculated.inputSha256().equals(snapshot.getInputSha256())) {
             pending.stale();
             throw stale();
@@ -222,6 +231,9 @@ public class ApprovalService {
         var decision = decisions.save(ProcurementDecision.create(pending, note.isBlank() ? null : note, operator));
         contextCache.evict(task.getId());
         task.finalizeDecision(pending.getQuoteId(), "no_award".equals(pending.getDecision()));
+        if ("approved".equals(pending.getDecision())) {
+            orderService.ensureOrderForApprovedTask(task);
+        }
         pending.complete();
         createExecutionArtifacts(task.getReference(), task.getId(), decision, snapshot);
         audit.save(AuditEvent.create(

@@ -50,7 +50,9 @@ class KafkaRpcServerTest {
         var server = new KafkaRpcServer(
                 kafka, properties, tasks, quotes, mock(BusinessArtifactRepository.class),
                 mock(ArtifactStore.class), mock(RuntimeEventRepository.class), new TaskViewMapper(),
-                mock(ReferencePriceService.class), pendingDecisions);
+                mock(ReferencePriceService.class), pendingDecisions,
+                mock(AgentCommandRepository.class),
+                mock(com.caijiatai.procurement.interaction.HumanInteractionRepository.class));
         var payload = Map.<String, Object>of("task_id", task.getId());
         var request = new java.util.LinkedHashMap<String, Object>();
         request.put("correlation_id", "corr-1");

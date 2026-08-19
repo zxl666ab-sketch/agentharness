@@ -60,7 +60,7 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
   const [deleteTarget, setDeleteTarget] = useState<ProcurementRequestSummary | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [conversationOpen, setConversationOpen] = useState(false);
+  const [conversationOpen, setConversationOpen] = useState(true);
 
   async function startConversation(message: string, files: File[]) {
     setBusy("conversation");
@@ -68,9 +68,15 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
     try {
       const accepted = await procurementApi.startConversation(message, files);
       state.setPendingRunId(accepted.run_id);
-      state.setSelectedId(accepted.purchase_request_id);
       state.setShowCreate(false);
-      state.setActiveTab("quotes");
+      state.navigate({
+        view: "tasks",
+        task: accepted.purchase_request_id,
+        ai: null,
+        review: null,
+        tab: "quotes",
+        orderTask: null,
+      });
       await queryClient.invalidateQueries({ queryKey: ["procurement-requests"] });
       await queryClient.invalidateQueries({
         queryKey: ["procurement-request", accepted.purchase_request_id],

@@ -14,7 +14,7 @@ import type { TaskFilter } from "./workbenchUrl";
 
 export const TASK_PAGE_SIZE = 20;
 export const ATTENTION_STATUSES = new Set<ProcurementRequestSummary["status"]>([
-  "review", "ready", "analyzed", "approval_pending",
+  "waiting_human", "review", "ready", "analyzed", "approval_pending",
 ]);
 export const COMPLETE_STATUSES = new Set<ProcurementRequestSummary["status"]>([
   "approved", "no_award", "cancelled",
@@ -48,10 +48,18 @@ export function useRequestQueries(state: WorkbenchState) {
     enabled: !!selectedId,
     refetchInterval: (query) => {
       const status = query.state.data?.status;
-      return status && ["draft", "analyzing", "approval_pending"].includes(status)
+      return status && ["draft", "waiting_human", "analyzing", "approval_pending"].includes(status)
         ? 1_500
         : false;
     },
+  });
+  const interactionsQuery = useQuery({
+    queryKey: ["procurement-interactions", selectedId],
+    queryFn: () => procurementApi.interactions(selectedId!),
+    enabled: !!selectedId,
+    refetchInterval: (query) => query.state.data?.some((item) =>
+      item.status === "WAITING" || item.status === "ANSWERED"
+    ) ? 1_500 : false,
   });
   const aiTasksQuery = useQuery({
     queryKey: ["procurement-ai-tasks", selectedId],
@@ -80,18 +88,7 @@ export function useRequestQueries(state: WorkbenchState) {
     queryKey: ["procurement-task-order", selectedId],
     queryFn: async () => {
       const page = await procurementApi.orders(undefined, 0, 100);
-      const order = page.items.find((item) => item.task_id === selectedId) || null;
-      if (!order) return null;
-      // P3-1：附带发票匹配状态（发票中心数据），驱动 10 步闭环进度
-      try {
-        const invoicePage = await procurementApi.invoices(undefined, order.id, 0, 5);
-        const active = invoicePage.items.find((item) => item.status !== "VOIDED");
-        return active
-          ? { ...order, invoice_status: active.status === "RECONCILED" ? "RECONCILED" : active.status === "MATCHED" ? "MATCHED" : null }
-          : { ...order, invoice_status: null };
-      } catch {
-        return order;
-      }
+      return page.items.find((item) => item.task_id === selectedId) || null;
     },
     enabled: !!selectedId && detailQuery.data?.status === "approved",
     refetchInterval: 10_000,
@@ -193,6 +190,7 @@ export function useRequestQueries(state: WorkbenchState) {
     allAiTasksQuery,
     reviewsQuery,
     detailQuery,
+    interactionsQuery,
     aiTasksQuery,
     aiTaskQuery,
     reportQuery,

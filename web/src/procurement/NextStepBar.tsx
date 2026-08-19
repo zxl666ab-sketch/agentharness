@@ -1,7 +1,7 @@
 import { ArrowRight } from "lucide-react";
 
 import type { OrderView, ProcurementRequest } from "./types";
-import { nextStepGuide, type NextStepAction } from "./viewModel";
+import { fulfillmentNextStep, nextStepGuide, type NextStepAction } from "./viewModel";
 
 type Props = {
   request: ProcurementRequest;
@@ -12,8 +12,9 @@ type Props = {
 /** 任务详情头部的「下一步」引导条（P1-2）：状态驱动文案，卡点原因可见，带可执行动作。 */
 export function NextStepBar({ request, order, onAction }: Props) {
   const guide = nextStepGuide(request);
+  const fulfillment = order ? fulfillmentNextStep(order) : null;
   const hint = request.status === "approved" && order
-    ? `订单 ${order.order_no} 已生成：收货 → 对账 → 付款`
+    ? `${fulfillment?.label}：${fulfillment?.detail}`
     : guide.hint;
   return (
     <div className="proc-next-step" aria-label="下一步引导">

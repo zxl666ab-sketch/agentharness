@@ -10,10 +10,13 @@ import com.caijiatai.procurement.cache.InsightsCache;
 import com.caijiatai.procurement.comparison.ComparisonSnapshotRepository;
 import com.caijiatai.procurement.config.AppProperties;
 import com.caijiatai.procurement.order.OrderRepository;
+import com.caijiatai.procurement.order.OrderStatus;
 import com.caijiatai.procurement.order.PurchaseOrder;
 import com.caijiatai.procurement.platform.statemachine.StateMachine;
 import com.caijiatai.procurement.report.AuditEvent;
 import com.caijiatai.procurement.report.AuditEventRepository;
+import com.caijiatai.procurement.settlement.SettlementRepository;
+import com.caijiatai.procurement.settlement.SettlementStatus;
 import com.caijiatai.procurement.task.ProcurementDtos;
 import com.caijiatai.procurement.task.ProcurementTask;
 import com.caijiatai.procurement.task.ProcurementTaskRepository;
@@ -48,6 +51,8 @@ import org.springframework.web.multipart.MultipartFile;
 public class InvoiceService {
     private static final Logger log = LoggerFactory.getLogger(InvoiceService.class);
     private static final long MAX_FILE_BYTES = 5L * 1024 * 1024;
+    private static final List<String> IN_FLIGHT_COMMAND_STATUSES =
+            List.of("pending", "dispatching", "accepted", "published");
 
     private final InvoiceRepository invoices;
     private final OrderRepository orders;
@@ -57,6 +62,7 @@ public class InvoiceService {
     private final IdempotencyRecordRepository idempotency;
     private final ArtifactStore artifactStore;
     private final AuditEventRepository audit;
+    private final SettlementRepository settlements;
     private final InsightsCache insightsCache;
     private final StateMachine<InvoiceStatus, InvoiceEvent> invoiceMachine;
     private final String operator;
@@ -70,6 +76,7 @@ public class InvoiceService {
             IdempotencyRecordRepository idempotency,
             ArtifactStore artifactStore,
             AuditEventRepository audit,
+            SettlementRepository settlements,
             InsightsCache insightsCache,
             StateMachine<InvoiceStatus, InvoiceEvent> invoiceMachine,
             AppProperties properties) {
@@ -81,6 +88,7 @@ public class InvoiceService {
         this.idempotency = idempotency;
         this.artifactStore = artifactStore;
         this.audit = audit;
+        this.settlements = settlements;
         this.insightsCache = insightsCache;
         this.invoiceMachine = invoiceMachine;
         this.operator = properties.localOperator();
@@ -92,8 +100,9 @@ public class InvoiceService {
 
     @Transactional
     public ProcurementDtos.OperationAccepted upload(String orderId, MultipartFile file, String idempotencyKey) {
-        var order = orders.findById(orderId)
+        var order = orders.lockById(orderId)
                 .orElseThrow(() -> notFound("order_not_found", "未找到采购订单"));
+        assertInvoiceCanBeAdded(orderId, order);
         if (file == null || file.isEmpty() || file.getSize() > MAX_FILE_BYTES) {
             throw bad("invalid_invoice_file", "发票文件不能为空且不超过 5MB");
         }
@@ -102,14 +111,28 @@ public class InvoiceService {
             // 命中直接返回，避免重复上传产生孤儿制品。
             var fileBytes = file.getBytes();
             var contentSha = sha256Hex(fileBytes);
+            var filename = file.getOriginalFilename() == null ? "" : file.getOriginalFilename();
             var keyBasis = com.caijiatai.procurement.agent.CanonicalJson.sha256(java.util.Map.of(
                     "order_id", orderId,
-                    "filename", file.getOriginalFilename() == null ? "" : file.getOriginalFilename(),
+                    "filename", filename,
                     "file_sha256", contentSha));
             var key = normalizeIdempotencyKey(idempotencyKey, keyBasis);
             var existing = idempotency.findById(new IdempotencyRecord.Key("invoice_upload", key));
             if (existing.isPresent()) {
+                if (!existing.get().getPayloadSha256().equals(keyBasis)
+                        && !existing.get().getPayloadSha256().equals(contentSha)) {
+                    throw conflict("idempotency_payload_conflict",
+                            "同一幂等键已用于不同发票上传请求");
+                }
                 var op = commands.findById(existing.get().getOperationId()).orElseThrow();
+                if (existing.get().getPayloadSha256().equals(contentSha)
+                        && (!op.getAggregateId().equals(orderId)
+                        || !contentSha.equals(text(op.getPayload().get("sha256")))
+                        || !filename.equals(java.util.Objects.toString(
+                                op.getPayload().get("filename"), "")))) {
+                    throw conflict("idempotency_payload_conflict",
+                            "同一幂等键已用于不同发票上传请求");
+                }
                 return accepted(op, "已存在相同发票上传操作");
             }
             var artifact = artifactStore.store(
@@ -132,7 +155,7 @@ public class InvoiceService {
             payload.put("expected_tax_rate", expectedRate == null ? null : expectedRate.toPlainString());
             var command = commands.save(AgentCommand.accept(
                     "parse_invoice", orderId, 1, 0, payload));
-            idempotency.save(IdempotencyRecord.reserve("invoice_upload", key, contentSha, command.getOperationId()));
+            idempotency.save(IdempotencyRecord.reserve("invoice_upload", key, keyBasis, command.getOperationId()));
             audit.save(AuditEvent.forBusiness(
                     "invoice", orderId, "invoice_upload_accepted", operator,
                     Map.of("operation_id", command.getOperationId(), "artifact_id", artifact.getId())));
@@ -150,8 +173,9 @@ public class InvoiceService {
     @Transactional
     public void applyParseResult(AgentCommand command, Map<String, Object> result) {
         var orderId = command.getAggregateId();
-        var order = orders.findById(orderId)
+        var order = orders.lockById(orderId)
                 .orElseThrow(() -> notFound("order_not_found", "未找到采购订单"));
+        assertInvoiceCanBeAdded(orderId, order);
         var rawInvoice = result.get("invoice");
         if (!(rawInvoice instanceof Map<?, ?> parsed)) {
             throw new ApiException(HttpStatus.CONFLICT, "invalid_invoice_parse", "Agent 未返回可验证的发票字段");
@@ -411,10 +435,31 @@ public class InvoiceService {
         }
     }
 
-    /** 付款联动：订单存在未匹配/未核销发票时拒绝付款（409）。 */
-    public boolean hasUnresolvedInvoices(String orderId) {
-        return invoices.countByOrderIdAndStatusIn(orderId,
-                List.of(InvoiceStatus.REGISTERED.wireValue(), InvoiceStatus.DIFF_HOLD.wireValue())) > 0;
+    /**
+     * 对账/付款门禁：必须至少存在一张非作废发票，且每张非作废发票均已核销。
+     * MATCHED 仅表示三单匹配通过，仍需采购员执行核销后才能进入财务流转。
+     */
+    @Transactional(readOnly = true)
+    public boolean isReconciledForSettlement(String orderId) {
+        if (commands.existsByAggregateIdAndOperationTypeAndStatusIn(
+                orderId, "parse_invoice", IN_FLIGHT_COMMAND_STATUSES)) {
+            return false;
+        }
+        var active = invoices.findByOrderIdOrderByCreatedAtAsc(orderId).stream()
+                .filter(invoice -> !InvoiceStatus.VOIDED.wireValue().equals(invoice.getStatus()))
+                .toList();
+        return !active.isEmpty() && active.stream()
+                .allMatch(invoice -> InvoiceStatus.RECONCILED.wireValue().equals(invoice.getStatus()));
+    }
+
+    private void assertInvoiceCanBeAdded(String orderId, PurchaseOrder order) {
+        if (OrderStatus.CLOSED.wireValue().equals(order.getStatus())) {
+            throw conflict("invoice_upload_not_allowed", "采购订单已关闭，不能再上传发票");
+        }
+        var settlement = settlements.lockByOrderId(orderId).orElse(null);
+        if (settlement != null && SettlementStatus.PAID.wireValue().equals(settlement.getStatus())) {
+            throw conflict("invoice_upload_not_allowed", "采购订单已付款，不能再上传发票");
+        }
     }
 
     // ------------------------------------------------------------------

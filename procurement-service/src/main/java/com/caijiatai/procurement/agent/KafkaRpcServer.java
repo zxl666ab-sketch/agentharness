@@ -6,6 +6,7 @@ import com.caijiatai.procurement.artifact.BusinessArtifactRepository;
 import com.caijiatai.procurement.approval.PendingDecision;
 import com.caijiatai.procurement.approval.PendingDecisionRepository;
 import com.caijiatai.procurement.config.AppProperties;
+import com.caijiatai.procurement.interaction.HumanInteractionRepository;
 import com.caijiatai.procurement.quote.ProcurementQuoteRepository;
 import com.caijiatai.procurement.task.ProcurementTaskRepository;
 import com.caijiatai.procurement.task.TaskViewMapper;
@@ -44,13 +45,17 @@ public final class KafkaRpcServer {
     private final TaskViewMapper views;
     private final ReferencePriceService referencePrices;
     private final PendingDecisionRepository pendingDecisions;
+    private final AgentCommandRepository commands;
+    private final HumanInteractionRepository interactions;
 
     public KafkaRpcServer(KafkaTemplate<String, byte[]> kafka, AppProperties properties,
             ProcurementTaskRepository tasks, ProcurementQuoteRepository quotes,
             BusinessArtifactRepository artifacts, ArtifactStore artifactStore,
             RuntimeEventRepository events, TaskViewMapper views,
             ReferencePriceService referencePrices,
-            PendingDecisionRepository pendingDecisions) {
+            PendingDecisionRepository pendingDecisions,
+            AgentCommandRepository commands,
+            HumanInteractionRepository interactions) {
         this.kafka = kafka;
         this.hmacKey = properties.internalHmacKey();
         this.tasks = tasks;
@@ -61,6 +66,8 @@ public final class KafkaRpcServer {
         this.views = views;
         this.referencePrices = referencePrices;
         this.pendingDecisions = pendingDecisions;
+        this.commands = commands;
+        this.interactions = interactions;
     }
 
     @KafkaListener(topics = REQUESTS_TOPIC, groupId = "java-svc-rpc")
@@ -112,7 +119,44 @@ public final class KafkaRpcServer {
                 quotes.findByTaskIdOrderByCreatedAtAsc(taskId),
                 null,
                 null);
-        value.remove("attachments");
+        value.put("attachments", artifacts.findByTaskIdOrderByCreatedAtAsc(taskId).stream()
+                .filter(item -> "procurement_original".equals(item.getKind()))
+                .map(item -> Map.<String, Object>of(
+                        "artifact_id", item.getId(),
+                        "filename", item.getFilename(),
+                        "sha256", item.getSha256(),
+                        "content_type", item.getContentType(),
+                        "size_bytes", item.getSizeBytes()))
+                .toList());
+        value.put("authorized_artifacts", artifacts.findByTaskIdOrderByCreatedAtAsc(taskId).stream()
+                .filter(item -> "procurement_original".equals(item.getKind())
+                        || "human_interaction_attachment".equals(item.getKind()))
+                .map(item -> Map.<String, Object>of(
+                        "artifact_id", item.getId(),
+                        "filename", item.getFilename(),
+                        "sha256", item.getSha256(),
+                        "content_type", item.getContentType(),
+                        "size_bytes", item.getSizeBytes()))
+                .toList());
+        value.put("source_message", commands
+                .findFirstByAggregateIdAndOperationTypeOrderByAcceptedAtAsc(taskId, "start_conversation")
+                .map(command -> text(command.getPayload().get("message")))
+                .orElse(""));
+        value.put("interactions", interactions.findByTaskIdOrderByCreatedAtDesc(taskId).stream()
+                .map(item -> {
+                    var entry = new LinkedHashMap<String, Object>();
+                    entry.put("interaction_id", item.getId());
+                    entry.put("run_id", item.getRunId());
+                    entry.put("checkpoint_id", item.getCheckpointId());
+                    entry.put("generation", item.getGeneration());
+                    entry.put("status", item.getStatus());
+                    entry.put("answer_schema", item.getAnswerSchema());
+                    entry.put("answer", item.getAnswer());
+                    entry.put("note", item.getAnswerNote());
+                    entry.put("artifact_ids", item.getAnswerArtifactIds());
+                    return entry;
+                })
+                .toList());
         value.put("pending_decisions", pendingDecisions
                 .findByTaskIdAndStatusIn(taskId, List.of("pending", "approved", "stale"))
                 .stream()

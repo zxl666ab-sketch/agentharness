@@ -77,6 +77,19 @@ public class ContractService {
 
     @Transactional
     public ProcurementDtos.OperationAccepted createDraft(String taskId, String idempotencyKey) {
+        var requestSha = com.caijiatai.procurement.agent.CanonicalJson.sha256(Map.of("task_id", taskId));
+        var key = normalizeIdempotencyKey(idempotencyKey, requestSha);
+        var replay = idempotency.findById(new IdempotencyRecord.Key("contract_draft", key));
+        if (replay.isPresent()) {
+            var op = commands.findById(replay.get().getOperationId()).orElseThrow();
+            var sameTask = taskId.equals(op.getAggregateId())
+                    && taskId.equals(text(op.getPayload().get("task_id")));
+            if (!replay.get().getPayloadSha256().equals(requestSha) && !sameTask) {
+                throw conflict("idempotency_payload_conflict",
+                        "同一幂等键已用于不同合同草拟请求");
+            }
+            return accepted(op, "已存在相同合同草拟请求");
+        }
         var task = tasks.lockById(taskId)
                 .orElseThrow(() -> notFound("task_not_found", "未找到采购任务"));
         if (!"approved".equals(task.getStatus())) {
@@ -96,16 +109,9 @@ public class ContractService {
                 order.getLandedTotal(), leadDays);
         contracts.saveAndFlush(contract);
         var payload = draftPayload(contract, task, order.getLandedTotal(), leadDays);
-        var payloadSha = com.caijiatai.procurement.agent.CanonicalJson.sha256(payload);
-        var key = normalizeIdempotencyKey(idempotencyKey, payloadSha);
-        var existing = idempotency.findById(new IdempotencyRecord.Key("contract_draft", key));
-        if (existing.isPresent()) {
-            var op = commands.findById(existing.get().getOperationId()).orElseThrow();
-            return accepted(op, "已存在相同合同草拟请求");
-        }
         var command = commands.save(AgentCommand.accept(
                 "draft_contract", taskId, task.getGeneration(), task.getVersion(), payload));
-        idempotency.save(IdempotencyRecord.reserve("contract_draft", key, payloadSha, command.getOperationId()));
+        idempotency.save(IdempotencyRecord.reserve("contract_draft", key, requestSha, command.getOperationId()));
         audit.save(AuditEvent.forBusiness(
                 "contract", contract.getId(), "contract_draft_requested", operator,
                 Map.of("contract_no", contractNo, "task_id", taskId)));

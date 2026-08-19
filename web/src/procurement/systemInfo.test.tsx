@@ -9,7 +9,7 @@ function platformBody() {
   return {
     service: "procurement-service",
     backend_version: "0.5.0",
-    api_schema_version: 14,
+    api_schema_version: 19,
     components: { mysql: "ready", kafka: "127.0.0.1:9092", redis: "ready" },
     parsers: { quote_parser_versions: ["packaging-quote-v3"] },
     rulesets: { comparison_rulesets: ["landed-cost-v1"] },

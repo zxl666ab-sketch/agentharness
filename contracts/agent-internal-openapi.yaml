@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Caijiatai Python Agent Internal API
-  version: 0.4.0
+  version: 0.5.0
   description: Internal-only API used by the Java procurement control plane.
 servers:
   - url: http://agent:8742
@@ -158,7 +158,7 @@ components:
       required: [operation_id, operation_type, aggregate_id, generation, expected_task_version, payload_sha256, payload]
       properties:
         operation_id: {type: string, format: uuid}
-        operation_type: {type: string, enum: [start_conversation, import_quote, resume_run, analyze, approve_decision, create_structured, reopen_task]}
+        operation_type: {type: string, enum: [start_conversation, import_quote, resume_run, human_interaction_answer, analyze, approve_decision, create_structured, reopen_task, parse_invoice, explain_invoice_diff, draft_contract]}
         aggregate_id: {type: string, pattern: '^[0-9a-f]{32}$'}
         generation: {type: integer, minimum: 1}
         expected_task_version: {type: integer, minimum: 0}

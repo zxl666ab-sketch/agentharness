@@ -12,6 +12,7 @@ from agentharness.api.internal_agent import (
     InternalAgentCommands,
     _canonical_sha256,
     _default_model_config,
+    _render_interaction_answer,
 )
 from agentharness.api.server import create_app
 from agentharness.contracts import (
@@ -37,6 +38,35 @@ def test_default_model_config_uses_the_shared_openai_model(monkeypatch) -> None:
 
     monkeypatch.setenv("AGENTHARNESS_PROCUREMENT_MODEL", "runtime-override")
     assert _default_model_config()["model"] == "runtime-override"
+
+
+def test_interaction_size_answer_is_rendered_as_explicit_dimensions() -> None:
+    rendered = _render_interaction_answer(
+        {"quantity": 5000, "unit": "个", "size": "300×400 mm", "max_lead_days": 15}
+    )
+
+    assert "尺寸：300×400 mm" in rendered
+    assert "宽度：300 mm" in rendered
+    assert "长度：400 mm" in rendered
+
+
+def test_interaction_answer_remains_unambiguous_when_requirement_is_reparsed() -> None:
+    rendered = _render_interaction_answer(
+        {"quantity": 20_000, "unit": "piece", "max_lead_days": 10}
+    )
+
+    payload = extract_requirement(
+        [
+            Message(
+                role=MessageRole.user,
+                content=f"物料：热敏不干胶标签\n{rendered}",
+            )
+        ]
+    )
+
+    assert payload["quantity"] == "20000"
+    assert payload["unit"] == "piece"
+    assert payload["constraints"]["max_lead_days"] == 10
 
 
 def test_latest_tool_payload_reads_spilled_durable_result(tmp_path, monkeypatch) -> None:
@@ -212,6 +242,106 @@ def test_extracts_lead_time_not_exceeding_limit() -> None:
     assert payload["constraints"]["max_lead_days"] == 20
 
 
+def test_extracts_numbered_label_procurement_requirement() -> None:
+    payload = extract_requirement(
+        [
+            Message(
+                role=MessageRole.user,
+                content=(
+                    "请创建“华东仓热敏不干胶标签采购”任务。\n"
+                    "1. 物料：热敏不干胶标签\n"
+                    "2. 采购数量：20,000 个\n"
+                    "3. 规格：宽 100 mm × 长 150 mm\n"
+                    "4. 厚度：80 微米\n"
+                    "5. 材质：铜版纸\n"
+                    "6. 颜色：白色\n"
+                    "7. 印刷：1 色\n"
+                    "8. 目标仓库：华东仓\n"
+                    "9. 币种：人民币 CNY\n"
+                    "10. 最长交期：10 天\n"
+                    "11. 必须支持开具增值税发票\n"
+                    "12. 尺寸允许偏差：±1 mm\n"
+                    "13. 厚度允许偏差：±5 微米\n"
+                    "14. 目标落地单价不超过 0.20 元/个"
+                ),
+            )
+        ]
+    )
+
+    assert payload["title"] == "华东仓热敏不干胶标签采购"
+    assert payload["item_name"] == "热敏不干胶标签"
+    assert payload["quantity"] == "20000"
+    assert payload["unit"] == "个"
+    assert payload["specifications"]["width"]["value"] == "100"
+    assert payload["specifications"]["length"]["value"] == "150"
+    assert payload["specifications"]["thickness"]["value"] == "80"
+    assert payload["specifications"]["material"]["value"] == "铜版纸"
+    assert payload["specifications"]["color"]["value"] == "白色"
+    assert payload["specifications"]["print_colors"]["value"] == "1"
+    assert payload["constraints"]["destination"] == "华东仓"
+    assert payload["constraints"]["max_lead_days"] == 10
+    assert payload["constraints"]["invoice_required"] is True
+    assert payload["constraints"]["size_tolerance_mm"] == "1"
+    assert payload["constraints"]["thickness_tolerance_um"] == "5"
+    assert payload["constraints"]["max_landed_unit_cost"] == "0.20"
+
+
+@pytest.mark.asyncio
+async def test_start_conversation_falls_back_after_model_tool_protocol_error(
+    tmp_path,
+) -> None:
+    adapter = FakeModelAdapter(
+        script=[
+            {
+                "kind": "error",
+                "error": "tool call arguments are invalid JSON",
+                "error_kind": "provider_protocol",
+            }
+        ]
+    )
+    harness = Harness(data_dir=tmp_path / "runtime", providers={"openai": adapter})
+    (harness.data_dir / "procurement-model-config.json").write_text(
+        json.dumps({"provider": "openai", "model": "gpt-test", "api_key": "test-key"}),
+        encoding="utf-8",
+    )
+    commands = InternalAgentCommands(harness)
+    commands.procurement_tools._parse_attachment = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "artifact_id": "jb" + "a" * 30,
+            "supplier_name": "华南标签",
+            "status": "ready",
+            "parser_version": "test",
+            "processing_ms": "1",
+            "extracted": {"fields": {}, "review_fields": []},
+        }
+    )
+    payload = {
+        "message": "物料：热敏不干胶标签\n采购数量：20,000 个\n最长交期：10天",
+        "attachments": [{"artifact_id": "jb" + "a" * 30, "filename": "报价.xlsx"}],
+    }
+    body = AgentCommandBody(
+        operation_id="11111111-1111-1111-1111-111111111111",
+        operation_type="start_conversation",
+        aggregate_id="a" * 32,
+        generation=1,
+        expected_task_version=0,
+        payload_sha256=_canonical_sha256(payload),
+        payload=payload,
+    )
+
+    result = await commands._start_conversation(body)
+
+    assert result["requirement"]["item_name"] == "热敏不干胶标签"
+    runs = harness.storage.list_runs(limit=10)
+    assert {run["status"] for run in runs} >= {
+        RunStatus.failed.value,
+        RunStatus.require_human.value,
+    }
+    fallback = next(run for run in runs if run["status"] == RunStatus.require_human.value)
+    assert fallback["provider"] == "procurement_internal"
+    await harness.aclose()
+
+
 @pytest.mark.asyncio
 async def test_start_conversation_uses_configured_model_and_prefills_usd_rate(tmp_path) -> None:
     model_requirement = {
@@ -280,7 +410,8 @@ async def test_start_conversation_uses_configured_model_and_prefills_usd_rate(tm
                     {
                         "name": "procurement_capture_requirement",
                         "arguments": {"requirement": model_requirement},
-                    }
+                    },
+                    {"name": "procurement_parse_uploaded_quotes"},
                 ],
             },
             {
@@ -357,6 +488,14 @@ async def test_start_conversation_uses_configured_model_and_prefills_usd_rate(tm
         "procurement_record_decision_evidence",
     }
     assert run["status"] == RunStatus.require_human.value
+    assert adapter.calls[0].parallel_tool_calls is False
+    assert [
+        item.tool_name for item in harness.storage.list_tool_invocations(result["run_id"])
+    ] == [
+        "procurement_capture_requirement",
+        "procurement_parse_uploaded_quotes",
+        "procurement_request_review",
+    ]
     await harness.aclose()
 
 
@@ -564,6 +703,145 @@ async def test_internal_operation_is_durable_and_payload_bound(tmp_path) -> None
     )
     with pytest.raises(Exception, match="different payload"):
         await commands.execute(conflict)
+    await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_human_interaction_operation_can_reopen_without_duplicate_dispatch(
+    tmp_path,
+) -> None:
+    harness = Harness(data_dir=tmp_path / "runtime")
+    commands = InternalAgentCommands(harness)
+    payload = {"interaction_id": "i1"}
+    body = AgentCommandBody(
+        operation_id="22345678-1234-1234-1234-123456789abc",
+        operation_type="human_interaction_answer",
+        aggregate_id="b" * 32,
+        generation=1,
+        expected_task_version=0,
+        payload_sha256=_canonical_sha256(payload),
+        payload=payload,
+    )
+    commands._dispatch = AsyncMock(side_effect=[RuntimeError("temporary"), {"run_id": "a" * 32}])  # type: ignore[method-assign]
+
+    first = await commands.execute(body)
+    second = await commands.execute(body)
+    replay = await commands.execute(body)
+
+    assert first["status"] == "failed"
+    assert second["status"] == "completed"
+    assert replay == second
+    assert commands._dispatch.await_count == 2  # type: ignore[attr-defined]
+    await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_human_answer_repairs_checkpoint_without_duplicate_user_message(
+    tmp_path, monkeypatch
+) -> None:
+    harness = Harness(data_dir=tmp_path / "runtime")
+    commands = InternalAgentCommands(harness)
+    session_id = harness.storage.create_session(title="人工回答故障恢复")
+    run_id = new_id()
+    harness.storage.create_run(
+        run_id=run_id,
+        session_id=session_id,
+        root_run_id=run_id,
+        status=RunStatus.require_human,
+        provider="procurement_internal",
+        model="deterministic-procurement",
+        approval="ask",
+        allow_write=False,
+    )
+    harness.storage.save_checkpoint(
+        Checkpoint(
+            run_id=run_id,
+            phase="model_turn",
+            step=1,
+            messages=[],
+            status=RunStatus.require_human,
+        )
+    )
+    answer = {
+        "quantity": 5000,
+        "unit": "个",
+        "size": "300×400 mm",
+        "max_lead_days": 15,
+    }
+    answer_text = _render_interaction_answer(answer)
+    resume_input = (
+        "采购员已回答当前问题。以下回答来自 Java 持久化交互，并已通过 Schema 校验：\n"
+        f"{answer_text}\n继续当前采购资料解析；仍缺关键字段时再次结构化提问。"
+    )
+    persisted_answer = Message(role=MessageRole.user, content=resume_input)
+    harness.storage.save_message(run_id, session_id, persisted_answer, seq=0)
+
+    interaction_id = "interaction-1"
+    checkpoint_id = "checkpoint-1"
+    commands._java_json = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "generation": 2,
+            "task_version": 4,
+            "analysis_run_id": run_id,
+            "source_message": "帮我采购一批白色快递袋",
+            "attachments": [],
+            "authorized_artifacts": [],
+            "interactions": [
+                {
+                    "interaction_id": interaction_id,
+                    "status": "ANSWERED",
+                    "generation": 2,
+                    "run_id": run_id,
+                    "checkpoint_id": checkpoint_id,
+                    "answer": answer,
+                    "artifact_ids": [],
+                }
+            ],
+        }
+    )
+
+    async def resume_from_repaired_checkpoint(
+        resumed_run_id: str, input: str | None = None
+    ):  # type: ignore[no-untyped-def]
+        repaired = harness.storage.load_checkpoint(resumed_run_id)
+        assert input is None
+        assert repaired is not None
+        assert [message.id for message in repaired.messages] == [persisted_answer.id]
+        run = harness.storage.get_run(resumed_run_id)
+        assert run is not None
+        return commands._run_result(run)
+
+    monkeypatch.setattr(harness, "resume", AsyncMock(side_effect=resume_from_repaired_checkpoint))
+    monkeypatch.setattr(
+        commands,
+        "_latest_tool_payload",
+        lambda _run_id, _tool_name: {
+            "interaction": {"question": "请继续补充开票要求"}
+        },
+    )
+    payload = {
+        "interaction_id": interaction_id,
+        "run_id": run_id,
+        "checkpoint_id": checkpoint_id,
+        "answer": answer,
+    }
+    body = AgentCommandBody(
+        operation_id="32345678-1234-1234-1234-123456789abc",
+        operation_type="human_interaction_answer",
+        aggregate_id="b" * 32,
+        generation=2,
+        expected_task_version=4,
+        payload_sha256=_canonical_sha256(payload),
+        payload=payload,
+    )
+
+    result = await commands._answer_interaction(body)
+
+    assert result["interaction_id"] == interaction_id
+    assert result["interaction"]["question"] == "请继续补充开票要求"
+    assert len(harness.storage.get_messages(run_id)) == 1
+    assert harness.storage.get_messages(run_id)[0].id == persisted_answer.id
+    harness.resume.assert_awaited_once_with(run_id, input=None)  # type: ignore[attr-defined]
     await harness.aclose()
 
 

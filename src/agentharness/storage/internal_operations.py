@@ -101,3 +101,20 @@ class InternalOperationRepo:
                    WHERE operation_id = ?""",
                 (error[:2000], now, operation_id),
             )
+
+    def reopen_failed(self, operation_id: str, payload_sha256: str) -> bool:
+        """Atomically reopen the same durable operation for an explicit retry.
+
+        The operation id and payload stay unchanged, so downstream Run/message
+        recovery can remain idempotent across Java/Python restarts.
+        """
+
+        now = _utcnow()
+        with self.core.transaction():
+            cursor = self.core.conn.execute(
+                """UPDATE internal_operations
+                   SET status = 'accepted', error = NULL, updated_at = ?
+                   WHERE operation_id = ? AND payload_sha256 = ? AND status = 'failed'""",
+                (now, operation_id, payload_sha256),
+            )
+        return cursor.rowcount == 1

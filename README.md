@@ -26,12 +26,12 @@ AI 智能采购平台是本地、自托管的采购决策工作台。采购员�
 
 ```mermaid
 flowchart TB
-    subgraph Web["React 工作台（9 个视图 · 角色视角）"]
+    subgraph Web["React 工作台（11 个视图 · 角色视角）"]
         Dashboard["管理驾驶舱（待办中心）"]
         Pages["供应商 / 订单 / 对账 / 报表 / 审计 / 系统信息"]
     end
     Web -->|"HTTP/SSE 仅 127.0.0.1:8741"| Java["Java 业务主机（Spring Boot 4.1 / Java 21）"]
-    Java --> MySQL["MySQL 8 caijiatai_business（Flyway V1–V11）"]
+    Java --> MySQL["MySQL 8 caijiatai_business（Flyway V1–V16）"]
     Java <--> Redis["Redis：上下文缓存 · 分布式锁 · 看板缓存"]
     Java <-->|"Kafka（唯一通道）commands/results/rpc/events + DLQ"| Agent["Python Agent 微服务（解析 / 结构化 / RAG 软提示）"]
     Agent --> Provider["LLM API"]
@@ -46,9 +46,9 @@ flowchart TB
 
 **六大面试考点速览**（详见 [docs/resume.md](docs/resume.md) 双语言项目描述）：
 
-1. **注册式通用状态机引擎（平台叙事）**：`platform/statemachine` 包定义状态/事件枚举 + 流转表 + 动作钩子，`StateMachineRegistry` 注册订单（PENDING_SHIPMENT→SHIPPED→RECEIVED→CLOSED）与对账（UNSETTLED→SETTLED→PAID）状态机；非法流转 409，并发由乐观锁兜底。新增业务只需注册自己的状态机——"平台可扩展"有代码证据。现有任务状态机为历史实现，不迁移（README 如实说明）。
+1. **注册式通用状态机引擎（平台叙事）**：`platform/statemachine` 包定义状态/事件枚举 + 流转表 + 动作钩子，`StateMachineRegistry` 注册订单（PENDING_SHIPMENT→SHIPPED→PARTIALLY_RECEIVED→RECEIVED→CLOSED，支持分批累计收货）与对账（UNSETTLED→SETTLED→PAID）状态机；非法流转 409，并发由乐观锁兜底。新增业务只需注册自己的状态机——"平台可扩展"有代码证据。现有任务状态机为历史实现，不迁移（README 如实说明）。
 2. **三层防护各司其职**：幂等表防**重放**（同请求重复提交返回原结果）；乐观锁防**版本覆盖**（任务修正后旧审批失效，`version` 条件更新）；Redis 分布式锁防**并发双写**（`lock:decision:{taskId}` SETNX + 请求标识 + Lua 条件释放，10s TTL，Redis 不可用自动回退无锁路径）。被问"已有幂等为什么还要锁"：三层防的是三种不同故障。
-3. **惰性派生 tradeoff**：订单由已批准任务在查询时惰性派生（读接口带写副作用——反模式），权衡是**绝不触碰审批核心证据链**；`purchase_order.UNIQUE(task_id)` + `DuplicateKeyException` 幂等吞掉保证并发双请求只落一条。生产化可改为审批完成事件监听（README 注明）。
+3. **正式决定与唯一订单同事务**：Java 在校验任务版本、比价快照、供应商资格和到货成本后，同一事务写正式决定与采购订单；任一步失败整体回滚。`purchase_order.UNIQUE(task_id)` 是数据库最终防重，GET 订单查询保持只读。
 4. **供应商绩效模型（冻结口径）**：绩效分实时派生不落表——中标率得分（0–60，报价 **<3 次按 0.5 折减**防新供应商虚高）+ 活跃度（min(20, 次数×2)）+ 合作状态（20/10/0）；**黑名单强制封顶 30**；等级映射 优质/良好/一般/待观察。BigDecimal 精确到 2 位。
 5. **成本节约率口径（保守）**：`(Σ预算单价×数量 − Σ批准到货总价) / Σ预算单价×数量`；预算取任务约束 `max_landed_unit_cost`（到货单价上限），**无预算任务不计入**，比例保留 4 位。被问"为什么用上限做分母"：保守口径，实际节约率不低于此值。
 6. **历史报价 RAG（软提示）**：Java RPC `get_reference_prices` 聚合历史已批准订单成交价（物料名归一化匹配 + 品类兜底，p25/p75，**不足 3 条返回 null**）；Python 注入 `reference_price_interval` 可选字段与异常价格风险 flag——**只进解释文本与风险标记，不参与比价排序、不排除报价、不影响冻结评测**；硬规则化与向量库（Milvus/BGE）为后续扩展。
@@ -67,7 +67,7 @@ flowchart LR
 
 - Java 是采购任务、附件、报价、人工修正、比价快照、待决审批、正式决定、供应商档案、采购订单、对账付款、统计报表、业务审计、业务 Artifact、SSE 事件投影的唯一真源；可脱离 Python 独立运行（`APP_AGENT_MODE=demo`）。
 - Python Agent 是 Kafka 传输适配器加唯一 Harness Runtime：负责自然语言需求结构化、XLSX/PDF 文档解析、历史成交参考区间软提示（RAG）、Provider 调用，以及 Run、Checkpoint、Lease、Tool Invocation 和 Approval 的持久化；通过 Kafka 命令/结果/RPC/事件与 Java 通信。
-- 业务 Schema 只由 Java Flyway 创建（V1-V11：任务/报价/审批/审计 + 供应商 V8 + 订单 V9 + 对账 V10 + 审计通用业务定位 V11）。Agent Runtime 数据写入 `AGENTHARNESS_DATA_DIR` 并由 Compose 独立 volume 持久化；金额使用 `DECIMAL`/`BigDecimal`，时间使用 `DATETIME(6)`/`Instant`。
+- 业务 Schema 只由 Java Flyway 创建（V1–V19：核心任务/报价/审批/审计，供应商 V8、订单 V9、对账 V10、通用业务审计 V11、修正回灌 V13、发票 V14、合同 V15、分批收货 V16、失败审批恢复 V17、Human-in-the-loop V18、草稿需求未知态 V19）。Agent Runtime 数据写入 `AGENTHARNESS_DATA_DIR` 并由 Compose 独立 volume 持久化；金额使用 `DECIMAL`/`BigDecimal`，时间使用 `DATETIME(6)`/`Instant`。
 - Kafka 使用 KRaft 单节点：`caijiatai.commands/results/rpc.requests/rpc.responses/events` + 各 `*.dlq`；消息带 HMAC-SHA256 签名与 `payload_sha256`，双侧幂等。
 - Python 读取业务上下文/原件走 Kafka RPC（`get_task_context` / `get_artifact` / `list_events` / `get_reference_prices`）。
 - 审计事件全量留痕：任务事件挂 `task_id`，供应商/订单/对账等业务事件挂 `business_type`/`business_id`（V11），全局审计页可按类型/操作人/业务对象筛选。
@@ -85,7 +85,7 @@ flowchart LR
 - 规则推荐不会自动形成决定。批准或流标必须经 Harness 产生的一次性 Approval，并逐项绑定 Run、工具、任务版本、快照、输入哈希、决定、报价和备注哈希。
 - 需求或报价修正会原子失效当前快照与待决审批；迟到审批返回 stale approval，旧证据继续保留。
 - 批准后生成采购订单与供应商确认邮件两个 Java 业务 Artifact；流标不生成执行草稿，可复制需求并选择是否复制报价重新询价。
-- **订单闭环（K2/K8）**：已批准任务在订单页查询时惰性派生订单（幂等）；订单状态机 待发货→已发货→已收货→已关闭（待发货关闭=取消、已收货关闭=完成）；收货必填数量与日期且不得超收；收货自动派生对账单（缺到货总价时拒绝），对账状态机 未对账→已对账→已付款；发货/付款双超时调度（7 天，clock 注入可测，审计幂等去重）。
+- **履约闭环（K2/K8）**：正式采购决定与唯一订单同事务生成；订单状态机 待发货→已发货→部分收货→已收货→已关闭。每批收货必填数量与日期、携带 `Idempotency-Key`，累计不得超收；累计收满后派生对账单。至少存在一张非作废发票且所有有效发票均已核销，才允许对账和付款；已收货订单付款前不得关闭。
 - **前端闭环（P1）**：任务详情 9 步闭环进度条（创建需求→报价→复核→比价→审批→订单→收货→对账→付款，已批准任务按订单/对账生命周期继续推进）；状态驱动的「下一步」引导条（卡点原因可见，不再只靠 hover）；已批准任务一键直达其订单（`order_task` 聚焦视图，可返回任务）；对话面板默认折叠、字段复核默认仅待复核、比价明细列与证据指纹收进可展开面板；全站状态文案共用 `viewModel.ts` 单一映射（无英文枚举直出）。
 - **供应商档案（K1）**：与报价/中标按名称自动关联；删除保护（有报价历史 409）；绩效评分实时派生（口径见上）。
 - **历史报价 RAG（K5）**：比价分析时经 Kafka RPC 获取同物料历史成交参考区间，注入解释文本与风险 flag（软提示，不参与比价）。
@@ -183,16 +183,16 @@ POST /api/procurement/requests/{id}/decision
 POST /api/procurement/requests/{id}/reopen
 GET  /api/procurement/requests/{id}/report
 GET  /api/procurement/suppliers               # K1 供应商档案（列表/创建/更新/删除/档案聚合）
-GET  /api/procurement/orders                  # K2 采购订单（惰性派生 + 状态流转）
-POST /api/procurement/orders/{id}/transition
+GET  /api/procurement/orders                  # K2 采购订单（只读列表）
+POST /api/procurement/orders/{id}/transition # 必须携带 Idempotency-Key
 GET  /api/procurement/settlements             # K8 对账单（列表/流转 settle/pay）
-POST /api/procurement/settlements/{id}/transition
+POST /api/procurement/settlements/{id}/transition # 必须携带 Idempotency-Key
 GET  /api/procurement/insights/*              # K3 报表：overview/trend/supplier-ranking/categories
 GET  /api/procurement/audit-events            # K6 全局审计（类型/操作人/业务对象/任务筛选）
 GET  /api/procurement/platform                # K6 系统信息（版本/组件/解析器/规则集/模型脱敏）
 ```
 
-`contracts/` 保存 Java/Python OpenAPI（含 Kafka RPC kinds 双语言契约）、Decimal 规范化、规范 JSON 字节与 SHA-256、31 份完整比价黄金契约。API Schema 为 14，Java、Python 和 Web 版本均为 0.5.0。
+`contracts/` 保存 Java/Python OpenAPI（含 Kafka RPC kinds 双语言契约）、Decimal 规范化、规范 JSON 字节与 SHA-256、31 份完整比价黄金契约。采购工作台 API Schema 为 19，Java、Python 和 Web 版本均为 0.5.0。
 
 ## 验证
 

@@ -10,7 +10,7 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * 采购订单（K2）：由已批准任务惰性派生，UNIQUE(task_id) 防并发双写。
+ * 采购订单（K2）：在正式采购决定事务中生成，UNIQUE(task_id) 防并发双写。
  * 已批准任务的订单不可删除，只可流转或关闭（证据链完整性）。
  */
 @Entity
@@ -95,9 +95,13 @@ public class PurchaseOrder {
         this.updatedAt = Instant.now();
     }
 
-    public void receive(BigDecimal receivedQuantity, Instant arrivalDate, String notes) {
-        this.status = OrderStatus.RECEIVED.wireValue();
-        this.receivedQuantity = receivedQuantity;
+    /** Record one receipt batch and keep the aggregate quantity on the order. */
+    public void receive(BigDecimal batchQuantity, Instant arrivalDate, String notes) {
+        var previous = receivedQuantity == null ? BigDecimal.ZERO : receivedQuantity;
+        this.receivedQuantity = previous.add(batchQuantity);
+        this.status = this.receivedQuantity.compareTo(quantity) == 0
+                ? OrderStatus.RECEIVED.wireValue()
+                : OrderStatus.PARTIALLY_RECEIVED.wireValue();
         this.arrivalDate = arrivalDate;
         this.notes = notes;
         this.updatedAt = Instant.now();

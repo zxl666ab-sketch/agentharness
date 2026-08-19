@@ -2,6 +2,7 @@ package com.caijiatai.procurement.task;
 
 public enum TaskStatus {
     DRAFT("draft"),
+    WAITING_HUMAN("waiting_human"),
     COLLECTING("collecting"),
     REVIEW("review"),
     READY("ready"),

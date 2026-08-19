@@ -26,9 +26,9 @@ public class ProcurementTask {
     private String category;
     @Column(name = "item_name", nullable = false, length = 200)
     private String itemName;
-    @Column(nullable = false, precision = 60, scale = 18)
+    @Column(precision = 60, scale = 18)
     private BigDecimal quantity;
-    @Column(nullable = false, length = 50)
+    @Column(length = 50)
     private String unit;
     @Column(name = "schema_version", nullable = false)
     private int schemaVersion;
@@ -77,8 +77,8 @@ public class ProcurementTask {
         }
         task.category = "ecommerce_packaging";
         task.itemName = "待识别";
-        task.quantity = BigDecimal.ONE;
-        task.unit = "piece";
+        task.quantity = null;
+        task.unit = null;
         task.schemaVersion = 1;
         task.status = TaskStatus.DRAFT.wireValue();
         task.generation = 1;
@@ -164,6 +164,14 @@ public class ProcurementTask {
     public void restoreReadyAfterFailedAnalysis() {
         if (TaskStatus.ANALYZING.wireValue().equals(status)) {
             status = TaskStatus.READY.wireValue();
+            updatedAt = Instant.now();
+        }
+    }
+
+    public void restoreAnalyzedAfterFailedApproval(String snapshotId) {
+        if (TaskStatus.APPROVAL_PENDING.wireValue().equals(status)
+                && java.util.Objects.equals(currentSnapshotId, snapshotId)) {
+            status = TaskStatus.ANALYZED.wireValue();
             updatedAt = Instant.now();
         }
     }

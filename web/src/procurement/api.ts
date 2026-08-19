@@ -13,6 +13,8 @@ import type {
   EvaluationResult,
   InsightTrendRow,
   InsightsOverview,
+  HumanInteraction,
+  HumanInteractionArtifact,
   InvoiceActionInput,
   InvoicePage,
   InvoiceStatus,
@@ -129,12 +131,14 @@ function postJson<T>(path: string, body?: unknown): Promise<T> {
   });
 }
 
-function idempotencyKey() {
+export function newIdempotencyKey() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
   return `web-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
+
+const idempotencyKey = newIdempotencyKey;
 
 async function waitForOperation(operationId: string, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
@@ -150,7 +154,9 @@ async function waitForOperation(operationId: string, timeoutMs = 30_000) {
     await new Promise((resolve) => window.setTimeout(resolve, delay));
     delay = Math.min(1_500, Math.round(delay * 1.5));
   }
-  return null;
+  throw new Error(
+    `操作 ${operationId} 等待超时，任务仍在后台处理中，请在 AI 任务中心继续跟踪`,
+  );
 }
 
 export const procurementApi = {
@@ -161,6 +167,38 @@ export const procurementApi = {
   requests: () => requestJson<ProcurementRequestSummary[]>("/api/procurement/requests?limit=200"),
   request: (requestId: string) =>
     requestJson<ProcurementRequest>(`/api/procurement/requests/${requestId}`),
+  interactions: (requestId: string) =>
+    requestJson<HumanInteraction[]>(`/api/procurement/requests/${requestId}/interactions`),
+  interaction: (interactionId: string) =>
+    requestJson<HumanInteraction>(`/api/procurement/interactions/${interactionId}`),
+  answerInteraction: (
+    interactionId: string,
+    input: { answer: unknown; note?: string; artifact_ids?: string[] },
+    key: string,
+  ) => requestJson<ProcurementRunAccepted>(
+    `/api/procurement/interactions/${interactionId}/answer`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": key },
+      body: JSON.stringify(input),
+    },
+  ),
+  retryInteraction: (interactionId: string) =>
+    requestJson<ProcurementRunAccepted>(`/api/procurement/interactions/${interactionId}/retry`, {
+      method: "POST",
+    }),
+  cancelInteraction: (interactionId: string, reason?: string) =>
+    postJson<HumanInteraction>(`/api/procurement/interactions/${interactionId}/cancel`, { reason }),
+  async uploadInteractionArtifact(interactionId: string, file: File) {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return requestJson<HumanInteractionArtifact>(
+      `/api/procurement/interactions/${interactionId}/artifacts`,
+      { method: "POST", body: form },
+    );
+  },
+  operation: (operationId: string) =>
+    requestJson<ProcurementOperation>(`/api/procurement/operations/${operationId}`),
   aiTasks: (businessId?: string) => {
     const query = new URLSearchParams({ page: "0", size: "100" });
     if (businessId) query.set("business_id", businessId);
@@ -171,12 +209,12 @@ export const procurementApi = {
   retryAiTask: (aiTaskId: string) =>
     requestJson<AiTaskView>(`/api/procurement/ai-tasks/${aiTaskId}/retry`, {
       method: "POST",
-      headers: { "Idempotency-Key": idempotencyKey() },
+      headers: { "Idempotency-Key": newIdempotencyKey() },
     }),
   cancelAiTask: (aiTaskId: string) =>
     requestJson<AiTaskView>(`/api/procurement/ai-tasks/${aiTaskId}/cancel`, {
       method: "POST",
-      headers: { "Idempotency-Key": idempotencyKey() },
+      headers: { "Idempotency-Key": newIdempotencyKey() },
     }),
   reviews: (status?: ReviewStatus, page = 0, size = 100) => {
     const query = new URLSearchParams({ page: String(page), size: String(size) });
@@ -384,8 +422,13 @@ export const procurementApi = {
       received_quantity?: string | null;
       arrival_date?: string | null;
       notes?: string | null;
-    }
-  ) => postJson<OrderView>(`/api/procurement/orders/${id}/transition`, input),
+    },
+    key: string,
+  ) => requestJson<OrderView>(`/api/procurement/orders/${id}/transition`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": key },
+    body: JSON.stringify(input),
+  }),
   settlements: (status?: SettlementStatus, page = 0, size = 50) => {
     const query = new URLSearchParams({ page: String(page), size: String(size) });
     if (status) query.set("status", status);
@@ -393,8 +436,13 @@ export const procurementApi = {
   },
   transitionSettlement: (
     id: string,
-    input: { action: "settle" | "pay"; paid_at?: string | null; notes?: string | null }
-  ) => postJson<SettlementView>(`/api/procurement/settlements/${id}/transition`, input),
+    input: { action: "settle" | "pay"; paid_at?: string | null; notes?: string | null },
+    key: string,
+  ) => requestJson<SettlementView>(`/api/procurement/settlements/${id}/transition`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": key },
+    body: JSON.stringify(input),
+  }),
   insightsOverview: () => requestJson<InsightsOverview>("/api/procurement/insights/overview"),
   insightsTrend: (months = 6) =>
     requestJson<InsightTrendRow[]>(`/api/procurement/insights/trend?months=${months}`),

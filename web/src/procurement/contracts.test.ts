@@ -9,12 +9,17 @@ import {
   AI_TASK_STEPS,
   AI_TASK_TYPES,
   CONTRACT_STATUSES,
+  type HumanInteractionStatus,
   INVOICE_STATUSES,
   PROCUREMENT_STATUSES,
   type AiTaskView,
 } from "./types";
 
 type ContractDefinition = { enum: string[] };
+
+const HUMAN_INTERACTION_STATUSES: HumanInteractionStatus[] = [
+  "WAITING", "ANSWERED", "APPLIED", "STALE", "EXPIRED", "CANCELLED",
+];
 
 describe("procurement workbench contract", () => {
   it("keeps Web status values aligned with the shared contract", () => {
@@ -25,7 +30,23 @@ describe("procurement workbench contract", () => {
     expect([...AI_TASK_STEPS]).toEqual(definitions.AiTaskStep.enum);
     expect([...INVOICE_STATUSES]).toEqual(definitions.InvoiceStatus.enum);
     expect([...CONTRACT_STATUSES]).toEqual(definitions.ContractStatus.enum);
+    expect(HUMAN_INTERACTION_STATUSES).toEqual(definitions.HumanInteractionStatus.enum);
     expect(AI_STATUS_TRANSITIONS).toEqual(schema["x-ai-status-transitions"]);
+  });
+
+  it("publishes the complete human interaction and operation boundary", () => {
+    const definitions = schema.$defs as Record<string, Record<string, unknown>>;
+    expect(definitions.HumanInteractionView.required).toContain("answer_schema");
+    expect(definitions.HumanInteractionView.required).toContain("operation_id");
+    expect(definitions.HumanInteractionAnswerRequest.required).toEqual(["answer"]);
+    expect(definitions.HumanInteractionArtifact.required).toContain("sha256");
+    expect(definitions.ProcurementOperation.required).toContain("payload_sha256");
+  });
+
+  it("keeps missing draft quantity and unit as explicit unknown facts", () => {
+    const definitions = schema.$defs as Record<string, { properties?: Record<string, { type?: string[] }> }>;
+    expect(definitions.ProcurementRequirementView.properties?.quantity.type).toContain("null");
+    expect(definitions.ProcurementRequirementView.properties?.unit.type).toContain("null");
   });
 
   it("represents failure and stale results independently", () => {

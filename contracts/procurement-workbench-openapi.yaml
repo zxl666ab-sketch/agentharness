@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Caijiatai Procurement Workbench API
-  version: 1.0.0
+  version: 1.1.0
   description: Public workbench API. Java is the owner of every resource in this contract.
 servers:
   - url: http://127.0.0.1:8741
@@ -21,8 +21,7 @@ paths:
           content:
             application/json:
               schema: {$ref: './procurement-workbench.schema.json#/$defs/AiTaskView'}
-        '409': {description: Idempotency conflict, stale generation, or invalid task state.}
-        '409': {description: Quotes or confirmed requirements are incomplete, or the idempotency key conflicts.}
+        '409': {description: Idempotency conflict, stale generation, invalid task state, or incomplete quotes and confirmed requirements.}
   /api/procurement/ai-tasks:
     get:
       operationId: listAiTasks
@@ -202,14 +201,15 @@ paths:
         - {$ref: '#/components/parameters/PageSize'}
       responses:
         '200':
-          description: Paged purchase orders. Approved-task orders are lazily derived before querying.
+          description: Paged purchase orders. Formal approval creates the unique order transactionally; this query is read-only.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/OrderPage'}
   /api/procurement/orders/{orderId}:
     get:
       operationId: getOrder
-      parameters: [{$ref: '#/components/parameters/OrderId'}]
+      parameters:
+        - {$ref: '#/components/parameters/OrderId'}
       responses:
         '200':
           description: Order detail with artifacts and settlement.
@@ -220,7 +220,9 @@ paths:
   /api/procurement/orders/{orderId}/transition:
     post:
       operationId: transitionOrder
-      parameters: [{$ref: '#/components/parameters/OrderId'}]
+      parameters:
+        - {$ref: '#/components/parameters/OrderId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody:
         required: true
         content:
@@ -234,7 +236,7 @@ paths:
               schema: {$ref: './procurement-workbench.schema.json#/$defs/OrderView'}
         '400': {description: Missing receive fields or invalid action.}
         '404': {description: Unknown order.}
-        '409': {description: Illegal transition, over-receipt, missing landed cost, or version conflict.}
+        '409': {description: Illegal transition, over-receipt, missing landed cost, version conflict, or idempotency payload conflict.}
   /api/procurement/settlements:
     get:
       operationId: listSettlements
@@ -253,7 +255,9 @@ paths:
   /api/procurement/settlements/{settlementId}/transition:
     post:
       operationId: transitionSettlement
-      parameters: [{$ref: '#/components/parameters/SettlementId'}]
+      parameters:
+        - {$ref: '#/components/parameters/SettlementId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody:
         required: true
         content:
@@ -267,7 +271,7 @@ paths:
               schema: {$ref: './procurement-workbench.schema.json#/$defs/SettlementView'}
         '400': {description: Missing paid_at or invalid action.}
         '404': {description: Unknown settlement.}
-        '409': {description: Illegal transition or version conflict.}
+        '409': {description: Illegal transition, invoice gate, version conflict, or idempotency payload conflict.}
   /api/procurement/insights/overview:
     get:
       operationId: insightsOverview
@@ -397,6 +401,113 @@ paths:
           content:
             application/json:
               schema: {$ref: './procurement-workbench.schema.json#/$defs/CorrectionPage'}
+  /api/procurement/requests/{businessId}/interactions:
+    get:
+      operationId: listHumanInteractions
+      parameters: [{$ref: '#/components/parameters/BusinessId'}]
+      responses:
+        '200':
+          description: Durable human questions for the procurement task, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: './procurement-workbench.schema.json#/$defs/HumanInteractionView'}
+        '404': {description: Unknown procurement task.}
+  /api/procurement/interactions/{interactionId}:
+    get:
+      operationId: getHumanInteraction
+      parameters: [{$ref: '#/components/parameters/InteractionId'}]
+      responses:
+        '200':
+          description: Current durable interaction state.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/HumanInteractionView'}
+        '404': {description: Unknown interaction.}
+  /api/procurement/interactions/{interactionId}/answer:
+    post:
+      operationId: answerHumanInteraction
+      parameters:
+        - {$ref: '#/components/parameters/InteractionId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: './procurement-workbench.schema.json#/$defs/HumanInteractionAnswerRequest'}
+      responses:
+        '202':
+          description: Answer and durable Agent resume command were stored atomically.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/ProcurementRunAccepted'}
+        '409': {description: Already answered, stale, expired, cancelled, or idempotency payload conflict.}
+        '422': {description: Answer does not satisfy the server-owned answer schema.}
+  /api/procurement/interactions/{interactionId}/artifacts:
+    post:
+      operationId: uploadHumanInteractionArtifact
+      parameters: [{$ref: '#/components/parameters/InteractionId'}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+      responses:
+        '200':
+          description: Supplemental file persisted in the Java Artifact Store and bound to this task and interaction.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/HumanInteractionArtifact'}
+        '409': {description: Interaction is not waiting for input.}
+        '413': {description: File exceeds the configured limit.}
+        '415': {description: Unsupported supplemental file type.}
+  /api/procurement/interactions/{interactionId}/retry:
+    post:
+      operationId: retryHumanInteractionResume
+      parameters: [{$ref: '#/components/parameters/InteractionId'}]
+      responses:
+        '202':
+          description: The original operation is re-dispatched without accepting another answer.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/ProcurementRunAccepted'}
+        '409': {description: Interaction has no retryable answered operation.}
+  /api/procurement/interactions/{interactionId}/cancel:
+    post:
+      operationId: cancelHumanInteraction
+      parameters: [{$ref: '#/components/parameters/InteractionId'}]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                reason: {type: [string, 'null'], maxLength: 500}
+      responses:
+        '200':
+          description: Waiting interaction and its task are cancelled with audit evidence.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/HumanInteractionView'}
+        '409': {description: Interaction is no longer waiting.}
+  /api/procurement/operations/{operationId}:
+    get:
+      operationId: getProcurementOperation
+      parameters: [{$ref: '#/components/parameters/OperationId'}]
+      responses:
+        '200':
+          description: Durable Java-to-Agent command state and result.
+          content:
+            application/json:
+              schema: {$ref: './procurement-workbench.schema.json#/$defs/ProcurementOperation'}
+        '404': {description: Unknown operation.}
   /api/procurement/invoices:
     post:
       operationId: uploadInvoice
@@ -421,7 +532,7 @@ paths:
           content:
             application/json:
               schema: {$ref: './procurement-workbench.schema.json#/$defs/ProcurementRunAccepted'}
-        '409': {description: Duplicate invoice no, invalid parse result, or idempotency conflict.}
+        '409': {description: Duplicate invoice no, completed order, invalid parse result, or idempotency conflict.}
     get:
       operationId: listInvoices
       parameters:
@@ -596,6 +707,16 @@ components:
       in: path
       required: true
       schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+    InteractionId:
+      name: interactionId
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+    OperationId:
+      name: operationId
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
     AiStatus:
       name: status
       in: query

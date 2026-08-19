@@ -335,6 +335,14 @@ def extract_requirement(messages: list[Message]) -> dict[str, Any]:
                 return value
         return default
 
+    explicit_title = re.search(
+        r"请创建[‘'\"“]([^’'\"”]{1,200})[’'\"”]任务", text
+    )
+    explicit_item = re.search(
+        r"(?:^|\n)\s*(?:\d+[.、]?\s*)?物料\s*[:：]\s*([^，,；;。.!！?\n]+)",
+        text,
+    )
+
     size = re.search(
         r"(\d+(?:\.\d+)?)\s*(?:mm|毫米)?\s*[xX×*]\s*"
         r"(\d+(?:\.\d+)?)\s*(?:mm|毫米)?",
@@ -384,6 +392,8 @@ def extract_requirement(messages: list[Message]) -> dict[str, Any]:
         item_name = re.sub(
             rf"\s*[\d,]+(?:\.\d+)?\s*(?:{QUANTITY_UNITS})\s*$", "", item_name
         ).strip()
+        if explicit_item:
+            item_name = explicit_item.group(1).strip()
         item_name = item_name or "采购物品"
         dynamic_specs: dict[str, dict[str, Any]] = {}
         width_match = re.search(
@@ -461,6 +471,20 @@ def extract_requirement(messages: list[Message]) -> dict[str, Any]:
                     "match": "exact",
                     "priority": "hard",
                 }
+        print_colors = first_number(
+            (
+                r"(?:印刷色数|印刷)\s*[:：]?\s*(\d+)\s*色",
+                r"(\d+)\s*色印刷",
+            )
+        )
+        if print_colors is not None:
+            dynamic_specs["print_colors"] = {
+                "label": "印刷色数",
+                "type": "number",
+                "value": print_colors,
+                "match": "exact",
+                "priority": "hard",
+            }
         lead_days = int(
             first_number(
                 (
@@ -482,7 +506,7 @@ def extract_requirement(messages: list[Message]) -> dict[str, Any]:
         if usd_rate is not None:
             fx_rates["USD"] = usd_rate
         max_unit_cost = re.search(
-            r"(?:到货单价|单价上限|预算单价|单价预算)[^0-9]*(\d+(?:\.\d+)?)",
+            r"(?:目标落地单价|落地单价|到货单价|单价上限|预算单价|单价预算)[^0-9]*(\d+(?:\.\d+)?)",
             text,
         )
         constraints: dict[str, Any] = {
@@ -493,16 +517,33 @@ def extract_requirement(messages: list[Message]) -> dict[str, Any]:
             "destination": "",
         }
         destination_match = re.search(
+            r"(?:目标仓库|目的仓库|送货仓库)\s*[:：]?\s*([^，,；;。.!！?\n]+)|"
             r"(?:送货|配送|交付|送达)\s*(?:到|至)?\s*([^，,；;。.!！?\n]+)",
             text,
         )
         if destination_match:
-            constraints["destination"] = destination_match.group(1).strip()
+            constraints["destination"] = next(
+                group.strip() for group in destination_match.groups() if group
+            )
+        size_tolerance = first_number(
+            (
+                r"尺寸(?:允许)?(?:偏差|公差|容差)\s*[:：]?\s*[±+\-]?\s*(\d+(?:\.\d+)?)",
+            )
+        )
+        thickness_tolerance = first_number(
+            (
+                r"厚度(?:允许)?(?:偏差|公差|容差)\s*[:：]?\s*[±+\-]?\s*(\d+(?:\.\d+)?)",
+            )
+        )
+        if size_tolerance is not None:
+            constraints["size_tolerance_mm"] = size_tolerance
+        if thickness_tolerance is not None:
+            constraints["thickness_tolerance_um"] = thickness_tolerance
         if max_unit_cost:
             constraints["max_landed_unit_cost"] = max_unit_cost.group(1)
         return {
             "schema_version": REQUIREMENT_SCHEMA_VERSION,
-            "title": f"{item_name}采购询价",
+            "title": explicit_title.group(1).strip() if explicit_title else f"{item_name}采购询价",
             "category": "general",
             "item_name": item_name,
             "quantity": quantity_text,

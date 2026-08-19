@@ -24,6 +24,8 @@ function order(overrides: Partial<OrderView>): OrderView {
     task_reference: "RFQ-TEST-0001",
     task_title: "测试任务",
     artifacts: [],
+    invoice_count: 0,
+    invoice_status: null,
     settlement: null,
     created_at: "2026-08-13T00:00:00Z",
     updated_at: "2026-08-13T00:00:00Z",
@@ -44,6 +46,7 @@ function settlement(overrides: Partial<SettlementView>): SettlementView {
     version: 1,
     order_no: "PO-TEST-0001",
     task_id: "task-1",
+    invoice_reconciled: true,
     created_at: "2026-08-13T00:00:00Z",
     updated_at: "2026-08-13T00:00:00Z",
     ...overrides,
@@ -71,7 +74,7 @@ const receivedOrder = order({
 const settledSettlement = settlement({});
 const unsettledSettlement = settlement({ id: "settlement-2", settlement_no: "ST-TEST-0002", status: "UNSETTLED" });
 
-type FetchCall = { method: string; url: string; body?: unknown };
+type FetchCall = { method: string; url: string; body?: unknown; idempotencyKey?: string | null };
 const calls: FetchCall[] = [];
 
 function jsonResponse(body: unknown, status = 200) {
@@ -89,7 +92,12 @@ function mockFetch(transition: (url: string, body: unknown) => Promise<Response>
     if (init?.body) {
       try { body = JSON.parse(String(init.body)); } catch { body = String(init.body); }
     }
-    calls.push({ method, url, body });
+    calls.push({
+      method,
+      url,
+      body,
+      idempotencyKey: new Headers(init?.headers).get("Idempotency-Key"),
+    });
     if (method === "POST") return transition(url, body);
     if (url.includes("/orders?")) {
       return jsonResponse({ items: [shippedOrder, receivedOrder], page: 0, size: 100, total: 2 });
@@ -115,11 +123,13 @@ function client() {
 function mount(host: HTMLElement) {
   const queryClient = client();
   const root = createRoot(host);
-  root.render(
-    <QueryClientProvider client={queryClient}>
-      <OrderCenter />
-    </QueryClientProvider>,
-  );
+  act(() => {
+    root.render(
+      <QueryClientProvider client={queryClient}>
+        <OrderCenter />
+      </QueryClientProvider>,
+    );
+  });
   return root;
 }
 
@@ -169,11 +179,13 @@ describe("OrderCenter operations", () => {
       total: 1,
     });
     const root = createRoot(host);
-    root.render(
-      <QueryClientProvider client={queryClient}>
-        <OrderCenter />
-      </QueryClientProvider>,
-    );
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <OrderCenter />
+        </QueryClientProvider>,
+      );
+    });
     await act(async () => { await Promise.resolve(); });
 
     expect(host.textContent).toContain("10,400.00");
@@ -200,13 +212,46 @@ describe("OrderCenter operations", () => {
       setInput(dialog.querySelector('input[type="number"]') as HTMLInputElement, "100");
       setInput(dialog.querySelector('input[type="date"]') as HTMLInputElement, "2026-08-20");
     });
-    await act(async () => { clickButton(host, "确认收货并派生对账单"); });
+    await act(async () => { clickButton(host, "登记本批收货"); });
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
     expect(host.querySelector("#receive-title")).toBeTruthy();
     expect(host.querySelector('[role="alert"]')?.textContent).toContain("模拟服务器故障");
     const posts = calls.filter((item) => item.method === "POST" && item.url.includes("/transition"));
     expect(posts.length).toBe(1);
+    await act(async () => root.unmount());
+  });
+
+  it("reuses the same idempotency key when the same receive payload is retried after failure", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    let attempts = 0;
+    mockFetch(() => {
+      attempts += 1;
+      return attempts === 1
+        ? jsonResponse({ message: "模拟网络响应失败" }, 500)
+        : jsonResponse({ ...shippedOrder, status: "PARTIALLY_RECEIVED", received_quantity: "100" });
+    });
+    const root = mount(host);
+    await act(async () => { await Promise.resolve(); });
+
+    const card = [...host.querySelectorAll(".proc-order-card")].find((item) => item.textContent?.includes("PO-TEST-SHIP"))!;
+    const openReceive = [...card.querySelectorAll("button")].find((item) => item.textContent?.includes("确认收货"))!;
+    await act(async () => { openReceive.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    const dialog = host.querySelector("section:has(#receive-title)")!;
+    await act(async () => {
+      setInput(dialog.querySelector('input[type="number"]') as HTMLInputElement, "100");
+      setInput(dialog.querySelector('input[type="date"]') as HTMLInputElement, "2026-08-20");
+    });
+    await act(async () => { clickButton(host, "登记本批收货"); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { clickButton(host, "登记本批收货"); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+
+    const posts = calls.filter((item) => item.method === "POST" && item.url.includes("/transition"));
+    expect(posts).toHaveLength(2);
+    expect(posts[0].idempotencyKey).toBeTruthy();
+    expect(posts[1].idempotencyKey).toBe(posts[0].idempotencyKey);
     await act(async () => root.unmount());
   });
 
@@ -227,7 +272,7 @@ describe("OrderCenter operations", () => {
         setInput(dialog.querySelector('input[type="number"]') as HTMLInputElement, bad);
         setInput(dialog.querySelector('input[type="date"]') as HTMLInputElement, "2026-08-20");
       });
-      await act(async () => { clickButton(host, "确认收货并派生对账单"); });
+      await act(async () => { clickButton(host, "登记本批收货"); });
       expect(host.querySelector("#receive-title")).toBeTruthy();
       expect(host.querySelector('[role="alert"]')?.textContent).toContain("数量");
     }
@@ -297,7 +342,7 @@ describe("OrderCenter operations", () => {
       setInput(dialog.querySelector('input[type="number"]') as HTMLInputElement, "100");
       setInput(dialog.querySelector('input[type="date"]') as HTMLInputElement, "2026-08-20");
     });
-    const confirm = [...host.querySelectorAll("button")].find((item) => item.textContent?.includes("确认收货并派生对账单")) as HTMLButtonElement;
+    const confirm = [...host.querySelectorAll("button")].find((item) => item.textContent?.includes("登记本批收货")) as HTMLButtonElement;
     await act(async () => { confirm.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     // While the first transition is still in flight the confirm button is disabled,
     // so a second click cannot fire a duplicate request.
@@ -313,7 +358,7 @@ describe("OrderCenter operations", () => {
   it("shows a success notice after a successful receive", async () => {
     const host = document.createElement("div");
     document.body.append(host);
-    mockFetch(() => jsonResponse({ ...shippedOrder, status: "RECEIVED", received_quantity: "100", arrival_date: "2026-08-20T00:00:00Z" }));
+    mockFetch(() => jsonResponse({ ...shippedOrder, status: "RECEIVED", received_quantity: "300", arrival_date: "2026-08-20T00:00:00Z" }));
     const root = mount(host);
     await act(async () => { await Promise.resolve(); });
 
@@ -322,14 +367,77 @@ describe("OrderCenter operations", () => {
     await act(async () => { openReceive.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     const dialog = host.querySelector("section:has(#receive-title)")!;
     await act(async () => {
-      setInput(dialog.querySelector('input[type="number"]') as HTMLInputElement, "100");
+      setInput(dialog.querySelector('input[type="number"]') as HTMLInputElement, "300");
       setInput(dialog.querySelector('input[type="date"]') as HTMLInputElement, "2026-08-20");
     });
-    await act(async () => { clickButton(host, "确认收货并派生对账单"); });
+    await act(async () => { clickButton(host, "登记本批收货"); });
     await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
 
     expect(host.querySelector("#receive-title")).toBeFalsy();
-    expect(host.querySelector('[role="status"]')?.textContent).toContain("已确认收货");
+    expect(host.querySelector('[role="status"]')?.textContent).toContain("最后一批收货");
+    await act(async () => root.unmount());
+  });
+
+  it("offers only the remaining quantity for a partially received order", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    mockFetch(() => jsonResponse({}));
+    const queryClient = client();
+    queryClient.setQueryData(["procurement-orders", ""], {
+      items: [order({
+        id: "order-partial",
+        order_no: "PO-TEST-PARTIAL",
+        status: "PARTIALLY_RECEIVED",
+        quantity: "300",
+        received_quantity: "100",
+      })],
+      page: 0, size: 100, total: 1,
+    });
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <OrderCenter />
+        </QueryClientProvider>,
+      );
+    });
+
+    expect(host.textContent).toContain("部分收货");
+    await act(async () => { clickButton(host, "继续收货"); });
+    const dialog = host.querySelector("section:has(#receive-title)")!;
+    expect((dialog.querySelector('input[type="number"]') as HTMLInputElement).value).toBe("200");
+    expect(dialog.textContent).toContain("剩余数量 200");
+    await act(async () => root.unmount());
+  });
+
+  it("keeps decimal precision when calculating the remaining receipt quantity", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    mockFetch(() => jsonResponse({}));
+    const queryClient = client();
+    queryClient.setQueryData(["procurement-orders", ""], {
+      items: [order({
+        id: "order-decimal-partial",
+        order_no: "PO-TEST-DECIMAL",
+        status: "PARTIALLY_RECEIVED",
+        quantity: "0.300000000000000000",
+        received_quantity: "0.100000000000000000",
+      })],
+      page: 0, size: 100, total: 1,
+    });
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <OrderCenter />
+        </QueryClientProvider>,
+      );
+    });
+
+    await act(async () => { clickButton(host, "继续收货"); });
+    const dialog = host.querySelector("section:has(#receive-title)")!;
+    expect((dialog.querySelector('input[type="number"]') as HTMLInputElement).value).toBe("0.2");
+    expect(dialog.textContent).toContain("剩余数量 0.2");
     await act(async () => root.unmount());
   });
 });

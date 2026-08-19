@@ -3,6 +3,7 @@ package com.caijiatai.procurement.agent;
 import jakarta.persistence.LockModeType;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
@@ -13,6 +14,15 @@ import jakarta.persistence.QueryHint;
 import org.springframework.data.repository.query.Param;
 
 public interface AgentCommandRepository extends JpaRepository<AgentCommand, String> {
+    boolean existsByAggregateIdAndOperationTypeAndStatusIn(
+            String aggregateId, String operationType, List<String> statuses);
+
+    Optional<AgentCommand> findFirstByAggregateIdAndOperationTypeOrderByAcceptedAtAsc(
+            String aggregateId, String operationType);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select command from AgentCommand command where command.operationId = :operationId")
+    Optional<AgentCommand> lockById(@Param("operationId") String operationId);
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @QueryHints(@QueryHint(name = "jakarta.persistence.lock.timeout", value = "-2"))
     @Query("select command from AgentCommand command where command.status in ('pending', 'accepted') "

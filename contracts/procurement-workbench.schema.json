@@ -9,7 +9,11 @@
     { "$ref": "#/$defs/AiResultView" },
     { "$ref": "#/$defs/ReviewView" },
     { "$ref": "#/$defs/AiTaskCommandEnvelope" },
-    { "$ref": "#/$defs/AiTaskEventEnvelope" }
+    { "$ref": "#/$defs/AiTaskEventEnvelope" },
+    { "$ref": "#/$defs/HumanInteractionView" },
+    { "$ref": "#/$defs/HumanInteractionAnswerRequest" },
+    { "$ref": "#/$defs/HumanInteractionArtifact" },
+    { "$ref": "#/$defs/ProcurementOperation" }
   ],
   "x-ai-status-transitions": {
     "PENDING": ["DISPATCHING", "CANCELLED"],
@@ -42,6 +46,7 @@
       "type": "string",
       "enum": [
         "draft",
+        "waiting_human",
         "collecting",
         "review",
         "ready",
@@ -51,6 +56,218 @@
         "no_award",
         "cancelled"
       ]
+    },
+    "ProcurementRequirementView": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["quantity", "unit", "requirement_confirmed"],
+      "properties": {
+        "quantity": { "type": ["string", "null"] },
+        "unit": { "type": ["string", "null"] },
+        "requirement_confirmed": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "requirement_confirmed": { "const": true } },
+            "required": ["requirement_confirmed"]
+          },
+          "then": {
+            "properties": {
+              "quantity": { "type": "string", "pattern": "^(?!0+(?:\\.0+)?$)\\d+(?:\\.\\d+)?$" },
+              "unit": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ]
+    },
+    "HumanInteractionStatus": {
+      "type": "string",
+      "enum": ["WAITING", "ANSWERED", "APPLIED", "STALE", "EXPIRED", "CANCELLED"]
+    },
+    "HumanInteractionOption": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["value"],
+          "properties": {
+            "value": { "type": "string", "minLength": 1 },
+            "label": { "type": "string" },
+            "description": { "type": "string" },
+            "source": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "HumanInteractionField": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "label", "type"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "type": {
+          "type": "string",
+          "enum": ["string", "number", "boolean", "date", "single_choice", "multiple_choice"]
+        },
+        "required": { "type": "boolean" },
+        "unit": { "type": "string" },
+        "options": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/HumanInteractionOption" },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      }
+    },
+    "HumanInteractionAnswerSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["string", "number", "boolean", "date", "single_choice", "multiple_choice", "field_review", "file_upload"]
+        },
+        "label": { "type": "string" },
+        "options": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/HumanInteractionOption" },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "fields": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/HumanInteractionField" },
+          "minItems": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "type": { "enum": ["single_choice", "multiple_choice"] } },
+            "required": ["type"]
+          },
+          "then": { "required": ["options"] }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "field_review" } },
+            "required": ["type"]
+          },
+          "then": { "required": ["fields"] }
+        }
+      ]
+    },
+    "HumanInteractionView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "task_id", "run_id", "checkpoint_id", "generation", "kind", "question", "reason",
+        "business_step", "related_fields", "related_artifact_ids", "answer_schema",
+        "status", "answer", "answer_note", "answer_artifact_ids", "answered_by",
+        "answered_at", "applied_at", "expires_at", "cancel_reason", "operation_id",
+        "created_at", "updated_at"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/Id32" },
+        "task_id": { "$ref": "#/$defs/Id32" },
+        "run_id": { "oneOf": [{ "$ref": "#/$defs/Id32" }, { "type": "null" }] },
+        "checkpoint_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 64 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "question": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "business_step": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "related_fields": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "related_artifact_ids": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^jb[0-9a-f]{32}$" },
+          "uniqueItems": true
+        },
+        "answer_schema": { "$ref": "#/$defs/HumanInteractionAnswerSchema" },
+        "status": { "$ref": "#/$defs/HumanInteractionStatus" },
+        "answer": {},
+        "answer_note": { "type": ["string", "null"] },
+        "answer_artifact_ids": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^jb[0-9a-f]{32}$" },
+              "uniqueItems": true
+            },
+            { "type": "null" }
+          ]
+        },
+        "answered_by": { "type": ["string", "null"] },
+        "answered_at": { "oneOf": [{ "$ref": "#/$defs/DateTime" }, { "type": "null" }] },
+        "applied_at": { "oneOf": [{ "$ref": "#/$defs/DateTime" }, { "type": "null" }] },
+        "expires_at": { "oneOf": [{ "$ref": "#/$defs/DateTime" }, { "type": "null" }] },
+        "cancel_reason": { "type": ["string", "null"] },
+        "operation_id": { "type": ["string", "null"], "format": "uuid" },
+        "created_at": { "$ref": "#/$defs/DateTime" },
+        "updated_at": { "$ref": "#/$defs/DateTime" }
+      }
+    },
+    "HumanInteractionAnswerRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["answer"],
+      "properties": {
+        "answer": {},
+        "note": { "type": ["string", "null"], "maxLength": 2000 },
+        "artifact_ids": {
+          "type": ["array", "null"],
+          "items": { "type": "string", "pattern": "^jb[0-9a-f]{32}$" },
+          "maxItems": 20,
+          "uniqueItems": true
+        }
+      }
+    },
+    "HumanInteractionArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "filename", "content_type", "size_bytes", "sha256"],
+      "properties": {
+        "artifact_id": { "type": "string", "pattern": "^jb[0-9a-f]{32}$" },
+        "filename": { "type": "string", "minLength": 1 },
+        "content_type": { "type": "string", "minLength": 1 },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/Sha256" }
+      }
+    },
+    "ProcurementOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id", "operation_type", "aggregate_id", "generation",
+        "expected_task_version", "payload_sha256", "status", "attempt_count",
+        "retryable", "last_error", "result", "accepted_at", "completed_at"
+      ],
+      "properties": {
+        "operation_id": { "type": "string", "format": "uuid" },
+        "operation_type": { "type": "string", "minLength": 1 },
+        "aggregate_id": { "$ref": "#/$defs/Id32" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "expected_task_version": { "type": "integer", "minimum": 0 },
+        "payload_sha256": { "$ref": "#/$defs/Sha256" },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "dispatching", "published", "accepted", "completed", "failed", "cancelled"]
+        },
+        "attempt_count": { "type": "integer", "minimum": 0 },
+        "retryable": { "type": "boolean" },
+        "last_error": { "type": ["string", "null"] },
+        "result": { "type": ["object", "null"] },
+        "accepted_at": { "oneOf": [{ "$ref": "#/$defs/DateTime" }, { "type": "null" }] },
+        "completed_at": { "oneOf": [{ "$ref": "#/$defs/DateTime" }, { "type": "null" }] }
+      }
     },
     "SupplierStatus": {
       "type": "string",
@@ -353,7 +570,7 @@
     },
     "OrderStatus": {
       "type": "string",
-      "enum": ["PENDING_SHIPMENT", "SHIPPED", "RECEIVED", "CLOSED"]
+      "enum": ["PENDING_SHIPMENT", "SHIPPED", "PARTIALLY_RECEIVED", "RECEIVED", "CLOSED"]
     },
     "OrderAction": {
       "type": "string",
@@ -409,6 +626,8 @@
         "quantity",
         "unit",
         "status",
+        "invoice_count",
+        "invoice_status",
         "version",
         "created_at",
         "updated_at"
@@ -430,6 +649,10 @@
         "task_reference": { "type": ["string", "null"] },
         "task_title": { "type": ["string", "null"] },
         "artifacts": { "type": "array", "items": { "$ref": "#/$defs/OrderArtifactView" } },
+        "invoice_count": { "type": "integer", "minimum": 0 },
+        "invoice_status": {
+          "oneOf": [{ "$ref": "#/$defs/InvoiceStatus" }, { "type": "null" }]
+        },
         "settlement": {
           "oneOf": [{ "$ref": "#/$defs/OrderSettlementView" }, { "type": "null" }]
         },
@@ -458,6 +681,7 @@
         "supplier_name",
         "total_amount",
         "status",
+        "invoice_reconciled",
         "version",
         "created_at",
         "updated_at"
@@ -474,6 +698,7 @@
         "version": { "type": "integer", "minimum": 0 },
         "order_no": { "type": ["string", "null"] },
         "task_id": { "type": ["string", "null"] },
+        "invoice_reconciled": { "type": "boolean" },
         "created_at": { "$ref": "#/$defs/DateTime" },
         "updated_at": { "$ref": "#/$defs/DateTime" }
       }

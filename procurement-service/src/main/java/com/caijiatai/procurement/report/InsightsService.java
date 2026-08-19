@@ -151,6 +151,8 @@ public class InsightsService {
         value.put("orders", orders.count());
         value.put("orders_pending_shipment", orders.countByStatus(OrderStatus.PENDING_SHIPMENT.wireValue()));
         value.put("orders_shipped", orders.countByStatus(OrderStatus.SHIPPED.wireValue()));
+        value.put("orders_partially_received",
+                orders.countByStatus(OrderStatus.PARTIALLY_RECEIVED.wireValue()));
         value.put("orders_received", orders.countByStatus(OrderStatus.RECEIVED.wireValue()));
         value.put("orders_closed", orders.countByStatus(OrderStatus.CLOSED.wireValue()));
         value.put("settlements_unsettled", settlements.countByStatus(SettlementStatus.UNSETTLED.wireValue()));

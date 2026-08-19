@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ComparisonView } from "./ComparisonView";
 import { AiTaskRecovery } from "./AiTaskRecovery";
 import { NewProcurementConversation, ProcurementConversation } from "./ProcurementConversation";
+import { ProcurementWorkbench } from "./ProcurementWorkbench";
 import { QuoteWorkspace } from "./QuoteWorkspace";
 import { RequirementReview } from "./RequirementReview";
 import { WorkbenchHome } from "./WorkbenchHome";
@@ -209,7 +210,7 @@ function allExcluded(): ProcurementRequest {
 }
 
 describe("procurement workflow views", () => {
-  it("renders workbench metrics as actionable filters and only real navigation", () => {
+  it("renders a task-first workbench and only real navigation", () => {
     const home = renderToString(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
         <WorkbenchHome
@@ -218,13 +219,15 @@ describe("procurement workflow views", () => {
           aiTasks={[]}
           reviews={[]}
           loading={false}
-          onCreate={() => undefined}
+          createBusy={false}
+          maxFileBytes={5 * 1024 * 1024}
+          maxTotalBytes={20 * 1024 * 1024}
+          maxQuotes={10}
+          onStart={async () => undefined}
           onOpenTask={() => undefined}
           onOpenTasks={() => undefined}
           onOpenView={() => undefined}
           onOpenOrders={() => undefined}
-          onOpenSuppliers={() => undefined}
-          onOpenReports={() => undefined}
         />
       </QueryClientProvider>
     );
@@ -232,17 +235,22 @@ describe("procurement workflow views", () => {
       <WorkbenchNavigation active="workbench" role="admin" aiAttention={0} reviewAttention={0} onChange={() => undefined} />
     );
 
-    expect(home).toContain("管理驾驶舱");
-    expect(home).toContain("成本节约率");
-    expect(home).toContain("待我审批");
+    expect(home).toContain("开始采购比价");
+    expect(home).toContain("开始解析报价");
+    expect(home).toContain("演示数据");
+    expect(home).toContain("等待字段复核");
+    expect(home).toContain("等待确认采购方案");
     expect(home).toContain("待收货订单");
-    expect(home).toMatch(/<button[^>]*><[^>]+>.*采购任务/s);
-    expect(home).toContain("待处理");
-    expect(home).toContain("等待人工审核");
+    expect(home).toContain("发票差异待处理");
+    expect(home).toContain("付款被拦截");
+    expect(home).not.toContain("管理驾驶舱");
+    expect(home).not.toContain("成本节约率");
     expect(navigation).toContain("工作台");
-    expect(navigation).toContain("AI 任务");
-    expect(navigation).toContain("供应商管理");
-    expect(navigation).not.toContain("供应商档案");
+    expect(navigation).toContain("履约中心");
+    expect(navigation).toContain("业务资料");
+    expect(navigation).toContain("管理与技术");
+    expect(navigation).toContain("AI 任务诊断");
+    expect(navigation).toContain("供应商档案");
   });
 
   it("filters navigation by demo role (buyer hides approval views, admin sees all)", () => {
@@ -252,11 +260,12 @@ describe("procurement workflow views", () => {
     const approver = renderToString(
       <WorkbenchNavigation active="workbench" role="approver" aiAttention={2} reviewAttention={1} onChange={() => undefined} />
     );
-    expect(buyer).toContain("供应商管理");
-    expect(approver).toContain("AI 任务");
+    expect(buyer).toContain("供应商档案");
+    expect(approver).toContain("AI 任务诊断");
     expect(approver).toContain("人工审核");
+    expect(approver).toContain("履约中心");
     expect(approver).not.toContain("采购任务");
-    expect(approver).not.toContain("供应商管理");
+    expect(approver).not.toContain("供应商档案");
   });
 
   it("disables blind retry for non-retryable AI failures and keeps recovery actions visible", () => {
@@ -353,6 +362,42 @@ describe("procurement workflow views", () => {
 
     await expect(procurementApi.analyze("request"))
       .rejects.toThrow("缺少 USD 汇率不是有效数值");
+    vi.unstubAllGlobals();
+  });
+
+  it("does not report a still-running operation as successful after the polling deadline", async () => {
+    vi.useFakeTimers();
+    const accepted = new Response(JSON.stringify({
+      operation_id: "operation",
+      purchase_request_id: "request",
+      session_id: "session",
+      run_id: "run",
+      status: "accepted",
+      location: "/api/procurement/operations/operation",
+    }), { status: 202, headers: { "Content-Type": "application/json" } });
+    const pending = new Response(JSON.stringify({
+      operation_id: "operation",
+      operation_type: "analyze",
+      aggregate_id: "request",
+      generation: 1,
+      expected_task_version: 1,
+      payload_sha256: "a".repeat(64),
+      status: "pending",
+      attempt_count: 1,
+      retryable: true,
+      result: null,
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(accepted)
+      .mockImplementation(() => Promise.resolve(pending.clone()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = procurementApi.analyze("request");
+    const expectation = expect(result).rejects.toThrow(/仍在后台处理中/);
+    await vi.advanceTimersByTimeAsync(31_000);
+    await expectation;
+
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -727,6 +772,36 @@ describe("procurement workflow views", () => {
     expect(html).toContain("准备中");
   });
 
+  it("shows unknown draft quantity and unit as pending instead of invented facts", () => {
+    const waiting: ProcurementRequest = {
+      ...request,
+      status: "waiting_human",
+      requirement_confirmed: false,
+      item_name: "待识别",
+      quantity: null,
+      unit: null,
+    };
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(["procurement-meta"], meta);
+    client.setQueryData(["procurement-requests"], [waiting]);
+    client.setQueryData(["procurement-ai-tasks"], { items: [], page: 0, size: 100, total: 0 });
+    client.setQueryData(["procurement-reviews"], { items: [], page: 0, size: 100, total: 0 });
+    client.setQueryData(["procurement-request", waiting.id], waiting);
+    client.setQueryData(["procurement-interactions", waiting.id], []);
+    client.setQueryData(["procurement-ai-tasks", waiting.id], { items: [], page: 0, size: 100, total: 0 });
+    window.history.replaceState({}, "", `/?view=tasks&task=${waiting.id}`);
+
+    const html = renderToString(
+      <QueryClientProvider client={client}>
+        <ProcurementWorkbench theme="light" backendVersion="0.5.0" onToggleTheme={() => undefined} />
+      </QueryClientProvider>,
+    );
+
+    expect(html.match(/待补充/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(html).not.toContain("1 piece");
+    expect(html).not.toContain("null null");
+  });
+
   it("explains deterministic cost ranking after excluding hard violations", () => {
     const html = renderToString(
       <ComparisonView request={analyzed()} busy={null} onAnalyze={async () => undefined} onApprove={async () => undefined} />
@@ -780,16 +855,23 @@ describe("procurement workflow views", () => {
     const html = renderToString(<ReportView request={approved} report={report} loading={false} />);
     expect(html).toContain("已选定");
     expect(html).toContain("Alpha Packaging");
+    expect(html).toContain("证据指纹");
+    expect(html).toContain("报价原件与字段来源");
+    expect(html).toContain("采购审计时间线");
+    const markdown = procurementReportMarkdown(report);
+    expect(markdown).toContain("# 采购审批报告");
+    expect(markdown).toContain("选定供应商：Alpha Packaging");
+    expect(markdown).toContain("供应商已人工批准");
+    expect(markdown).toContain("分析运行 ID：run");
+  });
 
 describe("workbench home entries", () => {
-  it("home metric entries carry the correct task filter", async () => {
+  it("home task entries carry the correct destination", async () => {
     const host = document.createElement("div");
     document.body.append(host);
     const onOpenTasks = vi.fn();
     const onOpenView = vi.fn();
     const onOpenOrders = vi.fn();
-    const onOpenSuppliers = vi.fn();
-    const onOpenReports = vi.fn();
     const root = createRoot(host);
     await act(async () => {
       root.render(
@@ -800,13 +882,15 @@ describe("workbench home entries", () => {
             aiTasks={[]}
             reviews={[]}
             loading={false}
-            onCreate={vi.fn()}
+            createBusy={false}
+            maxFileBytes={5 * 1024 * 1024}
+            maxTotalBytes={20 * 1024 * 1024}
+            maxQuotes={10}
+            onStart={vi.fn(async () => undefined)}
             onOpenTask={vi.fn()}
             onOpenTasks={onOpenTasks}
             onOpenView={onOpenView}
             onOpenOrders={onOpenOrders}
-            onOpenSuppliers={onOpenSuppliers}
-            onOpenReports={onOpenReports}
           />
         </QueryClientProvider>,
       );
@@ -815,16 +899,59 @@ describe("workbench home entries", () => {
       const button = [...host.querySelectorAll("button")].find((item) => item.textContent?.includes(text))!;
       button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     };
-    await act(async () => { clickText("待处理"); });
+    await act(async () => { clickText("等待字段复核"); });
     expect(onOpenTasks).toHaveBeenCalledWith("attention");
-    await act(async () => { clickText("已结束"); });
-    expect(onOpenTasks).toHaveBeenCalledWith("completed");
-    await act(async () => { clickText("采购订单"); });
+    await act(async () => { clickText("待收货订单"); });
     expect(onOpenOrders).toHaveBeenCalled();
-    await act(async () => { clickText("待我审批"); });
+    await act(async () => { clickText("等待确认采购方案"); });
     expect(onOpenView).toHaveBeenCalledWith("reviews");
-    await act(async () => { clickText("AI 异常"); });
+    await act(async () => { clickText("AI 任务需处理"); });
     expect(onOpenView).toHaveBeenCalledWith("ai");
+    await act(async () => root.unmount());
+  });
+
+  it("does not count supplier risks hidden from the approver view", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(["procurement-insights-overview"], {
+      status_funnel: [],
+      cost_savings: { budget_total: "0", landed_total: "0", savings: "0", rate: null, included_tasks: 0 },
+      counts: {
+        tasks: 0, approved_tasks: 0, orders: 0, orders_pending_shipment: 0, orders_shipped: 0,
+        orders_partially_received: 0, orders_received: 0, orders_closed: 0,
+        settlements_unsettled: 0, settlements_settled: 0, settlements_paid: 0,
+        suppliers: 3, suppliers_blacklisted: 3, reviews_pending: 0, ai_tasks_failed: 0,
+        overdue_orders: 0, overdue_payments: 0,
+      },
+    });
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <WorkbenchHome
+            role="approver"
+            requests={[]}
+            aiTasks={[]}
+            reviews={[]}
+            loading={false}
+            createBusy={false}
+            maxFileBytes={5 * 1024 * 1024}
+            maxTotalBytes={20 * 1024 * 1024}
+            maxQuotes={10}
+            onStart={vi.fn(async () => undefined)}
+            onOpenTask={vi.fn()}
+            onOpenTasks={vi.fn()}
+            onOpenView={vi.fn()}
+            onOpenOrders={vi.fn()}
+          />
+        </QueryClientProvider>,
+      );
+    });
+
+    const riskSection = host.querySelector(".proc-home-section")!;
+    expect(riskSection.querySelector("header")?.textContent).toContain("0 项");
+    expect(riskSection.textContent).not.toContain("供应商进入黑名单");
     await act(async () => root.unmount());
   });
 });
@@ -864,16 +991,6 @@ describe("comparison approval gate", () => {
     await act(async () => root.unmount());
   });
 });
-
-    expect(html).toContain("证据指纹");
-    expect(html).toContain("报价原件与字段来源");
-    expect(html).toContain("采购审计时间线");
-    const markdown = procurementReportMarkdown(report);
-    expect(markdown).toContain("# 采购审批报告");
-    expect(markdown).toContain("选定供应商：Alpha Packaging");
-    expect(markdown).toContain("供应商已人工批准");
-    expect(markdown).toContain("分析运行 ID：run");
-  });
 
   it("renders a durable no-award report without a supplier or execution drafts", () => {
     const noAward: ProcurementRequest = {

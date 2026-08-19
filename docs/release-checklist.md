@@ -79,7 +79,7 @@ docker compose ps
 
 - MySQL、Redis、Kafka、Agent、Procurement 五个服务 healthy；
 - 只有 `127.0.0.1:8741->8741` 映射宿主机；
-- Java `/api/health` 报告版本 0.5.0、API Schema 11、数据库 ready 和独立 Agent 状态；
+- Java `/api/health` 报告版本 0.5.0、API Schema 19、数据库 ready 和独立 Agent 状态；
 - Java readiness 在 Agent 停止时仍为 UP；
 - Java/Python Kafka envelope 的 HMAC、`payload_sha256` 和双侧幂等校验通过；无 Kafka 凭据的客户端被拒绝；
 - Java Host/Origin 边界拒绝非本地生产请求。

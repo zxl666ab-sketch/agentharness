@@ -100,7 +100,7 @@ CREATE TABLE purchase_order (
     unit varchar(50) NOT NULL,
     landed_total decimal(60,18),              -- 到货总价（含税运费汇率）
     status varchar(30) NOT NULL DEFAULT 'PENDING_SHIPMENT'
-        CHECK (status IN ('PENDING_SHIPMENT','SHIPPED','RECEIVED','CLOSED')),
+        CHECK (status IN ('PENDING_SHIPMENT','SHIPPED','PARTIALLY_RECEIVED','RECEIVED','CLOSED')),
     received_quantity decimal(60,18),
     arrival_date datetime(6),
     notes varchar(1000),
@@ -110,7 +110,7 @@ CREATE TABLE purchase_order (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 CREATE INDEX idx_purchase_order_status ON purchase_order(status, updated_at);
 CREATE INDEX idx_purchase_order_task ON purchase_order(task_id, created_at);
-CREATE UNIQUE INDEX uq_purchase_order_task ON purchase_order(task_id);   -- 惰性派生并发防重
+CREATE UNIQUE INDEX uq_purchase_order_task ON purchase_order(task_id);   -- 正式决定订单最终防重
 
 -- V10__settlement_domain.sql（K8 对账付款；对抗审查修订 D4：财务数据禁止级联删除）
 CREATE TABLE purchase_settlement (
@@ -157,33 +157,35 @@ public final class StateMachine<S, E> {
 }
 ```
 
-- **注册表**：`OrderStateMachine`（PENDING_SHIPMENT/SHIPPED/RECEIVED/CLOSED）、`SettlementStateMachine`（UNSETTLED/SETTLED/PAID）通过 `StateMachineRegistry` 注册；业务代码只声明"从哪个状态+什么事件→到哪个状态"，引擎统一校验与审计
+- **注册表**：`OrderStateMachine`（PENDING_SHIPMENT/SHIPPED/PARTIALLY_RECEIVED/RECEIVED/CLOSED）、`SettlementStateMachine`（UNSETTLED/SETTLED/PAID）通过 `StateMachineRegistry` 注册；业务代码只声明"从哪个状态+什么事件→到哪个状态"，引擎统一校验与审计
 - **面试叙事**：新增业务（如报销）只需定义自己的状态枚举+注册流转表，引擎与审计复用——"平台"有代码证据
 - 现有 `TaskStatus` 状态机**不迁移**（冻结，避免动审批证据链），README 如实说明"任务状态机为历史实现，新业务走引擎"
 
 ### 4.3 订单状态机（K2，冻结定义）
 
 ```
-PENDING_SHIPMENT --ship--> SHIPPED --receive--> RECEIVED --close--> CLOSED
-       |______________________close(取消)________________________↑
+PENDING_SHIPMENT --ship--> SHIPPED --receive(batch)--> PARTIALLY_RECEIVED
+       |                                              | receive(batch, 累计收满)
+       |                                              v
+       |_________________________________________ RECEIVED --close--> CLOSED
 ```
 
-- 合法流转：`ship`（待发货→已发货）、`receive`（已发货→已收货，必填 received_quantity 与 arrival_date，**且 received_quantity ≤ quantity**，超收返回 409 `quantity_exceeded`）、`close`（待发货→已关闭=**取消**，可填 notes；已收货→已关闭=**完成**，可填 notes）
+- 合法流转：`ship`（待发货→已发货）、`receive`（已发货/部分收货→登记一批到货，必填本批 received_quantity 与 arrival_date；累计小于订单量保持部分收货、累计等于订单量才转已收货、累计超量返回 409 `quantity_exceeded`）、`close`（待发货→已关闭=**取消**，可填 notes；已收货→已关闭=**完成**，可填 notes）
 - `close` 语义冻结：PENDING_SHIPMENT 关闭=取消（不派生对账单）；RECEIVED 关闭=完成（对账单已派生，正常流转）
 - 非法流转一律 409 Conflict，错误码 `invalid_order_transition`
 - **并发控制**：`UPDATE purchase_order SET status=?, version=version+1 WHERE id=? AND version=?`，影响行数为 0 时返回 409 `order_concurrent_modification`，前端提示刷新
 - **超时调度**：`@Scheduled(fixedDelay=60s)` 扫描 `PENDING_SHIPMENT` 且 `updated_at < now()-7d` 的订单，写审计事件 `order_shipment_overdue`（幂等：同一订单只写一次，用 order_id 去重）
-- **对账派生（K8）**：订单流转到 `RECEIVED` 时自动生成对账单 `purchase_settlement`（金额=订单 landed_total）；**landed_total 为 NULL 时禁止派生**，返回 409 `settlement_requires_cost`（先补录成本）；状态机：`UNSETTLED --settle--> SETTLED --pay--> PAID`，`pay` 必填 paid_at；每次流转写审计事件 `settlement_settled/settlement_paid`；同一订单只允许一张对账单（order_id UNIQUE）
+- **分批收货与对账派生（K8/V16）**：每批数量累计到订单 `received_quantity`；只有累计收满、订单流转到 `RECEIVED` 时才生成对账单 `purchase_settlement`（金额=订单 landed_total）。**landed_total 为 NULL 时禁止完成收货及派生**，返回 409 `settlement_requires_cost`（先补录成本）；状态机：`UNSETTLED --settle--> SETTLED --pay--> PAID`，`pay` 必填 paid_at；每次流转写审计事件；同一订单只允许一张对账单（order_id UNIQUE）
 - **付款逾期调度（对抗审查新增）**：`@Scheduled(fixedDelay=60s)` 扫描 `SETTLED` 且 `updated_at < now()-7d` 的对账单，写审计事件 `settlement_payment_overdue`（幂等去重）——补上原设计承诺的"付款逾期预警"
 
-### 4.4 订单生成（K2，冻结设计——不碰审批核心）
+### 4.4 订单生成（K2，正式决定事务）
 
-订单由**已批准任务派生**，但不是去改 `ApprovalService`/`createExecutionArtifacts`（审批证据链是核心资产，冻结不动）。派生方式：
+订单由 Java 在**正式采购决定完成的同一事务**中生成，审批证据链与订单事实原子提交。派生方式：
 
 - `OrderService.ensureOrderForApprovedTask(task)`：若任务 status=approved 且无对应订单，则用已批准报价 + 比价快照的 landed cost 生成订单（`order_no` 生成规则 `PO-{reference}` 保证唯一）
-- 触发点：`GET /api/procurement/orders` 查询时惰性派生（幂等）+ 新增 `ProcurementController` 不动，订单查询接口内部先 `reconcileApprovedTasks()`
-- **并发安全（对抗审查新增）**：惰性派生可能被并发请求同时触发——`purchase_order` 表加 `UNIQUE(task_id)` 约束，重复插入抛 DuplicateKeyException 时按"已存在"幂等吞掉并返回既有订单；派生逻辑必须在事务内完成"查无→插入"两步，禁止查与插分离
-- **tradeoff 说明（面试话术）**：惰性派生是"读接口带写副作用"的反模式，权衡是"绝不触碰审批核心证据链"；单机演示场景可接受，面试被问时答："订单派生独立于审批链，用唯一约束保证幂等；生产化可将触发点改为审批完成事件监听"
+- 触发点：`ApprovalService.finalizeFromAgent()` 通过版本、generation、快照、资格和重新计算校验后调用订单服务；订单失败时正式决定一并回滚
+- **并发安全**：任务悲观锁串行化同任务正式决定，`purchase_order.UNIQUE(task_id)` 作为最终防重；重复 Agent 结果先返回原决定与原订单
+- **查询纯度**：`GET /api/procurement/orders` 只读取正式订单和履约投影，不创建订单或审计事件
 - 已批准任务的订单**不可删除**，只可流转或关闭（证据链完整性）
 
 ### 4.4 供应商档案（K1，冻结设计）
@@ -267,11 +269,11 @@ POST /api/procurement/suppliers                             # K1
 PUT  /api/procurement/suppliers/{id}                        # K1（含 status 变更）
 DELETE /api/procurement/suppliers/{id}                      # K1（删除保护）
 GET  /api/procurement/suppliers/{id}/profile                # K1 档案聚合（含关联报价/中标）
-GET  /api/procurement/orders?status=&page=&size=            # K2（惰性派生+列表）
+GET  /api/procurement/orders?status=&page=&size=            # K2（只读列表）
 GET  /api/procurement/orders/{id}                           # K2 详情
-POST /api/procurement/orders/{id}/transition                # K2 状态流转（body: action/received_quantity/arrival_date/notes）
+POST /api/procurement/orders/{id}/transition                # K2 状态流转（Idempotency-Key + body）
 GET  /api/procurement/settlements?status=&page=&size=       # K8 对账单列表
-POST /api/procurement/settlements/{id}/transition           # K8 对账流转（body: action/paid_at/notes）
+POST /api/procurement/settlements/{id}/transition           # K8 对账流转（Idempotency-Key + body）
 GET  /api/procurement/insights/overview                     # K3 漏斗+成本节约率
 GET  /api/procurement/insights/trend?months=6               # K3 月度趋势
 GET  /api/procurement/insights/supplier-ranking             # K3 中标排行（含绩效分）
@@ -320,7 +322,7 @@ GET  /api/procurement/platform                              # K6 系统信息
 - 验收：`.\mvnw.cmd test` 全绿（新增 Supplier 单测，含绩效分规则与删除保护）；`npm test`、`npm run lint`、`npm run build` 全绿；Playwright 无头验收截图（列表/新建/编辑/删除保护/绩效徽章）
 
 ### 阶段 2：采购订单状态机 + 对账付款 + 超时调度（K2 + K8，含 D1 状态机引擎）
-- 交付：V9/V10 迁移、StateMachine 引擎 + Order/Settlement 状态机注册、Order/Settlement 实体/仓储/服务、乐观锁、惰性派生（UNIQUE 防重）、对账派生与流转（含 landed_total NULL 拒绝）、发货/付款双超时调度、Web 订单页（含对账操作与附件下载）
+- 交付：V9/V10 迁移、StateMachine 引擎 + Order/Settlement 状态机注册、Order/Settlement 实体/仓储/服务、乐观锁、正式决定事务内订单生成（UNIQUE 防重）、幂等流转、发票核销门禁、发货/付款双超时调度、Web 履约中心
 - 验收：状态机引擎单测（注册/非法流转/钩子）、订单合法/非法流转测试、并发流转测试（version 冲突）、超收校验测试（received_quantity > quantity 拒绝）、派生幂等测试（并发双请求仅一条）、对账派生/流转测试（含无成本拒绝）、双超时调度测试（clock 注入）；Playwright 截图
 
 ### 阶段 3：统计报表 + 审计全局页 + 系统信息 + 导航收尾（K3 + K6）
@@ -351,7 +353,7 @@ GET  /api/procurement/platform                              # K6 系统信息
 | 遗留 management 包与 BOM | 高（已处置） | 阶段 0 删除遗留控制器/服务（BOM 文件 + 路径冲突一并解决），能力由新控制器按冻结接口重建 |
 | 演示数据为空（订单/报表/RAG 无数据） | 高（已处置） | 阶段 0 扩展 DemoSeedRunner 生成 synthetic 已审批历史业务（决策+订单+对账+付款），全部标记 synthetic |
 | 审计表 task_id 约束与业务事件矛盾 | 高（已处置） | V11 迁移改可空 + business_type/business_id 列，AuditEvent.create 新增重载保持兼容 |
-| 惰性派生并发双写 | 中（已处置） | purchase_order UNIQUE(task_id) + DuplicateKeyException 幂等吞掉 |
+| 正式决定并发双写 | 高（已处置） | 任务悲观锁 + 决定/订单同事务 + purchase_order UNIQUE(task_id) |
 | 财务数据级联删除 | 中（已处置） | purchase_settlement 外键 RESTRICT，禁止随订单级联消失 |
 | Python 契约破坏 | 中 | 参考区间作为新增可选字段下发；契约文件同步更新；黄金测试拦截 |
 | 前端路由破坏 | 低 | 现有 URL 兼容（view 缺省回退 workbench）；只加不改 |

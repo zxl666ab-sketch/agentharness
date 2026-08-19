@@ -11,14 +11,16 @@ import {
   Truck,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import { procurementApi } from "./api";
+import { newIdempotencyKey, procurementApi } from "./api";
 import type { OrderStatus, OrderView, SettlementStatus, SettlementView } from "./types";
+import { fulfillmentNextStep } from "./viewModel";
 
 const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
   PENDING_SHIPMENT: "待发货",
   SHIPPED: "已发货",
+  PARTIALLY_RECEIVED: "部分收货",
   RECEIVED: "已收货",
   CLOSED: "已关闭",
 };
@@ -29,10 +31,19 @@ const SETTLEMENT_STATUS_LABELS: Record<SettlementStatus, string> = {
   PAID: "已付款",
 };
 
+const INVOICE_STATUS_LABELS = {
+  REGISTERED: "匹配处理中",
+  MATCHED: "已匹配待核销",
+  DIFF_HOLD: "差异挂起",
+  VOIDED: "已作废",
+  RECONCILED: "已核销",
+} as const;
+
 const STATUS_FILTERS: Array<{ value: OrderStatus | ""; label: string }> = [
   { value: "", label: "全部" },
   { value: "PENDING_SHIPMENT", label: "待发货" },
   { value: "SHIPPED", label: "已发货" },
+  { value: "PARTIALLY_RECEIVED", label: "部分收货" },
   { value: "RECEIVED", label: "已收货" },
   { value: "CLOSED", label: "已关闭" },
 ];
@@ -41,6 +52,7 @@ function statusTone(status: OrderStatus) {
   return {
     PENDING_SHIPMENT: "warning",
     SHIPPED: "info",
+    PARTIALLY_RECEIVED: "warning",
     RECEIVED: "success",
     CLOSED: "neutral",
   }[status];
@@ -71,11 +83,66 @@ function formatQuantity(value: string | null) {
   return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 3 }).format(quantity);
 }
 
+type DecimalValue = { coefficient: bigint; scale: number };
+
+function parseDecimal(value: string): DecimalValue | null {
+  const match = value.trim().match(/^([+-]?)(\d+)(?:\.(\d+))?$/);
+  if (!match) return null;
+  const fraction = match[3] || "";
+  const digits = `${match[2]}${fraction}`.replace(/^0+(?=\d)/, "");
+  const sign = match[1] === "-" ? -1n : 1n;
+  return { coefficient: sign * BigInt(digits), scale: fraction.length };
+}
+
+function alignDecimals(left: DecimalValue, right: DecimalValue) {
+  const scale = Math.max(left.scale, right.scale);
+  return {
+    left: left.coefficient * 10n ** BigInt(scale - left.scale),
+    right: right.coefficient * 10n ** BigInt(scale - right.scale),
+    scale,
+  };
+}
+
+function formatDecimal(coefficient: bigint, scale: number): string {
+  if (coefficient === 0n) return "0";
+  const sign = coefficient < 0n ? "-" : "";
+  const absolute = (coefficient < 0n ? -coefficient : coefficient).toString().padStart(scale + 1, "0");
+  if (scale === 0) return `${sign}${absolute}`;
+  const integer = absolute.slice(0, -scale);
+  const fraction = absolute.slice(-scale).replace(/0+$/, "");
+  return fraction ? `${sign}${integer}.${fraction}` : `${sign}${integer}`;
+}
+
+function subtractDecimals(leftValue: string, rightValue: string): string | null {
+  const left = parseDecimal(leftValue);
+  const right = parseDecimal(rightValue);
+  if (!left || !right) return null;
+  const aligned = alignDecimals(left, right);
+  return formatDecimal(aligned.left - aligned.right, aligned.scale);
+}
+
+function compareDecimals(leftValue: string, rightValue: string): number | null {
+  const left = parseDecimal(leftValue);
+  const right = parseDecimal(rightValue);
+  if (!left || !right) return null;
+  const aligned = alignDecimals(left, right);
+  return aligned.left < aligned.right ? -1 : aligned.left > aligned.right ? 1 : 0;
+}
+
 type Props = {
   /** 闭环衔接：聚焦指定采购任务的订单（P1-3） */
   highlightTaskId?: string | null;
   onBackToTask?: (taskId: string) => void;
 };
+
+function transitionKey(keys: Map<string, string>, scope: string, payload: unknown) {
+  const fingerprint = JSON.stringify([scope, payload]);
+  const existing = keys.get(fingerprint);
+  if (existing) return { fingerprint, key: existing };
+  const key = newIdempotencyKey();
+  keys.set(fingerprint, key);
+  return { fingerprint, key };
+}
 
 export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
   const queryClient = useQueryClient();
@@ -91,6 +158,7 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
   const [payTarget, setPayTarget] = useState<{ orderId: string | null; settlementId: string; settlementNo: string; orderNo: string | null } | null>(null);
   const [paidAt, setPaidAt] = useState("");
   const [payNotes, setPayNotes] = useState("");
+  const transitionKeys = useRef(new Map<string, string>());
 
   const ordersQuery = useQuery({
     queryKey: ["procurement-orders", status],
@@ -145,9 +213,14 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
   }, [busy, closeTarget, payTarget, receiveTarget]);
 
   const ship = async (order: OrderView) => {
+    const input = { action: "ship" } as const;
+    const request = transitionKey(transitionKeys.current, `order:${order.id}`, input);
     const ok = await run(`ship:${order.id}`, () =>
-      procurementApi.transitionOrder(order.id, { action: "ship" }));
-    if (ok) setNotice(`订单 ${order.order_no} 已标记发货。`);
+      procurementApi.transitionOrder(order.id, input, request.key));
+    if (ok) {
+      transitionKeys.current.delete(request.fingerprint);
+      setNotice(`订单 ${order.order_no} 已标记发货。`);
+    }
   };
 
   const receive = async () => {
@@ -158,14 +231,17 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
       setError("收货必须填写收货数量与到货日期");
       return;
     }
-    const qty = Number(quantity);
-    const orderQty = Number(receiveTarget.quantity);
-    if (!Number.isFinite(qty) || qty <= 0) {
+    const remainingQuantity = subtractDecimals(
+      receiveTarget.quantity,
+      receiveTarget.received_quantity ?? "0",
+    );
+    const quantitySign = compareDecimals(quantity, "0");
+    if (quantitySign === null || quantitySign <= 0) {
       setError("收货数量必须大于 0");
       return;
     }
-    if (Number.isFinite(orderQty) && qty > orderQty) {
-      setError(`收货数量不得超过订单数量 ${orderQty.toLocaleString("zh-CN")}`);
+    if (remainingQuantity !== null && compareDecimals(quantity, remainingQuantity)! > 0) {
+      setError(`本批收货数量不得超过剩余数量 ${formatQuantity(remainingQuantity)}`);
       return;
     }
     const parsedDate = parseDatePart(date);
@@ -173,35 +249,46 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
       setError("到货日期格式无效");
       return;
     }
-    const ok = await run(`receive:${receiveTarget.id}`, () =>
-      procurementApi.transitionOrder(receiveTarget.id, {
+    const input = {
         action: "receive",
         received_quantity: quantity,
         arrival_date: parsedDate.toISOString(),
-      }));
+      } as const;
+    const request = transitionKey(transitionKeys.current, `order:${receiveTarget.id}`, input);
+    const ok = await run(`receive:${receiveTarget.id}`, () =>
+      procurementApi.transitionOrder(receiveTarget.id, input, request.key));
     if (ok) {
+      transitionKeys.current.delete(request.fingerprint);
       setReceiveTarget(null);
-      setNotice(`已确认收货 ${qty.toLocaleString("zh-CN")}，对账单已派生。`);
+      const completed = remainingQuantity !== null && compareDecimals(quantity, remainingQuantity) === 0;
+      setNotice(completed
+        ? `已确认最后一批收货 ${formatQuantity(quantity)}，对账单已派生。`
+        : `已登记本批收货 ${formatQuantity(quantity)}，订单等待剩余到货。`);
     }
   };
 
   const closeOrder = async () => {
     if (!closeTarget) return;
+    const input = { action: "close", notes: closeNotes.trim() || null } as const;
+    const request = transitionKey(transitionKeys.current, `order:${closeTarget.id}`, input);
     const ok = await run(`close:${closeTarget.id}`, () =>
-      procurementApi.transitionOrder(closeTarget.id, {
-        action: "close",
-        notes: closeNotes.trim() || null,
-      }));
+      procurementApi.transitionOrder(closeTarget.id, input, request.key));
     if (ok) {
+      transitionKeys.current.delete(request.fingerprint);
       setCloseTarget(null);
       setNotice(closeTarget.status === "PENDING_SHIPMENT" ? "订单已取消。" : "订单已完成关闭。");
     }
   };
 
   const settle = async (orderId: string, settlementId: string) => {
+    const input = { action: "settle" } as const;
+    const request = transitionKey(transitionKeys.current, `settlement:${settlementId}`, input);
     const ok = await run(`settle:${settlementId}`, () =>
-      procurementApi.transitionSettlement(settlementId, { action: "settle" }));
-    if (ok) setNotice("已确认对账。");
+      procurementApi.transitionSettlement(settlementId, input, request.key));
+    if (ok) {
+      transitionKeys.current.delete(request.fingerprint);
+      setNotice("已确认对账。");
+    }
   };
 
   const pay = async () => {
@@ -216,13 +303,16 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
       setError("付款时间格式无效");
       return;
     }
-    const ok = await run(`pay:${payTarget.settlementId}`, () =>
-      procurementApi.transitionSettlement(payTarget.settlementId, {
+    const input = {
         action: "pay",
         paid_at: parsedDate.toISOString(),
         notes: payNotes.trim() || null,
-      }));
+      } as const;
+    const request = transitionKey(transitionKeys.current, `settlement:${payTarget.settlementId}`, input);
+    const ok = await run(`pay:${payTarget.settlementId}`, () =>
+      procurementApi.transitionSettlement(payTarget.settlementId, input, request.key));
     if (ok) {
+      transitionKeys.current.delete(request.fingerprint);
       setPayTarget(null);
       setNotice("已登记付款。");
     }
@@ -235,8 +325,8 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
           <h1>{highlightTaskId ? "任务订单" : "采购订单"}</h1>
           <p>
             {focusTask
-              ? `聚焦 ${focusTask.task_reference || "采购任务"} 的订单：待发货 → 已发货 → 已收货 → 对账 → 付款`
-              : "订单状态机：待发货 → 已发货 → 已收货 → 已关闭；收货自动派生对账单"}
+              ? `聚焦 ${focusTask.task_reference || "采购任务"} 的订单：待发货 → 已发货 → 部分收货 / 已收货 → 对账 → 付款`
+              : "订单状态机：待发货 → 已发货 → 部分收货 / 已收货 → 已关闭；累计收满后自动派生对账单"}
           </p>
         </div>
         <span className="proc-page-count">
@@ -278,11 +368,13 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
             <Archive size={30} />
             <h2>{highlightTaskId ? "该任务还没有订单" : status ? "该状态下没有订单" : "还没有采购订单"}</h2>
             <p>{highlightTaskId
-              ? "已批准任务会在打开本页时自动派生订单（惰性派生，幂等），刷新后重试。"
-              : "已批准任务会在打开本页时自动派生订单（惰性派生，幂等）。"}</p>
+              ? "正式采购方案确认后会立即生成唯一订单；若仍未显示，请返回任务详情检查审批状态。"
+              : "正式采购方案确认后会立即生成唯一订单。"}</p>
           </div>
         ) : null}
-        {orders.map((order) => (
+        {orders.map((order) => {
+          const next = fulfillmentNextStep(order);
+          return (
           <article className="proc-order-card" key={order.id}>
             <header>
               <div className="proc-order-title">
@@ -297,6 +389,9 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
               <span><small>到货总价</small><strong>{formatAmount(order.landed_total)}</strong></span>
               <span><small>收货数量</small><strong>{formatQuantity(order.received_quantity)}</strong></span>
               <span><small>到货日期</small><strong>{order.arrival_date ? new Date(order.arrival_date).toLocaleDateString("zh-CN") : "—"}</strong></span>
+              <span><small>发票状态</small><strong>{order.invoice_count === 0 ? "尚未上传" : order.invoice_status ? INVOICE_STATUS_LABELS[order.invoice_status] : "待确认"}</strong></span>
+              <span><small>对账状态</small><strong>{order.settlement ? SETTLEMENT_STATUS_LABELS[order.settlement.status] : "尚未生成"}</strong></span>
+              <span className={`proc-order-next ${next.tone}`}><small>当前下一步</small><strong>{next.label}</strong><em>{next.detail}</em></span>
             </div>
             <div className="proc-order-actions">
               {order.status === "PENDING_SHIPMENT" ? (
@@ -309,9 +404,15 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
                   </button>
                 </>
               ) : null}
-              {order.status === "SHIPPED" ? (
-                <button className="proc-button" type="button" onClick={() => { setReceiveTarget(order); setReceiveQuantity(order.quantity); setArrivalDate(new Date().toISOString().slice(0, 10)); setError(null); }}>
-                  <PackageCheck size={14} />确认收货
+              {order.status === "SHIPPED" || order.status === "PARTIALLY_RECEIVED" ? (
+                <button className="proc-button" type="button" onClick={() => {
+                  const remaining = subtractDecimals(order.quantity, order.received_quantity ?? "0");
+                  setReceiveTarget(order);
+                  setReceiveQuantity(remaining ?? order.quantity);
+                  setArrivalDate(new Date().toISOString().slice(0, 10));
+                  setError(null);
+                }}>
+                  <PackageCheck size={14} />{order.status === "PARTIALLY_RECEIVED" ? "继续收货" : "确认收货"}
                 </button>
               ) : null}
               {order.status === "RECEIVED" ? (
@@ -320,12 +421,12 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
                     <span className="proc-settlement-inline">
                       <CreditCard size={14} />
                       {order.settlement.settlement_no} · {SETTLEMENT_STATUS_LABELS[order.settlement.status]}
-                      {order.settlement.status === "UNSETTLED" ? (
+                      {order.settlement.status === "UNSETTLED" && next.canSettle ? (
                         <button className="proc-link-button" type="button" disabled={busy === `settle:${order.settlement.id}`} onClick={() => void settle(order.id, order.settlement!.id)}>
                           确认对账
                         </button>
                       ) : null}
-                      {order.settlement.status === "SETTLED" ? (
+                      {order.settlement.status === "SETTLED" && next.canPay ? (
                         <button className="proc-link-button" type="button" onClick={() => { setPayTarget({ orderId: order.id, settlementId: order.settlement!.id, settlementNo: order.settlement!.settlement_no, orderNo: order.order_no }); setPaidAt(new Date().toISOString().slice(0, 10)); setError(null); setNotice(null); }}>
                           登记付款
                         </button>
@@ -334,9 +435,11 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
                   ) : (
                     <span className="proc-settlement-inline muted"><CreditCard size={14} />对账单缺失</span>
                   )}
-                  <button className="proc-button secondary" type="button" onClick={() => { setCloseTarget(order); setCloseNotes("订单已完成"); setError(null); }}>
-                    <CheckCircle2 size={14} />完成关闭
-                  </button>
+                  {next.canClose ? (
+                    <button className="proc-button secondary" type="button" onClick={() => { setCloseTarget(order); setCloseNotes("订单已完成"); setError(null); }}>
+                      <CheckCircle2 size={14} />完成关闭
+                    </button>
+                  ) : null}
                 </>
               ) : null}
             </div>
@@ -355,7 +458,8 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
               <small>更新于 {new Date(order.updated_at).toLocaleString("zh-CN")}</small>
             </footer>
           </article>
-        ))}
+          );
+        })}
       </div>
 
       {receiveTarget ? (
@@ -375,7 +479,7 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
               <label className="proc-field">
                 <span>收货数量 <b>*</b></span>
                 <input type="number" min="0" step="any" value={receiveQuantity} onChange={(event) => setReceiveQuantity(event.target.value)} />
-                <small>不得超过订单数量 {formatQuantity(receiveTarget.quantity)}</small>
+                <small>已收 {formatQuantity(receiveTarget.received_quantity)}，本批不得超过剩余数量 {formatQuantity(subtractDecimals(receiveTarget.quantity, receiveTarget.received_quantity ?? "0"))}</small>
               </label>
               <label className="proc-field">
                 <span>到货日期 <b>*</b></span>
@@ -386,7 +490,7 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
             <footer>
               <button className="proc-button secondary" type="button" onClick={() => setReceiveTarget(null)} disabled={busy === `receive:${receiveTarget.id}`}>取消</button>
               <button className="proc-button" type="button" disabled={busy === `receive:${receiveTarget.id}`} onClick={() => void receive()}>
-                {busy === `receive:${receiveTarget.id}` ? <LoaderCircle className="spin" size={15} /> : <PackageCheck size={15} />}确认收货并派生对账单
+                {busy === `receive:${receiveTarget.id}` ? <LoaderCircle className="spin" size={15} /> : <PackageCheck size={15} />}登记本批收货
               </button>
             </footer>
           </section>
@@ -464,7 +568,7 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
       ) : null}
 
       <div className="proc-settlement-section">
-        <header><div><CalendarCheck2 size={15} /><h3>对账单</h3></div><span>收货自动派生 · 状态机 UNSETTLED → SETTLED → PAID</span></header>
+        <header><div><CalendarCheck2 size={15} /><h3>对账单</h3></div><span>累计收满自动派生 · 状态机 UNSETTLED → SETTLED → PAID</span></header>
         <SettlementTable
           onPay={(settlement) => {
             setPayTarget({ orderId: null, settlementId: settlement.id, settlementNo: settlement.settlement_no, orderNo: null });
@@ -482,6 +586,7 @@ function SettlementTable({ onPay }: { onPay: (settlement: SettlementView) => voi
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const transitionKeys = useRef(new Map<string, string>());
   const settlementsQuery = useQuery({
     queryKey: ["procurement-settlements"],
     queryFn: () => procurementApi.settlements(undefined, 0, 100),
@@ -496,33 +601,49 @@ function SettlementTable({ onPay }: { onPay: (settlement: SettlementView) => voi
     try {
       await operation();
       await invalidate();
+      return true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
     } finally {
       setBusy(null);
     }
+  }
+
+  async function settle(settlementId: string) {
+    const input = { action: "settle" } as const;
+    const request = transitionKey(transitionKeys.current, `settlement:${settlementId}`, input);
+    const ok = await run(`row-settle:${settlementId}`, () =>
+      procurementApi.transitionSettlement(settlementId, input, request.key));
+    if (ok) transitionKeys.current.delete(request.fingerprint);
   }
 
   return (
     <div className="proc-settlement-table">
       {error ? <p className="proc-form-error" role="alert">{error}</p> : null}
       {settlementsQuery.isPending ? <div className="proc-loading-state"><LoaderCircle className="spin" size={16} />正在加载对账单…</div> : null}
-      {!settlementsQuery.isPending && !settlements.length ? <p className="proc-muted">暂无对账单（订单收货后自动派生）</p> : null}
+      {!settlementsQuery.isPending && !settlements.length ? <p className="proc-muted">暂无对账单（订单累计收满后自动派生）</p> : null}
       {settlements.map((settlement) => (
         <div className="proc-settlement-row" key={settlement.id}>
           <code>{settlement.settlement_no}</code>
           <span>{settlement.supplier_name}</span>
           <strong>{formatAmount(settlement.total_amount)}</strong>
           <i className={settlementTone(settlement.status)}>{SETTLEMENT_STATUS_LABELS[settlement.status]}</i>
-          {settlement.status === "SETTLED" ? (
+          {settlement.status === "SETTLED" && settlement.invoice_reconciled ? (
             <button className="proc-link-button" type="button" disabled={busy === `row-pay:${settlement.id}`} onClick={() => onPay(settlement)}>
               登记付款
             </button>
           ) : null}
-          {settlement.status === "UNSETTLED" ? (
-            <button className="proc-link-button" type="button" disabled={busy === `row-settle:${settlement.id}`} onClick={() => void run(`row-settle:${settlement.id}`, () => procurementApi.transitionSettlement(settlement.id, { action: "settle" }))}>
+          {settlement.status === "SETTLED" && !settlement.invoice_reconciled ? (
+            <small className="proc-muted">付款被拦截：请先核销全部有效发票</small>
+          ) : null}
+          {settlement.status === "UNSETTLED" && settlement.invoice_reconciled ? (
+            <button className="proc-link-button" type="button" disabled={busy === `row-settle:${settlement.id}`} onClick={() => void settle(settlement.id)}>
               确认对账
             </button>
+          ) : null}
+          {settlement.status === "UNSETTLED" && !settlement.invoice_reconciled ? (
+            <small className="proc-muted">发票核销后可对账</small>
           ) : null}
           {settlement.status === "PAID" && settlement.paid_at ? <small>{new Date(settlement.paid_at).toLocaleDateString("zh-CN")}</small> : null}
         </div>

@@ -120,7 +120,7 @@ public final class TaskViewMapper {
         value.put("schema_version", task.getSchemaVersion());
         value.put("category", task.getCategory());
         value.put("item_name", task.getItemName());
-        value.put("quantity", CanonicalJson.decimal(task.getQuantity()));
+        value.put("quantity", task.getQuantity() == null ? null : CanonicalJson.decimal(task.getQuantity()));
         value.put("unit", task.getUnit());
         value.put("specifications", task.getSpecifications());
         value.put("constraints", task.getConstraints());

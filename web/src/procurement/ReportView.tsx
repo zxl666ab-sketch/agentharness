@@ -80,8 +80,10 @@ function businessText(value: string) {
   return value.replace(/\bMOQ\s+(?=\d)/g, "起订量（MOQ）");
 }
 
-function quantityText(value: number | string) {
-  return typeof value === "number" ? value.toLocaleString("zh-CN") : String(value);
+function quantityText(value: number | string | null, unit: string | null) {
+  if (value == null || String(value).trim() === "" || !unit?.trim()) return "待补充";
+  const quantity = typeof value === "number" ? value.toLocaleString("zh-CN") : String(value);
+  return `${quantity} ${unit}`;
 }
 
 export function procurementReportMarkdown(report: ProcurementAuditReport) {
@@ -106,7 +108,7 @@ export function procurementReportMarkdown(report: ProcurementAuditReport) {
     `- 采购编号：${report.request.reference}`,
     `- 采购任务：${report.request.title}`,
     `- 物料：${report.request.item_name}`,
-    `- 采购数量：${quantityText(report.request.quantity)} ${report.request.unit}`,
+    `- 采购数量：${quantityText(report.request.quantity, report.request.unit)}`,
     `- 报告证据指纹：${report.evidence_sha256}`,
     "",
     "## 审批结论",

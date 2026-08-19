@@ -29,7 +29,7 @@ export function writeRole(role: DemoRole) {
  */
 const VISIBLE_VIEWS: Record<DemoRole, WorkbenchView[]> = {
   buyer: ["workbench", "tasks", "ai", "reviews", "suppliers", "orders", "invoices", "contracts", "reports"],
-  approver: ["workbench", "ai", "reviews"],
+  approver: ["workbench", "orders", "ai", "reviews"],
   admin: [
     "workbench",
     "tasks",

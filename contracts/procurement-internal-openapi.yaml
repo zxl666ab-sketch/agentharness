@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Caijiatai Java Procurement Internal API
-  version: 0.4.0
+  version: 0.5.0
   description: Narrow callback and artifact API used only by the Python Agent service.
 x-rpc-kinds:
   get_reference_prices:
@@ -54,7 +54,7 @@ x-rpc-kinds:
       required: [task_id]
       properties:
         task_id: {type: string, pattern: '^[0-9a-f]{32}$'}
-    response: {type: object}
+    response: {$ref: '#/components/schemas/TaskAgentContext'}
   get_artifact:
     description: Original business artifact bytes (base64, up to 2MB).
     request:
@@ -86,7 +86,7 @@ paths:
           description: Current authoritative task context.
           content:
             application/json:
-              schema: {type: object}
+              schema: {$ref: '#/components/schemas/TaskAgentContext'}
         '404': {description: Unknown task}
   /internal/v1/artifacts/{artifactId}/raw:
     get:
@@ -138,3 +138,55 @@ components:
       in: path
       required: true
       schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+  schemas:
+    AuthorizedArtifact:
+      type: object
+      additionalProperties: false
+      required: [artifact_id, filename, sha256, content_type, size_bytes]
+      properties:
+        artifact_id: {type: string, pattern: '^jb[0-9a-f]{32}$'}
+        filename: {type: string, minLength: 1}
+        sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+        content_type: {type: string, minLength: 1}
+        size_bytes: {type: integer, minimum: 0}
+    HumanInteractionContext:
+      type: object
+      additionalProperties: false
+      required: [interaction_id, run_id, checkpoint_id, generation, status, answer_schema, answer, note, artifact_ids]
+      properties:
+        interaction_id: {type: string, pattern: '^[0-9a-f]{32}$'}
+        run_id: {type: [string, 'null'], pattern: '^[0-9a-f]{32}$'}
+        checkpoint_id: {type: [string, 'null'], minLength: 1, maxLength: 64}
+        generation: {type: integer, minimum: 1}
+        status: {$ref: './procurement-workbench.schema.json#/$defs/HumanInteractionStatus'}
+        answer_schema: {$ref: './procurement-workbench.schema.json#/$defs/HumanInteractionAnswerSchema'}
+        answer: {}
+        note: {type: [string, 'null'], maxLength: 2000}
+        artifact_ids:
+          type: [array, 'null']
+          items: {type: string, pattern: '^jb[0-9a-f]{32}$'}
+          maxItems: 20
+          uniqueItems: true
+    TaskAgentContext:
+      type: object
+      additionalProperties: true
+      required: [id, generation, task_version, quantity, unit, requirement_confirmed, attachments, authorized_artifacts, source_message, interactions, pending_decisions]
+      properties:
+        id: {type: string, pattern: '^[0-9a-f]{32}$'}
+        generation: {type: integer, minimum: 1}
+        task_version: {type: integer, minimum: 0}
+        quantity: {type: [string, 'null']}
+        unit: {type: [string, 'null']}
+        requirement_confirmed: {type: boolean}
+        analysis_run_id: {type: [string, 'null'], pattern: '^[0-9a-f]{32}$'}
+        attachments:
+          type: array
+          items: {$ref: '#/components/schemas/AuthorizedArtifact'}
+        authorized_artifacts:
+          type: array
+          items: {$ref: '#/components/schemas/AuthorizedArtifact'}
+        source_message: {type: string}
+        interactions:
+          type: array
+          items: {$ref: '#/components/schemas/HumanInteractionContext'}
+        pending_decisions: {type: array, items: {type: object}}

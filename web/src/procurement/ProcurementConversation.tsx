@@ -7,13 +7,14 @@ import {
   FileSpreadsheet,
   FileText,
   LoaderCircle,
+  UploadCloud,
   Paperclip,
   RefreshCw,
   Send,
   UserRound,
   X,
 } from "lucide-react";
-import { FormEvent, useMemo, useState } from "react";
+import { DragEvent, FormEvent, useMemo, useState } from "react";
 
 import { api, type ToolInvocationRow } from "../api/client";
 import type { ProcurementRequest } from "./types";
@@ -105,6 +106,7 @@ type NewConversationProps = {
   maxTotalBytes: number;
   maxQuotes: number;
   onStart: (message: string, files: File[]) => Promise<void>;
+  embedded?: boolean;
 };
 
 export function NewProcurementConversation({
@@ -114,10 +116,12 @@ export function NewProcurementConversation({
   maxTotalBytes,
   maxQuotes,
   onStart,
+  embedded = false,
 }: NewConversationProps) {
   const [message, setMessage] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
 
   function addFiles(incoming: File[]) {
     const invalid = incoming.find((file) => !/\.(xlsx|pdf)$/i.test(file.name));
@@ -162,12 +166,12 @@ export function NewProcurementConversation({
   }
 
   return (
-    <section className="proc-new-conversation" aria-label="新建采购对话">
+    <section className={embedded ? "proc-new-conversation embedded" : "proc-new-conversation"} aria-label="新建采购任务">
       <div className="proc-new-conversation-head">
         <span><Bot size={22} /></span>
         <div>
-          <h1>新建采购决策</h1>
-          <p>采购目标与供应商报价</p>
+          <h1>{embedded ? "开始采购比价" : "新建采购任务"}</h1>
+          <p>AI 提取采购需求和报价字段，Java 规则引擎负责供应商资格检查和到货成本计算。</p>
         </div>
       </div>
       <form className="proc-conversation-composer new" onSubmit={(event) => void submit(event)}>
@@ -179,6 +183,33 @@ export function NewProcurementConversation({
           maxLength={20_000}
           disabled={busy}
         />
+        <label
+          className={dragging ? "proc-quote-dropzone dragging" : "proc-quote-dropzone"}
+          onDragEnter={(event: DragEvent<HTMLLabelElement>) => { event.preventDefault(); setDragging(true); }}
+          onDragOver={(event: DragEvent<HTMLLabelElement>) => event.preventDefault()}
+          onDragLeave={(event: DragEvent<HTMLLabelElement>) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false);
+          }}
+          onDrop={(event: DragEvent<HTMLLabelElement>) => {
+            event.preventDefault();
+            setDragging(false);
+            addFiles(Array.from(event.dataTransfer.files));
+          }}
+        >
+          <UploadCloud size={22} />
+          <span><strong>拖拽供应商报价到这里，或点击选择</strong><small>支持 XLSX、文本型 PDF；2–{maxQuotes} 家；单文件不超过 {formatBytes(maxFileBytes)}，总计不超过 {formatBytes(maxTotalBytes)}</small></span>
+          <input
+            data-testid="conversation-upload"
+            type="file"
+            accept=".xlsx,.pdf"
+            multiple
+            disabled={busy}
+            onChange={(event) => {
+              addFiles(Array.from(event.target.files || []));
+              event.target.value = "";
+            }}
+          />
+        </label>
         {files.length ? (
           <ul className="proc-compose-files">
             {files.map((file, index) => (
@@ -199,25 +230,11 @@ export function NewProcurementConversation({
           </ul>
         ) : null}
         <div className="proc-compose-actions">
-          <label className="proc-attach-button">
-            <Paperclip size={16} />
-            <span>报价附件</span>
-            <input
-              data-testid="conversation-upload"
-              type="file"
-              accept=".xlsx,.pdf"
-              multiple
-              disabled={busy}
-              onChange={(event) => {
-                addFiles(Array.from(event.target.files || []));
-                event.target.value = "";
-              }}
-            />
-          </label>
+          <span><Paperclip size={14} /> 已选择报价</span>
           <span className={files.length >= 2 ? "ready" : ""}>{files.length} / {maxQuotes} 份</span>
           <button className="proc-button primary" type="submit" disabled={busy || !message.trim() || files.length < 2}>
             {busy ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}
-            {busy ? "正在创建" : "开始分析"}
+            {busy ? "正在解析报价" : "开始解析报价"}
           </button>
         </div>
         {files.length < 2 ? (
@@ -231,6 +248,7 @@ export function NewProcurementConversation({
 
 type ConversationProps = {
   request: ProcurementRequest;
+  structuredInteractionActive?: boolean;
   actionError?: string | null;
   onResume: (message: string) => Promise<void>;
   onRecover: () => Promise<void>;
@@ -239,6 +257,7 @@ type ConversationProps = {
 
 export function ProcurementConversation({
   request,
+  structuredInteractionActive = false,
   actionError,
   onResume,
   onRecover,
@@ -280,11 +299,11 @@ export function ProcurementConversation({
   const status = runQuery.data?.status || (runId ? "pending" : "");
   // A failed requirement capture can leave unresolved_field_count at zero even
   // though the Agent has asked the buyer to confirm or correct an input.
-  const needsClarification = status === "require_human" && !request.comparison && !request.decision;
+  const needsClarification = status === "require_human" && !structuredInteractionActive && !request.comparison && !request.decision;
   const canRecover = status === "failed"
     || status === "cancelled"
     || status === "interrupted"
-    || (status === "require_human" && !request.comparison && !request.decision);
+    || (status === "require_human" && !structuredInteractionActive && !request.comparison && !request.decision);
   const visibleTools = finalized
     ? tools.filter((item) => item.status !== "failed" && item.status !== "cancelled" && item.status !== "indeterminate")
     : tools;

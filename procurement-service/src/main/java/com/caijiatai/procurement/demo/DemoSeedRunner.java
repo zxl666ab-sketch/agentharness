@@ -8,6 +8,8 @@ import com.caijiatai.procurement.approval.ProcurementDecisionRepository;
 import com.caijiatai.procurement.artifact.ArtifactStore;
 import com.caijiatai.procurement.comparison.ComparisonService;
 import com.caijiatai.procurement.config.AppProperties;
+import com.caijiatai.procurement.invoice.Invoice;
+import com.caijiatai.procurement.invoice.InvoiceRepository;
 import com.caijiatai.procurement.order.OrderService;
 import com.caijiatai.procurement.order.PurchaseOrder;
 import com.caijiatai.procurement.quote.ProcurementQuote;
@@ -30,6 +32,7 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -69,6 +72,7 @@ public class DemoSeedRunner implements ApplicationRunner {
     private final OrderService orderService;
     private final SettlementService settlementService;
     private final SettlementRepository settlements;
+    private final InvoiceRepository invoices;
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
 
@@ -85,6 +89,7 @@ public class DemoSeedRunner implements ApplicationRunner {
             OrderService orderService,
             SettlementService settlementService,
             SettlementRepository settlements,
+            InvoiceRepository invoices,
             JdbcTemplate jdbc,
             ObjectMapper mapper) {
         this.properties = properties;
@@ -99,6 +104,7 @@ public class DemoSeedRunner implements ApplicationRunner {
         this.orderService = orderService;
         this.settlementService = settlementService;
         this.settlements = settlements;
+        this.invoices = invoices;
         this.jdbc = jdbc;
         this.mapper = mapper;
     }
@@ -106,7 +112,7 @@ public class DemoSeedRunner implements ApplicationRunner {
     @Override
     @Transactional
     public void run(ApplicationArguments args) throws Exception {
-        var root = properties.demoSeed().root().toAbsolutePath().normalize();
+        var root = properties.demoSeed().rootPath().toAbsolutePath().normalize();
         if (!Files.isDirectory(root)) {
             throw new IllegalStateException("演示场景目录不存在：" + root);
         }
@@ -540,6 +546,7 @@ public class DemoSeedRunner implements ApplicationRunner {
         var receivedAt = Instant.parse("2026-07-20T08:00:00Z");
         orderService.transition(order.getId(), "ship", null, null, null, "demo-seed");
         orderService.transition(order.getId(), "receive", order.getQuantity(), receivedAt, null, "demo-seed");
+        ensureSyntheticReconciledInvoice(order, scenario);
         var settlement = settlements.findByOrderId(order.getId()).orElseThrow();
         if ("settled".equals(stage)) {
             settlementService.transition(settlement.getId(), "settle", null, null, "demo-seed");
@@ -548,6 +555,37 @@ public class DemoSeedRunner implements ApplicationRunner {
         settlementService.transition(settlement.getId(), "settle", null, null, "demo-seed");
         settlementService.transition(settlement.getId(), "pay",
                 Instant.parse("2026-07-25T10:00:00Z"), "synthetic 演示付款", "demo-seed");
+    }
+
+    private void ensureSyntheticReconciledInvoice(PurchaseOrder order, String scenario) {
+        if (!invoices.findByOrderIdOrderByCreatedAtAsc(order.getId()).isEmpty()) {
+            return;
+        }
+        var invoiceNo = "DEMO-INV-" + sha256hex(scenario).substring(0, 16).toUpperCase(java.util.Locale.ROOT);
+        var content = ("synthetic 演示发票\n订单：" + order.getOrderNo()
+                + "\n供应商：" + order.getSupplierName()
+                + "\n含税总额：" + order.getLandedTotal().toPlainString() + "\n")
+                .getBytes(StandardCharsets.UTF_8);
+        var artifact = artifacts.store(
+                "invoice_original", order.getId(), invoiceNo + ".txt",
+                "text/plain; charset=utf-8", new ByteArrayInputStream(content),
+                Map.of("synthetic", true, "demo_scenario", scenario, "order_id", order.getId()));
+        var invoice = Invoice.register(
+                order.getId(), invoiceNo, null, LocalDate.parse("2026-07-21"),
+                order.getQuantity(), order.getUnit(),
+                order.getLandedTotal().divide(order.getQuantity(), 18, java.math.RoundingMode.HALF_UP),
+                order.getLandedTotal(), BigDecimal.ZERO, order.getLandedTotal(), BigDecimal.ZERO,
+                order.getSupplierName(), artifact.getId(), artifact.getSha256(), "demo-seed-v1");
+        invoice.applyMatchResult(true, Map.of(
+                "matched", true,
+                "diffs", List.of(),
+                "synthetic", true), null);
+        invoice.reconcile();
+        invoices.saveAndFlush(invoice);
+        audit.save(AuditEvent.create(
+                order.getTaskId(), null, null, "invoice_reconciled", "demo-seed",
+                Map.of("invoice_id", invoice.getId(), "invoice_no", invoiceNo,
+                        "order_id", order.getId(), "synthetic", true)));
     }
 
     @SuppressWarnings("unchecked")

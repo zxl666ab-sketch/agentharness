@@ -26,7 +26,10 @@ public class OrderStateMachineConfig {
     public StateMachine<OrderStatus, OrderEvent> orderStateMachine() {
         return StateMachine.define(OrderStatus.class, OrderEvent.class)
                 .permit(OrderStatus.PENDING_SHIPMENT, OrderEvent.SHIP, OrderStatus.SHIPPED)
-                .permit(OrderStatus.SHIPPED, OrderEvent.RECEIVE, OrderStatus.RECEIVED)
+                .permit(OrderStatus.SHIPPED, OrderEvent.RECEIVE, OrderStatus.PARTIALLY_RECEIVED)
+                .permit(OrderStatus.PARTIALLY_RECEIVED, OrderEvent.RECEIVE, OrderStatus.PARTIALLY_RECEIVED)
+                .permit(OrderStatus.SHIPPED, OrderEvent.RECEIVE_COMPLETE, OrderStatus.RECEIVED)
+                .permit(OrderStatus.PARTIALLY_RECEIVED, OrderEvent.RECEIVE_COMPLETE, OrderStatus.RECEIVED)
                 .permit(OrderStatus.PENDING_SHIPMENT, OrderEvent.CLOSE, OrderStatus.CLOSED)   // 取消
                 .permit(OrderStatus.RECEIVED, OrderEvent.CLOSE, OrderStatus.CLOSED)           // 完成
                 .build();

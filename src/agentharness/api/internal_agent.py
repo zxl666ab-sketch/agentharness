@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -17,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from agentharness.api.reporting import build_run_report
 from agentharness.contracts import (
     BudgetConfig,
+    MessageRole,
     PricingConfig,
     RunRequest,
     RunStatus,
@@ -63,6 +65,64 @@ def _optional_float(value: Any) -> float | None:
     return result
 
 
+def _render_interaction_answer(answer: Any, note: str = "") -> str:
+    labels = {
+        "quantity": "采购数量",
+        "unit": "采购单位",
+        "size": "尺寸",
+        "thickness": "厚度",
+        "max_lead_days": "最长交期",
+        "invoice_required": "是否开票",
+        "clarification": "补充说明",
+    }
+    if isinstance(answer, dict):
+        lines: list[str] = []
+        quantity = answer.get("quantity")
+        unit = str(answer.get("unit") or "").strip()
+        if quantity is not None and str(quantity).strip():
+            lines.append(f"采购数量：{quantity}{f' {unit}' if unit else ''}")
+        for key, value in answer.items():
+            if key in {"quantity", "unit"}:
+                continue
+            if key == "max_lead_days":
+                lead_days = str(value).strip()
+                if lead_days and not re.search(r"(?:天|日)$", lead_days):
+                    lead_days += " 天"
+                lines.append(f"最长交期：{lead_days}")
+                continue
+            lines.append(f"{labels.get(str(key), str(key))}：{value}")
+        size = str(answer.get("size") or "").strip()
+        size_match = re.fullmatch(
+            r"(\d+(?:\.\d+)?)\s*[xX×*]\s*(\d+(?:\.\d+)?)\s*(?:mm|毫米)?",
+            size,
+            re.I,
+        )
+        if size_match:
+            lines.extend(
+                (
+                    f"宽度：{size_match.group(1)} mm",
+                    f"长度：{size_match.group(2)} mm",
+                )
+            )
+    elif isinstance(answer, list):
+        lines = ["选择：" + "、".join(str(item) for item in answer)]
+    else:
+        lines = [str(answer)]
+    if note:
+        lines.append("补充说明：" + note)
+    return "\n".join(lines)
+
+
+def _merge_requirement_answer(source: str, answer: str) -> str:
+    merged = source.strip()
+    if not re.search(r"(?:^|\n)\s*物料\s*[:：]", merged):
+        first = re.split(r"[，,；;。.!！?？\n]", merged, maxsplit=1)[0]
+        item = re.sub(r"^(?:请|麻烦)?\s*(?:帮我|为我)?\s*(?:采购|购买|需要)\s*(?:一批|一些)?\s*", "", first).strip()
+        if item and not re.fullmatch(r"[\d,.]+(?:个|件|套|箱|卷|张)?", item):
+            merged += f"\n物料：{item}"
+    return f"{merged}\n{answer.strip()}".strip()
+
+
 class AgentCommandBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -71,6 +131,7 @@ class AgentCommandBody(BaseModel):
         "start_conversation",
         "import_quote",
         "resume_run",
+        "human_interaction_answer",
         "analyze",
         "approve_decision",
         "create_structured",
@@ -131,9 +192,12 @@ class InternalAgentCommands:
         if existing["status"] == "completed":
             return self._envelope(body.operation_id, "completed", existing["result"])
         if existing["status"] == "failed":
-            return self._envelope(
-                body.operation_id, "failed", None, str(existing.get("error") or "failed")
-            )
+            if body.operation_type != "human_interaction_answer" or not self.harness.storage.internal_operations.reopen_failed(
+                body.operation_id, body.payload_sha256
+            ):
+                return self._envelope(
+                    body.operation_id, "failed", None, str(existing.get("error") or "failed")
+                )
         try:
             result = await self._dispatch(body)
         except Exception as exc:  # noqa: BLE001 - failure must be durable for idempotency
@@ -153,6 +217,8 @@ class InternalAgentCommands:
             return await self._approve(body)
         if body.operation_type == "resume_run":
             return await self._resume(body)
+        if body.operation_type == "human_interaction_answer":
+            return await self._answer_interaction(body)
         if body.operation_type in {"create_structured", "reopen_task"}:
             return await self._bind_new_task(body)
         if body.operation_type == "parse_invoice":
@@ -206,12 +272,39 @@ class InternalAgentCommands:
                 source_message=message_text,
             )
             result = await self.harness.run(request)
+            if self._should_fallback_initial_capture(result):
+                fallback_request = request.model_copy(
+                    update={
+                        "session_id": result.session_id,
+                        "provider": "procurement_internal",
+                        "model": "deterministic-procurement",
+                        "reasoning_effort": None,
+                        "budget": request.budget.model_copy(
+                            update={"max_cost_usd": None}
+                        ),
+                        "pricing": PricingConfig(),
+                        "metadata": {
+                            **request.metadata,
+                            "procurement_fallback_from_run_id": result.run_id,
+                            "procurement_fallback_reason": result.error,
+                        },
+                    }
+                )
+                result = await self.harness.run(fallback_request)
         else:
             result = self._run_result(existing_run)
         self._require_paused(result, RunStatus.require_human, "初始采购资料复核")
         requirement_payload = self._latest_tool_payload(
             result.run_id, "procurement_capture_requirement"
         )
+        interaction = requirement_payload.get("interaction")
+        if isinstance(interaction, dict):
+            return {
+                "session_id": result.session_id,
+                "run_id": result.run_id,
+                "status": result.status.value,
+                "interaction": interaction,
+            }
         quote_payload = self._latest_tool_payload(
             result.run_id, "procurement_parse_uploaded_quotes"
         )
@@ -227,6 +320,165 @@ class InternalAgentCommands:
             "requirement": requirement,
             "quotes": quotes,
         }
+
+    async def _answer_interaction(self, body: AgentCommandBody) -> dict[str, Any]:
+        context = await self._java_json(f"/internal/v1/tasks/{body.aggregate_id}/context")
+        interaction_id = str(body.payload.get("interaction_id") or "")
+        interaction = next(
+            (
+                dict(item)
+                for item in context.get("interactions") or []
+                if isinstance(item, dict) and item.get("interaction_id") == interaction_id
+            ),
+            None,
+        )
+        if interaction is None:
+            raise ValueError("Java human interaction does not exist")
+        if interaction.get("status") != "ANSWERED":
+            raise ValueError("human interaction is not ready to resume")
+        if int(interaction.get("generation") or -1) != body.generation:
+            raise ValueError("human interaction generation is stale")
+        if int(context.get("generation") or -1) != body.generation:
+            raise ValueError("Java task generation is stale")
+        if int(context.get("task_version") or -1) != body.expected_task_version:
+            raise ValueError("Java task version is stale")
+        for key in ("run_id", "checkpoint_id"):
+            expected = str(interaction.get(key) or "")
+            supplied = str(body.payload.get(key) or "")
+            if expected != supplied:
+                raise ValueError(f"human interaction {key} binding is invalid")
+        answer = interaction.get("answer")
+        if answer != body.payload.get("answer"):
+            raise ValueError("human interaction answer does not match Java state")
+        note = str(interaction.get("note") or "").strip()
+        answer_text = _render_interaction_answer(answer, note)
+        selected_artifact_ids = {str(item) for item in interaction.get("artifact_ids") or []}
+        authorized_artifacts = [
+            dict(item)
+            for item in context.get("authorized_artifacts") or []
+            if isinstance(item, dict)
+        ]
+        supplemental_attachments = [
+            item
+            for item in authorized_artifacts
+            if str(item.get("artifact_id") or "") in selected_artifact_ids
+        ]
+        if len(supplemental_attachments) != len(selected_artifact_ids):
+            raise ValueError("human interaction contains an unauthorized artifact")
+        source_message = str(context.get("source_message") or "").strip()
+        combined_source = _merge_requirement_answer(source_message, answer_text)
+        run_id = str(interaction.get("run_id") or context.get("analysis_run_id") or "")
+        run = self.harness.storage.get_run(run_id) if run_id else None
+        checkpoint = self.harness.storage.load_checkpoint(run_id) if run is not None else None
+        rebuilt = run is None or checkpoint is None
+        if rebuilt:
+            existing = self._run_for_operation(body.operation_id)
+            if existing is None:
+                result = await self.harness.run(
+                    self._new_procurement_request(
+                        body,
+                        message=combined_source,
+                        stage="capture",
+                        pending_attachments=[
+                            dict(item)
+                            for item in context.get("attachments") or []
+                            if isinstance(item, dict)
+                        ] + supplemental_attachments,
+                        source_message=combined_source,
+                    )
+                )
+            else:
+                result = self._run_result(existing)
+            run_id = result.run_id
+        else:
+            self._ensure_run_provider(run_id)
+            resume_input = (
+                "采购员已回答当前问题。以下回答来自 Java 持久化交互，并已通过 Schema 校验：\n"
+                f"{answer_text}\n继续当前采购资料解析；仍缺关键字段时再次结构化提问。"
+            )
+            persisted_messages = self.harness.storage.get_messages(run_id)
+            answer_message = next(
+                (
+                    message
+                    for message in reversed(persisted_messages)
+                    if message.role == MessageRole.user
+                    and message.content == resume_input
+                ),
+                None,
+            )
+            answer_message_exists = answer_message is not None
+            answer_in_checkpoint = answer_message is not None and any(
+                message.id == answer_message.id for message in checkpoint.messages
+            )
+            self.harness.storage.merge_run_metadata(
+                run_id,
+                {
+                    "procurement_stage": "capture",
+                    "procurement_source_message": combined_source,
+                    "procurement_interaction_id": interaction_id,
+                    "procurement_interaction_operation_id": body.operation_id,
+                    **(
+                        {"procurement_pending_attachments": supplemental_attachments}
+                        if supplemental_attachments
+                        else {}
+                    ),
+                },
+            )
+            if answer_message_exists and not answer_in_checkpoint:
+                self.harness.storage.save_checkpoint(
+                    checkpoint.model_copy(
+                        update={
+                            "messages": [*checkpoint.messages, answer_message],
+                        }
+                    )
+                )
+            if answer_in_checkpoint and RunStatus(str(run["status"])) == RunStatus.require_human:
+                result = self._run_result(run)
+            else:
+                result = await self.harness.resume(
+                    run_id, input=None if answer_message_exists else resume_input
+                )
+        self._require_paused(result, RunStatus.require_human, "人工回答恢复")
+        requirement_payload = self._latest_tool_payload(
+            result.run_id, "procurement_capture_requirement"
+        )
+        next_interaction = requirement_payload.get("interaction")
+        response: dict[str, Any] = {
+            "interaction_id": interaction_id,
+            "session_id": result.session_id,
+            "run_id": result.run_id,
+            "status": result.status.value,
+            "rebuilt": rebuilt,
+        }
+        if isinstance(next_interaction, dict):
+            response["interaction"] = next_interaction
+            return response
+        quote_payload = self._latest_tool_payload(
+            result.run_id, "procurement_parse_uploaded_quotes"
+        )
+        requirement = quote_payload.get("requirement") or requirement_payload.get("requirement")
+        quotes = quote_payload.get("quotes")
+        if not isinstance(requirement, dict) or not isinstance(quotes, list):
+            raise ValueError("resumed procurement run did not return structured inputs")
+        response["requirement"] = requirement
+        response["quotes"] = quotes
+        return response
+
+    @staticmethod
+    def _should_fallback_initial_capture(result: Any) -> bool:
+        if result.status != RunStatus.failed:
+            return False
+        error = str(result.error or "").casefold()
+        return any(
+            marker in error
+            for marker in (
+                "arguments are invalid json",
+                "max_tool_calls_per_turn exceeded",
+                "provider ended before tool",
+                "tool call completed without a name",
+                "tool call id changed during streaming",
+            )
+        )
 
     async def _import_quote(self, body: AgentCommandBody) -> dict[str, Any]:
         context = await self._java_json(f"/internal/v1/tasks/{body.aggregate_id}/context")
@@ -464,6 +716,11 @@ class InternalAgentCommands:
                 "purchase_request_id": body.aggregate_id,
                 "operation_id": body.operation_id,
                 "source": "java_control_plane",
+                # Some OpenAI-compatible providers ignore parallel_tool_calls=false
+                # and stream multiple tool calls in one assistant turn. Procurement
+                # stages are deliberately sequential, so keep only the first call
+                # instead of failing the whole durable operation.
+                "truncate_excess_tool_calls_per_turn": True,
                 "generation": body.generation,
                 "procurement_stage": stage,
                 "procurement_source_message": source_message,

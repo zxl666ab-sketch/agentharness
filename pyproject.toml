@@ -60,16 +60,3 @@ exclude = ["output", ".venv", "web/node_modules", "web/dist"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B"]
 ignore = ["E501", "B008"]
-
-[tool.coverage.run]
-omit = [
-    "src/agentharness/web_main.py",
-    "src/agentharness/api/*",
-    "src/agentharness/engine/*",
-    "src/agentharness/rag/*",
-    "src/agentharness/security/*",
-    "src/agentharness/storage/*",
-    "src/agentharness/harness.py",
-    "src/agentharness/session_history.py",
-    "src/agentharness/tools/*",
-]

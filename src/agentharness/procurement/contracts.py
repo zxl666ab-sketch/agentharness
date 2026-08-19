@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class ProcurementStatus(StrEnum):
     DRAFT = "draft"
+    WAITING_HUMAN = "waiting_human"
     COLLECTING = "collecting"
     REVIEW = "review"
     READY = "ready"
