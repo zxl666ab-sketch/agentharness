@@ -37,7 +37,7 @@ public class AgentOutboxWorker {
         this.aiTasks = aiTasks;
     }
 
-    @Scheduled(fixedDelayString = "${app.outbox.poll-delay-ms:500}")
+    @Scheduled(fixedDelayString = "${app.outbox.poll-delay-ms:100}")
     @Transactional
     public void dispatch() {
         for (var command : commands.lockDispatchable(PageRequest.of(0, 10))) {

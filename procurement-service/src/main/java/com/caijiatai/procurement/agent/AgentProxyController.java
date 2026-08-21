@@ -64,6 +64,8 @@ public final class AgentProxyController {
         var apiKey = env.getOrDefault("OPENAI_API_KEY", "");
         var config = new LinkedHashMap<String, Object>();
         config.put("provider", provider);
+        config.put("planner_mode", env.getOrDefault(
+                "AGENTHARNESS_PROCUREMENT_PLANNER_MODE", "model"));
         config.put("model", provider.equals("openai")
                 ? env.getOrDefault("OPENAI_MODEL", "gpt-4o-mini") : "procurement-fake-v1");
         config.put("base_url", env.getOrDefault("OPENAI_BASE_URL", null));

@@ -3,7 +3,9 @@ invalidation, validated-only caching, no-op when Redis is unavailable."""
 
 from __future__ import annotations
 
+import asyncio
 import io
+import json
 from pathlib import Path
 from typing import Any
 
@@ -147,6 +149,69 @@ class TestSemanticCacheCore:
 
 
 class TestSemanticCacheWiring:
+    @pytest.mark.asyncio
+    async def test_quote_batch_parsing_is_parallel_but_bounded(
+        self, tmp_path: Path
+    ) -> None:
+        """A large attachment batch must not create an unbounded worker burst."""
+
+        storage = Storage(tmp_path / "runtime")
+        session_id = storage.create_session("bounded-parse")
+        run_id = "b" * 32
+        storage.create_run(
+            run_id=run_id,
+            session_id=session_id,
+            root_run_id=run_id,
+            provider="fake",
+            model="m",
+        )
+        attachments = [
+            {"artifact_id": f"jb{index:032x}", "filename": f"quote-{index}.xlsx"}
+            for index in range(5)
+        ]
+        storage.merge_run_metadata(
+            run_id, {"procurement_pending_attachments": attachments}
+        )
+        tools = ProcurementAgentTools(
+            storage,
+            fetch_context=lambda _path: _aresolve(b""),
+            fetch_artifact=lambda _path: _aresolve(b""),
+            quote_parse_concurrency=2,
+        )
+        active = 0
+        peak = 0
+
+        async def parse(attachment: dict[str, Any]) -> dict[str, Any]:
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return {
+                "artifact_id": attachment["artifact_id"],
+                "supplier_name": attachment["filename"],
+                "status": "ready",
+                "parser_version": "test",
+                "processing_ms": "1",
+                "cache_hit": False,
+                "extracted": {"fields": {}},
+            }
+
+        tools._parse_attachment = parse  # type: ignore[method-assign]
+        result = await tools.parse_uploaded_quotes(
+            type("Context", (), {"run_id": run_id, "metadata": {}})(), {}
+        )
+
+        payload = json.loads(result.content)
+        assert peak == 2
+        assert [quote["artifact_id"] for quote in payload["quotes"]] == [
+            attachment["artifact_id"] for attachment in attachments
+        ]
+        assert payload["parse_batch"]["attachment_count"] == 5
+        assert payload["parse_batch"]["concurrency"] == 2
+        assert payload["parse_batch"]["processing_ms"] >= 0
+        storage.close()
+
     def test_quote_parse_cache_hit_skips_reparse(self, tmp_path: Path) -> None:
         clock = _FakeClock()
         cache = _cache(clock)

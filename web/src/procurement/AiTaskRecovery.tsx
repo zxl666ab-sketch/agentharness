@@ -63,6 +63,52 @@ export function AiTaskRecovery({ task, busy, error, onRetry, onCancel, onSupplem
       ? "该错误不可直接重试，请先补充或修正资料"
       : "重试 AI 任务";
 
+  if (task.status === "SUCCEEDED") {
+    return (
+      <section className="proc-ai-recovery succeeded flex flex-wrap items-center justify-between bg-surface-subtle/70 border-b border-border/60 text-xs" aria-label="AI 任务状态">
+        <div className="flex items-center gap-2 text-xs min-w-0">
+          <span className="w-5 h-5 rounded-full bg-accent-soft text-accent flex items-center justify-center flex-shrink-0">
+            <CheckCircle2 size={13} />
+          </span>
+          <strong className="text-text font-semibold">AI 分析完成</strong>
+          <span className="text-text-muted text-[11px]">第 {task.retry_count + 1} 次尝试 · 结论已持久化</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            className="proc-button ghost text-xs text-text-muted hover:text-text inline-flex items-center gap-1 py-1 px-2.5 rounded-lg border border-transparent hover:border-border transition-colors"
+            type="button"
+            aria-expanded={logsOpen}
+            onClick={() => setLogsOpen((value) => !value)}
+          >
+            <ScrollText size={13} />查看执行日志{logsOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+          </button>
+        </div>
+        {logsOpen ? (
+          <div className="proc-ai-log w-full mt-2 rounded-xl overflow-hidden border border-border/80 bg-surface shadow-xs" role="region" aria-label="AI 任务步骤日志">
+            <header className="flex items-center justify-between px-3.5 py-2 bg-surface-subtle border-b border-border/60 text-xs text-text-muted font-mono">
+              <span>Trace <code className="text-text" title={task.trace_id}>{task.trace_id}</code></span>
+              <span>Operation <code className="text-text" title={task.operation_id || "-"}>{task.operation_id || "-"}</code></span>
+            </header>
+            {task.records.length ? (
+              <ol className="divide-y divide-border/40 text-xs">
+                {task.records.map((record) => (
+                  <li key={record.record_id} className="flex items-center justify-between gap-3 px-3.5 py-2">
+                    <span className="flex items-center gap-2 min-w-0">
+                      {record.status === "SUCCEEDED" ? <CheckCircle2 size={13} className="text-accent flex-shrink-0" /> : record.status === "FAILED" ? <AlertTriangle size={13} className="text-danger flex-shrink-0" /> : <LoaderCircle size={13} className="text-info spin flex-shrink-0" />}
+                      <strong className="font-medium text-text">{STEP_LABELS[record.step]}</strong>
+                      <small className="text-text-muted truncate">{record.summary || record.error_message || record.status}</small>
+                    </span>
+                    <time className="text-[11px] text-text-muted font-mono flex-shrink-0" dateTime={record.created_at}>{timeText(record.created_at)}</time>
+                  </li>
+                ))}
+              </ol>
+            ) : <p className="p-4 text-center text-xs text-text-muted">尚无步骤记录，任务仍在等待调度。</p>}
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
   return (
     <section className={`proc-ai-recovery ${failed ? "failed" : active ? "running" : "terminal"}`} aria-label="AI 任务状态">
       <div className="proc-ai-recovery-summary">

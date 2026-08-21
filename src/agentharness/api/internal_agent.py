@@ -148,6 +148,18 @@ class AgentCommandBody(BaseModel):
 
 
 class InternalAgentCommands:
+    # Structured procurement stages have a deterministic tool graph.  In
+    # hybrid mode the AgentHarness Run and every tool/audit event are still
+    # preserved, but the graph is planned by the in-process Agent adapter
+    # instead of paying for a remote model round-trip at every edge.
+    _INTERNAL_PLANNER_STAGES = frozenset({
+        "capture",
+        "import_quote",
+        "comparison",
+        "decision",
+        "bind",
+    })
+
     def __init__(
         self,
         harness: Harness,
@@ -485,12 +497,28 @@ class InternalAgentCommands:
         run_id = str(context.get("analysis_run_id") or "")
         if not run_id or self.harness.storage.get_run(run_id) is None:
             raise ValueError("Java task is not bound to an Agent run")
+        raw_attachments = body.payload.get("attachments")
+        if raw_attachments is None:
+            # Backward-compatible single-file command payload.
+            attachments = [dict(body.payload)]
+        elif isinstance(raw_attachments, list):
+            attachments = [dict(item) for item in raw_attachments if isinstance(item, dict)]
+        else:
+            raise ValueError("quote import attachments must be a list")
+        if not attachments or any(
+            not str(item.get("artifact_id") or "").strip()
+            or not str(item.get("filename") or "").strip()
+            for item in attachments
+        ):
+            raise ValueError("quote import attachment is invalid")
         self._ensure_run_provider(run_id)
         self.harness.storage.merge_run_metadata(
             run_id,
             {
                 "procurement_stage": "import_quote",
-                "procurement_pending_attachments": [dict(body.payload)],
+                # One command owns the entire selected batch.  The parser then
+                # applies its bounded gather, preserving the attachment order.
+                "procurement_pending_attachments": attachments,
                 "procurement_operation_id": body.operation_id,
             },
         )
@@ -501,9 +529,24 @@ class InternalAgentCommands:
         self._require_paused(result, RunStatus.require_human, "报价解析复核")
         payload = self._latest_tool_payload(run_id, "procurement_parse_uploaded_quotes")
         quotes = payload.get("quotes")
-        if not isinstance(quotes, list) or len(quotes) != 1 or not isinstance(quotes[0], dict):
+        expected_artifact_ids = [str(item["artifact_id"]) for item in attachments]
+        if (
+            not isinstance(quotes, list)
+            or len(quotes) != len(expected_artifact_ids)
+            or any(not isinstance(quote, dict) for quote in quotes)
+            or [str(quote.get("artifact_id") or "") for quote in quotes] != expected_artifact_ids
+        ):
             raise ValueError("采购 Agent 未返回新增报价的解析结果")
-        return {"quote": quotes[0], "run_id": run_id, "status": result.status.value}
+        response: dict[str, Any] = {
+            "quotes": quotes,
+            "run_id": run_id,
+            "status": result.status.value,
+        }
+        # Keep the existing single-file result contract available to callers
+        # that have not switched to the batch endpoint yet.
+        if len(quotes) == 1:
+            response["quote"] = quotes[0]
+        return response
 
     async def _analyze(self, body: AgentCommandBody) -> dict[str, Any]:
         context = await self._java_json(f"/internal/v1/tasks/{body.aggregate_id}/context")
@@ -678,7 +721,13 @@ class InternalAgentCommands:
         source_message: str,
     ) -> RunRequest:
         config = _load_model_config(self.harness.data_dir)
-        provider, model = self._configure_provider(config)
+        planner_mode = str(config.get("planner_mode") or "model").strip().lower()
+        if planner_mode not in {"model", "hybrid"}:
+            raise ValueError("采购 Agent planner_mode 必须是 model 或 hybrid")
+        if planner_mode == "hybrid" and stage in self._INTERNAL_PLANNER_STAGES:
+            provider, model = "procurement_internal", "deterministic-procurement"
+        else:
+            provider, model = self._configure_provider(config)
         max_cost = _optional_float(config.get("max_cost_usd"))
         pricing = PricingConfig(
             input_per_million_usd=_optional_float(
@@ -943,6 +992,9 @@ def _model_config_path(data_dir: Path) -> Path:
 def _default_model_config() -> dict[str, Any]:
     return {
         "provider": os.environ.get("AGENTHARNESS_PROCUREMENT_PROVIDER", "openai"),
+        "planner_mode": os.environ.get(
+            "AGENTHARNESS_PROCUREMENT_PLANNER_MODE", "model"
+        ),
         "model": (
             os.environ.get("AGENTHARNESS_PROCUREMENT_MODEL")
             or os.environ.get("OPENAI_MODEL")
@@ -985,6 +1037,7 @@ def _read_model_config(data_dir: Path) -> dict[str, Any]:
 def _write_model_config(data_dir: Path, body: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "provider",
+        "planner_mode",
         "model",
         "base_url",
         "api_mode",
@@ -1000,6 +1053,8 @@ def _write_model_config(data_dir: Path, body: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(422, f"unknown model config fields: {sorted(unknown)}")
     if body.get("provider") not in {"procurement_fake", "openai"}:
         raise HTTPException(422, "provider must be procurement_fake or openai")
+    if body.get("planner_mode", "model") not in {"model", "hybrid"}:
+        raise HTTPException(422, "planner_mode must be model or hybrid")
     if not str(body.get("model") or "").strip():
         raise HTTPException(422, "model must not be blank")
     for key in (

@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef } from "react";
 
 import { useAgentStream } from "../useAgentStream";
-import { procurementApi } from "./api";
+import { operationRefetchInterval, procurementApi } from "./api";
 import type {
   AiTaskDetail,
   ProcurementRequest,
@@ -14,11 +14,19 @@ import type { TaskFilter } from "./workbenchUrl";
 
 export const TASK_PAGE_SIZE = 20;
 export const ATTENTION_STATUSES = new Set<ProcurementRequestSummary["status"]>([
-  "waiting_human", "review", "ready", "analyzed", "approval_pending",
+  "draft", "collecting", "waiting_human", "review", "ready", "analyzed", "approval_pending",
 ]);
 export const COMPLETE_STATUSES = new Set<ProcurementRequestSummary["status"]>([
   "approved", "no_award", "cancelled",
 ]);
+const TRANSIENT_TASK_STATUSES = new Set<ProcurementRequestSummary["status"]>([
+  "draft", "collecting", "analyzing", "approval_pending",
+]);
+const TERMINAL_OPERATION_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
+function taskRefetchInterval(status: ProcurementRequestSummary["status"] | undefined) {
+  return status && TRANSIENT_TASK_STATUSES.has(status) ? 750 : false;
+}
 
 /**
  * P1-5 拆分 2/5：全部 react-query 数据源 + 轮询策略 + 提交/失效。
@@ -27,11 +35,32 @@ export const COMPLETE_STATUSES = new Set<ProcurementRequestSummary["status"]>([
  */
 export function useRequestQueries(state: WorkbenchState) {
   const queryClient = useQueryClient();
-  const { selectedId, activeTab, view, taskFilter, taskPage, search, pendingRunId } = state;
+  const {
+    selectedId,
+    activeTab,
+    view,
+    taskFilter,
+    taskPage,
+    search,
+    pendingRunId,
+    pendingOperation,
+    setActionError,
+    setPendingOperation,
+  } = state;
 
   const metaQuery = useQuery({ queryKey: ["procurement-meta"], queryFn: procurementApi.meta });
   const configQuery = useQuery({ queryKey: ["procurement-config"], queryFn: procurementApi.config });
-  const requestsQuery = useQuery({ queryKey: ["procurement-requests"], queryFn: procurementApi.requests });
+  const requestsQuery = useQuery({
+    queryKey: ["procurement-requests"],
+    queryFn: procurementApi.requests,
+    // Keep the dashboard quiet when every task is settled.  A task in a
+    // transient state opts the list back into second-level synchronization.
+    refetchInterval: (query) => (
+      !!pendingOperation || query.state.data?.some((request) =>
+        TRANSIENT_TASK_STATUSES.has(request.status)
+      )
+    ) ? 1_500 : false,
+  });
   const allAiTasksQuery = useQuery({
     queryKey: ["procurement-ai-tasks"],
     queryFn: () => procurementApi.aiTasks(),
@@ -46,12 +75,15 @@ export function useRequestQueries(state: WorkbenchState) {
     queryKey: ["procurement-request", selectedId],
     queryFn: () => procurementApi.request(selectedId!),
     enabled: !!selectedId,
-    refetchInterval: (query) => {
-      const status = query.state.data?.status;
-      return status && ["draft", "waiting_human", "analyzing", "approval_pending"].includes(status)
-        ? 1_500
-        : false;
-    },
+    refetchInterval: (query) => pendingOperation?.taskId === selectedId
+      ? 750
+      : taskRefetchInterval(query.state.data?.status),
+  });
+  const operationQuery = useQuery({
+    queryKey: ["procurement-operation", pendingOperation?.operationId],
+    queryFn: () => procurementApi.operation(pendingOperation!.operationId),
+    enabled: !!pendingOperation,
+    refetchInterval: (query) => operationRefetchInterval(query.state.data),
   });
   const interactionsQuery = useQuery({
     queryKey: ["procurement-interactions", selectedId],
@@ -133,22 +165,60 @@ export function useRequestQueries(state: WorkbenchState) {
     }
   }, [requests, selectedId, state, view]);
 
+  useEffect(() => {
+    const operation = operationQuery.data;
+    if (!pendingOperation || !operation || !TERMINAL_OPERATION_STATUSES.has(operation.status)) {
+      return;
+    }
+    if (operation.status === "failed" && selectedId === pendingOperation.taskId) {
+      setActionError(operation.last_error || "异步操作执行失败");
+    }
+    setPendingOperation(null);
+    void Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["procurement-requests"] }),
+      queryClient.invalidateQueries({ queryKey: ["procurement-request", pendingOperation.taskId] }),
+      queryClient.invalidateQueries({ queryKey: ["procurement-ai-tasks"] }),
+      queryClient.invalidateQueries({ queryKey: ["procurement-ai-tasks", pendingOperation.taskId] }),
+    ]);
+  }, [
+    operationQuery.data,
+    pendingOperation,
+    queryClient,
+    selectedId,
+    setActionError,
+    setPendingOperation,
+  ]);
+
   const stream = useAgentStream(true, 0);
   const disconnectPolls = useRef(0);
+  const streamRefreshTimer = useRef<number | null>(null);
   const currentRunId = detailQuery.data?.analysis_run_id || pendingRunId;
   const latestEvent = stream.events.at(-1);
   useEffect(() => {
     if (!latestEvent || latestEvent.run_id !== currentRunId || !selectedId) return;
-    void Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["procurement-request", selectedId] }),
-      queryClient.invalidateQueries({ queryKey: ["procurement-requests"] }),
-      queryClient.invalidateQueries({ queryKey: ["procurement-run", currentRunId] }),
-      queryClient.invalidateQueries({ queryKey: ["procurement-messages", currentRunId] }),
-      queryClient.invalidateQueries({ queryKey: ["procurement-tools", currentRunId] }),
-      queryClient.invalidateQueries({ queryKey: ["run-report", currentRunId] }),
-      queryClient.invalidateQueries({ queryKey: ["run-checkpoint", currentRunId] }),
-    ]);
+    // A streamed run can emit many token/tool events in a burst.  Coalescing
+    // them preserves live updates without refetching the same resources once
+    // per event.
+    if (streamRefreshTimer.current !== null) return;
+    streamRefreshTimer.current = window.setTimeout(() => {
+      streamRefreshTimer.current = null;
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["procurement-request", selectedId] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-requests"] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-run", currentRunId] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-messages", currentRunId] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-tools", currentRunId] }),
+        queryClient.invalidateQueries({ queryKey: ["run-report", currentRunId] }),
+        queryClient.invalidateQueries({ queryKey: ["run-checkpoint", currentRunId] }),
+      ]);
+    }, 150);
   }, [currentRunId, latestEvent, queryClient, selectedId]);
+
+  useEffect(() => () => {
+    if (streamRefreshTimer.current !== null) {
+      window.clearTimeout(streamRefreshTimer.current);
+    }
+  }, []);
 
   useEffect(() => {
     if (stream.status !== "error" || !selectedId) {
@@ -190,6 +260,7 @@ export function useRequestQueries(state: WorkbenchState) {
     allAiTasksQuery,
     reviewsQuery,
     detailQuery,
+    operationQuery,
     interactionsQuery,
     aiTasksQuery,
     aiTaskQuery,

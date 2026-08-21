@@ -1,6 +1,7 @@
 import {
   BarChart3,
   Bot,
+  ChevronDown,
   ClipboardCheck,
   FileSignature,
   FolderOpen,
@@ -13,6 +14,7 @@ import {
   Users,
   Wrench,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 
 import { type DemoRole, visibleViews } from "./roles";
 import type { WorkbenchView } from "./workbenchUrl";
@@ -59,41 +61,109 @@ export function WorkbenchNavigation({ active, role, aiAttention, reviewAttention
   const business = BUSINESS_ITEMS.filter((item) => visible.has(item.id));
   const management = MANAGEMENT_ITEMS.filter((item) => visible.has(item.id));
 
-  const renderItem = ({ id, label, icon: Icon }: { id: WorkbenchView; label: string; icon: typeof Users }) => {
+  const [businessOpen, setBusinessOpen] = useState(true);
+  const [managementOpen, setManagementOpen] = useState(true);
+
+  // Auto-expand group if current active item is inside it
+  useEffect(() => {
+    if (business.some((item) => item.id === active)) {
+      setBusinessOpen(true);
+    }
+    if (management.some((item) => item.id === active)) {
+      setManagementOpen(true);
+    }
+  }, [active, business, management]);
+
+  const renderItem = ({ id, label, icon: Icon }: { id: WorkbenchView; label: string; icon: typeof Users }, isNested = false) => {
     const count = countFor(id, aiAttention, reviewAttention);
+    const isAiOrReview = id === "ai" || id === "reviews";
     return (
       <button
         key={id}
         type="button"
-        className={active === id ? "active" : ""}
+        className={`proc-nav-item flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium transition-all duration-150 relative group ${
+          isNested ? "nested pl-7" : ""
+        } ${
+          active === id
+            ? "active bg-accent-soft text-accent font-semibold shadow-xs"
+            : "text-text-secondary hover:text-text hover:bg-surface-subtle"
+        }`}
         aria-current={active === id ? "page" : undefined}
         onClick={() => onChange(id)}
       >
-        <Icon size={17} />
-        <span>{label}</span>
-        {count ? <small>{count > 99 ? "99+" : count}</small> : null}
+        <span className={`proc-nav-icon flex-shrink-0 transition-colors ${active === id ? "text-accent" : "text-text-muted group-hover:text-text"}`}>
+          <Icon size={16} />
+        </span>
+        <span className="proc-nav-label truncate">{label}</span>
+        {count ? (
+          <span className={`proc-nav-badge ml-auto font-mono text-[10px] font-bold px-1.5 py-0.2 rounded-full border ${
+            isAiOrReview
+              ? "danger bg-danger-soft text-danger border-danger/30"
+              : "warning bg-warning-soft text-warning border-warning/30"
+          }`}>
+            {count > 99 ? "99+" : count}
+          </span>
+        ) : null}
       </button>
     );
   };
 
   return (
-    <nav className="proc-primary-nav" aria-label="采购工作台主导航">
-      <div className="proc-primary-nav-label">采购主线</div>
-      <div className="proc-nav-primary-items">{primary.map(renderItem)}</div>
-      {fulfillment.length ? (
-        <div className="proc-nav-children" aria-label="履约中心二级入口">{fulfillment.map(renderItem)}</div>
-      ) : null}
+    <nav className="proc-primary-nav flex flex-col gap-4 p-3 overflow-y-auto" aria-label="采购工作台主导航">
+      <div className="proc-nav-section flex flex-col gap-1">
+        <div className="proc-primary-nav-label px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-text-muted">采购主线</div>
+        <div className="proc-nav-primary-items flex flex-col gap-1">
+          {primary.map((item) => renderItem(item))}
+          {fulfillment.length ? (
+            <div className="proc-nav-children flex flex-col gap-1" aria-label="履约中心二级入口">
+              {fulfillment.map((item) => renderItem(item, true))}
+            </div>
+          ) : null}
+        </div>
+      </div>
+
       {business.length ? (
-        <details className="proc-nav-group" open={business.some((item) => item.id === active) || undefined}>
-          <summary><FolderOpen size={15} /><span>业务资料</span></summary>
-          <div>{business.map(renderItem)}</div>
-        </details>
+        <div className="proc-nav-section flex flex-col gap-1">
+          <button
+            type="button"
+            className={`proc-nav-group-toggle flex items-center justify-between w-full px-2 py-1.5 text-xs font-semibold text-text-muted hover:text-text rounded-md transition-colors ${businessOpen ? "open" : ""}`}
+            onClick={() => setBusinessOpen((prev) => !prev)}
+            aria-expanded={businessOpen}
+          >
+            <span className="proc-nav-group-title flex items-center gap-2">
+              <FolderOpen size={15} />
+              <span>业务资料</span>
+            </span>
+            <ChevronDown size={14} className={`proc-nav-chevron transition-transform duration-200 ${businessOpen ? "open rotate-0" : "-rotate-90"}`} />
+          </button>
+          {businessOpen ? (
+            <div className="proc-nav-group-items flex flex-col gap-1">
+              {business.map((item) => renderItem(item, true))}
+            </div>
+          ) : null}
+        </div>
       ) : null}
+
       {management.length ? (
-        <details className="proc-nav-group" open={management.some((item) => item.id === active) || undefined}>
-          <summary><Wrench size={15} /><span>管理与技术</span></summary>
-          <div>{management.map(renderItem)}</div>
-        </details>
+        <div className="proc-nav-section flex flex-col gap-1">
+          <button
+            type="button"
+            className={`proc-nav-group-toggle flex items-center justify-between w-full px-2 py-1.5 text-xs font-semibold text-text-muted hover:text-text rounded-md transition-colors ${managementOpen ? "open" : ""}`}
+            onClick={() => setManagementOpen((prev) => !prev)}
+            aria-expanded={managementOpen}
+          >
+            <span className="proc-nav-group-title flex items-center gap-2">
+              <Wrench size={15} />
+              <span>管理与技术</span>
+            </span>
+            <ChevronDown size={14} className={`proc-nav-chevron transition-transform duration-200 ${managementOpen ? "open rotate-0" : "-rotate-90"}`} />
+          </button>
+          {managementOpen ? (
+            <div className="proc-nav-group-items flex flex-col gap-1">
+              {management.map((item) => renderItem(item, true))}
+            </div>
+          ) : null}
+        </div>
       ) : null}
     </nav>
   );

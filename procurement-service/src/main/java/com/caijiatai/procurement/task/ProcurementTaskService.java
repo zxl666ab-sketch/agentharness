@@ -132,6 +132,10 @@ public class ProcurementTaskService {
         }
 
         var task = tasks.saveAndFlush(ProcurementTask.draft(message));
+        // Files are durable before the command is accepted, but parsing happens
+        // asynchronously in the Agent.  Expose that state immediately so the
+        // browser can navigate optimistically and poll for collecting -> review.
+        task.setStatus(TaskStatus.COLLECTING);
         var artifactPayload = new ArrayList<Map<String, Object>>();
         for (var file : loaded) {
             var artifact = artifactStore.store(
@@ -203,50 +207,93 @@ public class ProcurementTaskService {
     @Transactional
     public ProcurementDtos.OperationAccepted uploadQuote(
             String taskId, MultipartFile file, String idempotencyKey) {
+        return uploadQuotes(taskId, List.of(file), idempotencyKey);
+    }
+
+    /**
+     * Accept a UI file selection as one durable command. Keeping the batch in
+     * one task generation prevents per-file commands from staling their
+     * predecessors before the asynchronous Agent results return.
+     */
+    @Transactional
+    public ProcurementDtos.OperationAccepted uploadQuotes(
+            String taskId, List<MultipartFile> files, String idempotencyKey) {
         var task = lockTask(taskId);
         if (decisions.findByTaskId(taskId).isPresent()) {
             throw conflict("task_terminal", "终态采购任务不能新增报价");
         }
-        if (quotes.countByTaskId(taskId) >= MAX_QUOTES) {
-            throw conflict("quote_limit_reached", "每个采购任务最多 50 份报价");
+        if (files == null || files.isEmpty()) {
+            throw bad("invalid_attachment_count", "请至少上传 1 份报价");
         }
-        var loaded = loadFiles(List.of(file)).getFirst();
-        var payloadSha = CanonicalJson.sha256(Map.of(
-                "task_id", taskId, "filename", loaded.filename(), "sha256", loaded.sha256()));
+        var loaded = loadFiles(files);
+        var fingerprint = new LinkedHashMap<String, Object>();
+        fingerprint.put("task_id", taskId);
+        if (loaded.size() == 1) {
+            // Preserve idempotency compatibility for the original single-file API.
+            var item = loaded.getFirst();
+            fingerprint.put("filename", item.filename());
+            fingerprint.put("sha256", item.sha256());
+        } else {
+            fingerprint.put("files", loaded.stream().map(item -> Map.of(
+                    "filename", item.filename(), "sha256", item.sha256(), "size", item.bytes().length)).toList());
+        }
+        var payloadSha = CanonicalJson.sha256(fingerprint);
         var key = normalizeIdempotencyKey(idempotencyKey, payloadSha);
         var existing = idempotency.findById(new IdempotencyRecord.Key("quote_import", key));
         if (existing.isPresent()) {
             return existingAccepted(existing.get(), payloadSha);
         }
-        var previousAttachment = attachments.findByTaskIdAndSha256(taskId, loaded.sha256());
-        if (previousAttachment.isPresent()
-                && quotes.existsByTaskIdAndSourceArtifactId(
-                        taskId, previousAttachment.get().getArtifactId())) {
-            throw conflict("duplicate_quote", "同一报价文件已导入，请勿重复上传");
+        var previousAttachments = new LinkedHashMap<String, ProcurementAttachment>();
+        for (var attachment : attachments.findByTaskIdOrderByCreatedAtAsc(taskId)) {
+            previousAttachments.putIfAbsent(attachment.getSha256(), attachment);
         }
+        var incomingShas = new java.util.LinkedHashSet<String>();
+        for (var item : loaded) {
+            if (!incomingShas.add(item.sha256())) {
+                throw conflict("duplicate_quote", "同一报价文件不能在同一批次重复上传");
+            }
+            var previous = previousAttachments.get(item.sha256());
+            if (previous != null && quotes.existsByTaskIdAndSourceArtifactId(taskId, previous.getArtifactId())) {
+                throw conflict("duplicate_quote", "同一报价文件已导入，请勿重复上传");
+            }
+        }
+        var newlyStoredCount = loaded.stream()
+                .filter(item -> !previousAttachments.containsKey(item.sha256()))
+                .count();
+        if (previousAttachments.size() + newlyStoredCount > MAX_QUOTES) {
+            throw conflict("quote_limit_reached", "每个采购任务最多 50 份报价");
+        }
+
         invalidate(task);
-        var artifact = previousAttachment
-                .map(item -> businessArtifacts.findById(item.getArtifactId())
-                        .orElseThrow(() -> notFound("artifact_not_found", "报价原件不存在")))
-                .orElseGet(() -> {
-                    var stored = artifactStore.store(
-                            "procurement_original", taskId, loaded.filename(), loaded.contentType(),
-                            new ByteArrayInputStream(loaded.bytes()), Map.of("source", "quote_import"));
-                    attachments.save(ProcurementAttachment.from(taskId, stored));
-                    return stored;
-                });
+        // invalidate() resets a task to READY.  A newly accepted quote import
+        // is not ready for comparison until the async parser has persisted it.
+        task.setStatus(TaskStatus.COLLECTING);
+        var artifactPayload = new ArrayList<Map<String, Object>>();
+        for (var item : loaded) {
+            var previous = previousAttachments.get(item.sha256());
+            var artifact = previous == null
+                    ? artifactStore.store(
+                            "procurement_original", taskId, item.filename(), item.contentType(),
+                            new ByteArrayInputStream(item.bytes()), Map.of("source", "quote_import"))
+                    : businessArtifacts.findById(previous.getArtifactId())
+                            .orElseThrow(() -> notFound("artifact_not_found", "报价原件不存在"));
+            if (previous == null) {
+                attachments.save(ProcurementAttachment.from(taskId, artifact));
+            }
+            artifactPayload.add(Map.of(
+                    "artifact_id", artifact.getId(), "filename", artifact.getFilename(),
+                    "sha256", artifact.getSha256(), "content_type", artifact.getContentType(),
+                    "size_bytes", artifact.getSizeBytes()));
+        }
         contextCache.evict(taskId);
-        var payload = Map.<String, Object>of(
-                "artifact_id", artifact.getId(), "filename", artifact.getFilename(),
-                "sha256", artifact.getSha256(), "content_type", artifact.getContentType(),
-                "size_bytes", artifact.getSizeBytes());
+        var payload = Map.<String, Object>of("attachments", artifactPayload);
         var command = commands.save(AgentCommand.accept(
                 "import_quote", taskId, task.getGeneration(), task.getVersion(), payload));
             commands.alignTimestampsToDbClock(command.getOperationId());
         idempotency.save(IdempotencyRecord.reserve("quote_import", key, payloadSha, command.getOperationId()));
         audit.save(AuditEvent.create(
                 taskId, null, task.getAnalysisRunId(), "quote_import_accepted", operator,
-                Map.of("operation_id", command.getOperationId(), "artifact_id", artifact.getId())));
+                Map.of("operation_id", command.getOperationId(), "attachment_count", artifactPayload.size())));
         return accepted(command, task);
     }
 

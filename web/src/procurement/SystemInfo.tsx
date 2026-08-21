@@ -21,7 +21,7 @@ export function SystemInfo() {
   const gatewayProviders = platform?.gateway?.providers || [];
 
   return (
-    <section className="proc-main">
+    <div className="proc-center-page flex flex-col gap-6 p-6 max-w-7xl mx-auto w-full">
       <header className="proc-page-head">
         <div>
           <h1>系统信息</h1>
@@ -124,6 +124,6 @@ export function SystemInfo() {
           </div>
         ) : null}
       </div>
-    </section>
+    </div>
   );
 }

@@ -31,7 +31,9 @@ def _normalize_processing(value):
     if isinstance(value, dict):
         processed = {}
         for key, item in value.items():
-            if key == "processing" and isinstance(item, dict):
+            if key == "processing_ms":
+                item = 0
+            elif key == "processing" and isinstance(item, dict):
                 item = dict(item)
                 item["total_ms"] = 0
                 item["average_ms_per_quote"] = 0

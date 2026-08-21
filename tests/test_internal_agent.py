@@ -342,6 +342,39 @@ async def test_start_conversation_falls_back_after_model_tool_protocol_error(
     await harness.aclose()
 
 
+def test_hybrid_planner_keeps_agent_run_but_uses_internal_structured_planner(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AGENTHARNESS_PROCUREMENT_PLANNER_MODE", "hybrid")
+    harness = Harness(data_dir=tmp_path / "runtime", providers={"openai": FakeModelAdapter()})
+    (harness.data_dir / "procurement-model-config.json").write_text(
+        json.dumps({"provider": "openai", "model": "hy3", "api_key": "test-key"}),
+        encoding="utf-8",
+    )
+    commands = InternalAgentCommands(harness)
+    payload = {"message": "采购 5000 个纸箱，15 天内交付。", "attachments": []}
+    body = AgentCommandBody(
+        operation_id="11111111-1111-1111-1111-111111111111",
+        operation_type="start_conversation",
+        aggregate_id="a" * 32,
+        generation=1,
+        expected_task_version=0,
+        payload_sha256=_canonical_sha256(payload),
+        payload=payload,
+    )
+
+    request = commands._new_procurement_request(
+        body,
+        message=payload["message"],
+        stage="capture",
+        pending_attachments=[],
+        source_message=payload["message"],
+    )
+
+    assert request.provider == "procurement_internal"
+    assert request.model == "deterministic-procurement"
+    assert request.metadata["procurement_stage"] == "capture"
+    harness.close()
+
+
 @pytest.mark.asyncio
 async def test_start_conversation_uses_configured_model_and_prefills_usd_rate(tmp_path) -> None:
     model_requirement = {
@@ -703,6 +736,65 @@ async def test_internal_operation_is_durable_and_payload_bound(tmp_path) -> None
     )
     with pytest.raises(Exception, match="different payload"):
         await commands.execute(conflict)
+    await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_import_quote_parses_a_selected_batch_in_one_run(tmp_path) -> None:
+    """A multi-file UI selection must remain one generation and one Agent run."""
+
+    harness = Harness(data_dir=tmp_path / "runtime")
+    commands = InternalAgentCommands(harness)
+    task_id = "a" * 32
+    session_id = harness.storage.create_session(title="批量新增报价")
+    run_id = "b" * 32
+    harness.storage.create_run(
+        run_id=run_id,
+        session_id=session_id,
+        root_run_id=run_id,
+        status=RunStatus.require_human,
+        provider="procurement_internal",
+        model="deterministic-procurement",
+        metadata={"purchase_request_id": task_id},
+    )
+    attachments = [
+        {"artifact_id": "jc" + "1" * 32, "filename": "first.xlsx"},
+        {"artifact_id": "jc" + "2" * 32, "filename": "second.pdf"},
+        {"artifact_id": "jc" + "3" * 32, "filename": "third.xlsx"},
+    ]
+    payload = {"attachments": attachments}
+    body = AgentCommandBody(
+        operation_id="22222222-2222-2222-2222-222222222222",
+        operation_type="import_quote",
+        aggregate_id=task_id,
+        generation=2,
+        expected_task_version=4,
+        payload_sha256=_canonical_sha256(payload),
+        payload=payload,
+    )
+    commands._java_json = AsyncMock(return_value={"analysis_run_id": run_id})  # type: ignore[method-assign]
+    commands.harness.resume = AsyncMock(return_value=SimpleNamespace(  # type: ignore[method-assign]
+        run_id=run_id,
+        session_id=session_id,
+        status=RunStatus.require_human,
+        error=None,
+    ))
+    commands._latest_tool_payload = lambda _run_id, _tool_name: {  # type: ignore[method-assign]
+        "quotes": [
+            {"artifact_id": attachment["artifact_id"], "supplier_name": attachment["filename"]}
+            for attachment in attachments
+        ]
+    }
+
+    result = await commands._import_quote(body)
+
+    assert [quote["artifact_id"] for quote in result["quotes"]] == [
+        attachment["artifact_id"] for attachment in attachments
+    ]
+    commands.harness.resume.assert_awaited_once_with(  # type: ignore[attr-defined]
+        run_id,
+        input="阶段：新增报价解析。仅按采购工具顺序解析新报价并请求人工复核。",
+    )
     await harness.aclose()
 
 

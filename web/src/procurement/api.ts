@@ -140,9 +140,21 @@ export function newIdempotencyKey() {
 
 const idempotencyKey = newIdempotencyKey;
 
+export function operationRefetchInterval(operation?: ProcurementOperation): number | false {
+  switch (operation?.status) {
+    case "pending":
+    case "dispatching":
+      return 500;
+    case "published":
+    case "accepted":
+      return 1_000;
+    default:
+      return false;
+  }
+}
+
 async function waitForOperation(operationId: string, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
-  let delay = 250;
   while (Date.now() < deadline) {
     const operation = await requestJson<ProcurementOperation>(
       `/api/procurement/operations/${operationId}`
@@ -151,8 +163,13 @@ async function waitForOperation(operationId: string, timeoutMs = 30_000) {
     if (operation.status === "failed") {
       throw new Error(operation.last_error || "异步操作执行失败");
     }
-    await new Promise((resolve) => window.setTimeout(resolve, delay));
-    delay = Math.min(1_500, Math.round(delay * 1.5));
+    if (operation.status === "cancelled") {
+      throw new Error("异步操作已取消");
+    }
+    await new Promise((resolve) => window.setTimeout(
+      resolve,
+      operationRefetchInterval(operation) || 1_500,
+    ));
   }
   throw new Error(
     `操作 ${operationId} 等待超时，任务仍在后台处理中，请在 AI 任务中心继续跟踪`,
@@ -199,6 +216,8 @@ export const procurementApi = {
   },
   operation: (operationId: string) =>
     requestJson<ProcurementOperation>(`/api/procurement/operations/${operationId}`),
+  waitForOperation: (operationId: string, timeoutMs = 60_000) =>
+    waitForOperation(operationId, timeoutMs),
   aiTasks: (businessId?: string) => {
     const query = new URLSearchParams({ page: "0", size: "100" });
     if (businessId) query.set("business_id", businessId);
@@ -236,7 +255,7 @@ export const procurementApi = {
     ),
   createRequest: (input: CreateProcurementRequest) =>
     postJson<ProcurementRequest>("/api/procurement/requests", input),
-  async startConversation(message: string, files: File[]) {
+  async startConversation(message: string, files: File[], waitForCompletion = false) {
     const form = new FormData();
     form.append("message", message);
     files.forEach((file) => form.append("files", file, file.name));
@@ -245,7 +264,9 @@ export const procurementApi = {
       headers: { "Idempotency-Key": idempotencyKey() },
       body: form,
     });
-    await waitForOperation(accepted.operation_id);
+    if (waitForCompletion) {
+      await waitForOperation(accepted.operation_id);
+    }
     return accepted;
   },
   resume: (requestId: string, message: string) =>
@@ -257,6 +278,15 @@ export const procurementApi = {
     const form = new FormData();
     form.append("file", file, file.name);
     return requestJson<ProcurementRunAccepted>(`/api/procurement/requests/${requestId}/quotes`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey() },
+      body: form,
+    });
+  },
+  async uploadQuotes(requestId: string, files: File[]) {
+    const form = new FormData();
+    files.forEach((file) => form.append("files", file, file.name));
+    return requestJson<ProcurementRunAccepted>(`/api/procurement/requests/${requestId}/quotes/batch`, {
       method: "POST",
       headers: { "Idempotency-Key": idempotencyKey() },
       body: form,
@@ -345,13 +375,15 @@ export const procurementApi = {
         body: JSON.stringify(input),
       }
     ),
-  analyze: async (requestId: string) => {
+  analyze: async (requestId: string, waitForCompletion = false) => {
     const accepted = await requestJson<ProcurementRunAccepted>(`/api/procurement/requests/${requestId}/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey() },
       body: "{}",
     });
-    await waitForOperation(accepted.operation_id);
+    if (waitForCompletion) {
+      await waitForOperation(accepted.operation_id);
+    }
     return accepted;
   },
   approve: (

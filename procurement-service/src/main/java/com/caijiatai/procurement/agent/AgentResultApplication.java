@@ -135,7 +135,8 @@ public final class AgentResultApplication {
                     return;
                 }
                 // 需求与报价未成功落库的草稿无法从 UI 恢复，取消它避免“Agent 读取中”死任务。
-                if (TaskStatus.DRAFT.wireValue().equals(task.getStatus())
+                if ((TaskStatus.DRAFT.wireValue().equals(task.getStatus())
+                        || TaskStatus.COLLECTING.wireValue().equals(task.getStatus()))
                         && quotes.countByTaskId(task.getId()) == 0) {
                     task.setStatus(TaskStatus.CANCELLED);
                 }
@@ -213,14 +214,20 @@ public final class AgentResultApplication {
 
     private void importQuote(AgentCommand command, Map<String, Object> result) {
         var task = lock(command);
-        persistQuote(task, map(result.getOrDefault("quote", result)));
+        var parsedQuotes = list(result.get("quotes"));
+        if (parsedQuotes.isEmpty()) {
+            parsedQuotes = List.of(result.getOrDefault("quote", result));
+        }
+        for (var raw : parsedQuotes) {
+            persistQuote(task, map(raw));
+        }
         var unresolved = quotes.findByTaskIdOrderByCreatedAtAsc(task.getId()).stream()
                 .mapToInt(item -> item.reviewFields().size()).sum();
         task.setStatus(unresolved == 0 && task.isRequirementConfirmed()
                 ? TaskStatus.READY : TaskStatus.REVIEW);
         audit.save(AuditEvent.create(
                 task.getId(), null, task.getAnalysisRunId(), "agent_quote_parse_completed", "agent",
-                Map.of("operation_id", command.getOperationId())));
+                Map.of("operation_id", command.getOperationId(), "quote_count", parsedQuotes.size())));
     }
 
     private void analyze(AgentCommand command, Map<String, Object> result) {

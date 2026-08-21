@@ -8,7 +8,7 @@ import type { ContractStatus, OrderView, ProcurementRequest, ProcurementStatus }
 export const STATUS_LABELS: Record<ProcurementStatus, string> = {
   draft: "需求整理中",
   waiting_human: "等待你补充信息",
-  collecting: "待上传报价",
+  collecting: "报价解析中",
   review: "待复核",
   ready: "待比价",
   analyzing: "分析中",
@@ -217,7 +217,7 @@ export type NextStepGuide = {
 type GuidanceInput = Pick<
   ProcurementRequest,
   "status" | "requirement_confirmed" | "quote_count" | "unresolved_field_count"
->;
+> & Partial<Pick<ProcurementRequest, "attachments">>;
 
 /** 状态驱动的「下一步」引导：文案与可执行动作一一对应，卡点原因可见。 */
 export function nextStepGuide(request: GuidanceInput): NextStepGuide {
@@ -238,6 +238,14 @@ export function nextStepGuide(request: GuidanceInput): NextStepGuide {
         actionLabel: null,
       };
     case "collecting":
+      if ((request.attachments?.length || 0) > quote_count) {
+        return {
+          hint: "已受理报价，正在并发解析并提取字段",
+          blocker: "解析完成后会自动切换到字段复核，无需停留等待",
+          action: { kind: "quotes" },
+          actionLabel: "查看解析进度",
+        };
+      }
       return {
         hint: "上传供应商报价（至少 2 家）",
         blocker: quote_count < 2

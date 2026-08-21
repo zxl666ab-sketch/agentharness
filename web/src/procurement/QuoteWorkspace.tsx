@@ -253,6 +253,12 @@ function FieldEditor({
               step={meta.kind === "integer" ? "1" : "any"}
               value={value}
               onChange={(event) => setValue(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !saving && (changed || canConfirmCurrentValue)) {
+                  event.preventDefault();
+                  void onSave(correctionValue(value, meta));
+                }
+              }}
             />
             {meta.kind === "rate" ? <span>%</span> : null}
           </div>
@@ -340,21 +346,30 @@ export function QuoteWorkspace({
     });
     return [...fixedEntries, ...dynamicEntries];
   }, [meta.field_meta, onlyReview, request.schema_version, request.specifications, selected]);
+  const parsingAttachments =
+    (request.status === "draft" || request.status === "collecting")
+    && request.attachments.length > request.quotes.length;
   const canAnalyze =
-    request.requirement_confirmed &&
-    request.quote_count >= 2 &&
-    request.unresolved_field_count === 0 &&
-    request.status !== "approved" &&
-    request.status !== "no_award";
-  const analyzeDisabledReason = request.status === "approved" || request.status === "no_award"
-    ? "本任务已结束，不能再发起比价"
-    : !request.requirement_confirmed
-      ? "请先保存采购需求的人工确认"
-      : request.quote_count < 2
-        ? "至少需要 2 家报价才能比价"
-        : request.unresolved_field_count > 0
-          ? "还有 " + request.unresolved_field_count + " 项报价字段待复核"
-          : null;
+    request.status === "ready"
+    && request.requirement_confirmed
+    && request.quote_count >= 2
+    && request.unresolved_field_count === 0;
+  let analyzeDisabledReason: string | null = null;
+  if (request.status === "approved" || request.status === "no_award") {
+    analyzeDisabledReason = "本任务已结束，不能再发起比价";
+  } else if (parsingAttachments) {
+    analyzeDisabledReason = "报价正在异步解析，完成后会自动进入字段复核";
+  } else if (request.status === "analyzing") {
+    analyzeDisabledReason = "比价正在后台执行";
+  } else if (request.status !== "ready") {
+    analyzeDisabledReason = "请先完成报价解析与字段复核";
+  } else if (!request.requirement_confirmed) {
+    analyzeDisabledReason = "请先保存采购需求的人工确认";
+  } else if (request.quote_count < 2) {
+    analyzeDisabledReason = "至少需要 2 家报价才能比价";
+  } else if (request.unresolved_field_count > 0) {
+    analyzeDisabledReason = `还有 ${request.unresolved_field_count} 项报价字段待复核`;
+  }
   const reviewSummary = !request.requirement_confirmed
     ? request.unresolved_field_count
       ? `需求待人工确认，${request.unresolved_field_count} 项待复核`
@@ -414,6 +429,22 @@ export function QuoteWorkspace({
                 )}
               </button>
             ))}
+          </div>
+        ) : parsingAttachments ? (
+          <div className="proc-parsing-state p-6 flex flex-col items-center justify-center text-center gap-3 bg-surface-subtle/60 rounded-xl border border-dashed border-accent/40 my-3">
+            <LoaderCircle className="spin text-accent" size={30} />
+            <div>
+              <strong className="text-sm font-semibold text-text block">AI 正在深度解析 {request.attachments.length} 份报价文件...</strong>
+              <span className="text-xs text-text-muted mt-1 block">正在提取规格、起订量、税率与到货交期，请稍候</span>
+            </div>
+            <div className="flex flex-wrap gap-2 justify-center mt-1">
+              {request.attachments.map((att) => (
+                <span key={att.artifact_id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-surface text-xs text-text-muted border border-border font-medium">
+                  <FileText size={12} className="text-accent" />
+                  {att.filename}
+                </span>
+              ))}
+            </div>
           </div>
         ) : (
           <div className="proc-empty-compact">

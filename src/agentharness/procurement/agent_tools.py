@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -42,6 +44,22 @@ PROCUREMENT_TOOL_NAMES = [
 ]
 
 DEFAULT_QUOTE_FX_RATES = {"USD": "7.2"}
+# Parsing XLSX/PDF files is CPU- and memory-intensive.  A small bounded batch
+# keeps a 50-file request from exhausting the event-loop default thread pool,
+# while still letting the common 2-4 supplier case run in parallel.
+DEFAULT_QUOTE_PARSE_CONCURRENCY = 4
+MAX_QUOTE_PARSE_CONCURRENCY = 8
+
+
+def _quote_parse_concurrency(value: int | None = None) -> int:
+    """Return a safe, configurable per-batch quote parsing limit."""
+
+    if value is None:
+        try:
+            value = int(os.environ.get("AGENT_PROCUREMENT_PARSE_CONCURRENCY", ""))
+        except ValueError:
+            value = None
+    return max(1, min(int(value or DEFAULT_QUOTE_PARSE_CONCURRENCY), MAX_QUOTE_PARSE_CONCURRENCY))
 
 
 def _requirement_interaction(message: str, error: str, run_id: str) -> dict[str, Any]:
@@ -134,11 +152,13 @@ class ProcurementAgentTools:
         fetch_context: JsonFetcher,
         fetch_artifact: BytesFetcher,
         semantic_cache: SemanticCache | None = None,
+        quote_parse_concurrency: int | None = None,
     ) -> None:
         self.storage = storage
         self.fetch_context = fetch_context
         self.fetch_artifact = fetch_artifact
         self.semantic_cache = semantic_cache or SemanticCache()
+        self.quote_parse_concurrency = _quote_parse_concurrency(quote_parse_concurrency)
         self.tools = {
             "procurement_capture_requirement": FunctionTool(
                 "procurement_capture_requirement",
@@ -288,7 +308,19 @@ class ProcurementAgentTools:
         raw_attachments = metadata.get("procurement_pending_attachments") or []
         if not isinstance(raw_attachments, list):
             raise ValueError("procurement pending attachments are invalid")
-        quotes = [await self._parse_attachment(dict(raw)) for raw in raw_attachments]
+        started = time.perf_counter()
+        if raw_attachments:
+            semaphore = asyncio.Semaphore(min(self.quote_parse_concurrency, len(raw_attachments)))
+
+            async def parse_one(raw: Any) -> dict[str, Any]:
+                async with semaphore:
+                    return await self._parse_attachment(dict(raw))
+
+            # gather preserves source order, which keeps quote/review ordering
+            # deterministic even though I/O and parsing execute concurrently.
+            quotes = list(await asyncio.gather(*(parse_one(raw) for raw in raw_attachments)))
+        else:
+            quotes = []
         requirement = metadata.get("procurement_requirement")
         prefilled_rates: list[str] = []
         if isinstance(requirement, dict):
@@ -313,6 +345,11 @@ class ProcurementAgentTools:
                     "quotes": quotes,
                     "requirement": requirement if isinstance(requirement, dict) else None,
                     "prefilled_fx_rates": prefilled_rates,
+                    "parse_batch": {
+                        "attachment_count": len(raw_attachments),
+                        "concurrency": min(self.quote_parse_concurrency, len(raw_attachments)),
+                        "processing_ms": round((time.perf_counter() - started) * 1000, 2),
+                    },
                 }
             ),
         )

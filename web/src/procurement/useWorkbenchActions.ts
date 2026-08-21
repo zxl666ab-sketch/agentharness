@@ -65,9 +65,24 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
   async function startConversation(message: string, files: File[]) {
     setBusy("conversation");
     state.setActionError(null);
+    // Optimistic navigation happens before the multipart request completes.
+    // The accepting shell gives immediate feedback while Java durably stores
+    // the files and returns the real task id in its 202 response.
+    state.navigate({
+      view: "tasks",
+      task: null,
+      ai: null,
+      review: null,
+      tab: "quotes",
+      orderTask: null,
+    }, false);
     try {
       const accepted = await procurementApi.startConversation(message, files);
       state.setPendingRunId(accepted.run_id);
+      state.setPendingOperation({
+        operationId: accepted.operation_id,
+        taskId: accepted.purchase_request_id,
+      });
       state.setShowCreate(false);
       state.navigate({
         view: "tasks",
@@ -77,12 +92,15 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
         tab: "quotes",
         orderTask: null,
       });
-      await queryClient.invalidateQueries({ queryKey: ["procurement-requests"] });
-      await queryClient.invalidateQueries({
-        queryKey: ["procurement-request", accepted.purchase_request_id],
-      });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["procurement-requests"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["procurement-request", accepted.purchase_request_id],
+        }),
+      ]);
     } catch (error) {
       state.setActionError(errorText(error));
+      state.setShowCreate(true);
     } finally {
       setBusy(null);
     }
@@ -93,13 +111,17 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
     setBusy("upload");
     state.setActionError(null);
     try {
-      for (const file of files) await procurementApi.uploadQuote(selectedId, file);
-      const updated = await procurementApi.request(selectedId);
-      await commit(updated);
+      // The server receives the full selection as one durable operation.  That
+      // prevents a per-file generation bump from staling earlier results and
+      // lets the Agent parse the attachment batch concurrently.
+      const accepted = await procurementApi.uploadQuotes(selectedId, files);
+      state.setPendingOperation({ operationId: accepted.operation_id, taskId: selectedId });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["procurement-requests"] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-request", selectedId] }),
+      ]);
     } catch (error) {
       state.setActionError(errorText(error));
-      const updated = await procurementApi.request(selectedId);
-      await commit(updated);
     } finally {
       setBusy(null);
     }
@@ -147,9 +169,12 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
     try {
       const accepted = await procurementApi.analyze(selectedId);
       state.setPendingRunId(accepted.run_id);
-      await queryClient.invalidateQueries({ queryKey: ["procurement-request", selectedId] });
-      await queryClient.invalidateQueries({ queryKey: ["procurement-requests"] });
-      await queryClient.invalidateQueries({ queryKey: ["procurement-ai-tasks", selectedId] });
+      state.setPendingOperation({ operationId: accepted.operation_id, taskId: selectedId });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["procurement-request", selectedId] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-requests"] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-ai-tasks", selectedId] }),
+      ]);
       state.setActiveTab("compare");
     } catch (error) {
       state.setActionError(errorText(error));
@@ -199,6 +224,7 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
     try {
       const accepted = await procurementApi.resume(selectedId, message);
       state.setPendingRunId(accepted.run_id);
+      state.setPendingOperation({ operationId: accepted.operation_id, taskId: selectedId });
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["procurement-request", selectedId] }),
         queryClient.invalidateQueries({ queryKey: ["procurement-requests"] }),

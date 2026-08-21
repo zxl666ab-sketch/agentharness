@@ -36,7 +36,7 @@ public record AppProperties(
             demoSeed = new DemoSeed(false, (String) null);
         }
         if (outbox == null) {
-            outbox = new Outbox(500);
+            outbox = new Outbox(100);
         }
     }
 

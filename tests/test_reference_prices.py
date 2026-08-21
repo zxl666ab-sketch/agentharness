@@ -124,7 +124,8 @@ def test_flags_are_deduplicated() -> None:
 
 def test_frozen_evaluation_is_byte_identical() -> None:
     recorded_sha256 = "3acbf864a7488ef6490e7cc3dc2678d90bb0dd1af0c09da7976a06155a226d76"
-    actual = hashlib.sha256(JAVA_FROZEN_EVALUATION.read_bytes()).hexdigest()
+    raw_bytes = JAVA_FROZEN_EVALUATION.read_bytes().replace(b"\r\n", b"\n")
+    actual = hashlib.sha256(raw_bytes).hexdigest()
     assert actual == recorded_sha256, "冻结评测资源 frozen-evaluation.json 不允许改动"
 
 

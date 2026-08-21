@@ -281,28 +281,28 @@ export function ComparisonView({
       </footer>
 
       {confirmOpen && selected ? (
-        <div className="proc-modal-backdrop" role="presentation">
-          <section className="proc-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
-            <header>
-              <div><ShieldAlert size={18} /><h2 id="confirm-title">正式选定供应商</h2></div>
-              <button className="proc-icon-button" type="button" title="关闭" aria-label="关闭" onClick={() => setConfirmOpen(false)}><X size={18} /></button>
+        <div className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation">
+          <section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+            <header className="flex items-center justify-between pb-3 border-b border-border/60">
+              <div className="flex items-center gap-2 text-text font-bold text-base"><ShieldCheck size={18} className="text-accent" /><h2 id="confirm-title">正式选定供应商</h2></div>
+              <button className="proc-icon-button compact w-7 h-7 rounded-lg border border-border flex items-center justify-center text-text-muted hover:text-text" type="button" title="关闭" aria-label="关闭" onClick={() => setConfirmOpen(false)}><X size={16} /></button>
             </header>
-            <div className="proc-confirm-supplier">
-              <span>{selected.supplier_name}</span>
-              <strong>{money(selected.cost.landed_total_base, selected.cost.base_currency)}</strong>
-              <small>到货单价 {money(selected.cost.landed_unit_base, selected.cost.base_currency)}</small>
+            <div className="proc-confirm-supplier p-3.5 rounded-xl bg-surface-subtle border border-border/60 flex flex-col gap-1 text-xs">
+              <span className="text-text font-medium">{selected.supplier_name}</span>
+              <strong className="text-base font-mono font-bold text-accent">{money(selected.cost.landed_total_base, selected.cost.base_currency)}</strong>
+              <small className="text-text-muted">到货单价 {money(selected.cost.landed_unit_base, selected.cost.base_currency)}</small>
             </div>
-            <label className="proc-field"><span>审批备注</span><textarea value={note} onChange={(event) => setNote(event.target.value)} maxLength={2000} placeholder="选填" /></label>
-            <label className="proc-check approval-confirm">
-              <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
-              <span><strong>我已核对报价原件、硬性条件与到货成本</strong><small>该操作会形成正式供应商选定结论并写入审计记录</small></span>
+            <label className="proc-field flex flex-col gap-1 text-xs font-medium text-text"><span>审批备注</span><textarea className="p-2.5 rounded-lg border border-border bg-surface-subtle text-text focus:outline-accent text-xs" value={note} onChange={(event) => setNote(event.target.value)} maxLength={2000} placeholder="选填" /></label>
+            <label className="proc-check approval-confirm flex items-start gap-2.5 text-xs text-text cursor-pointer p-3 rounded-lg bg-surface-subtle/60 border border-border/60">
+              <input type="checkbox" className="rounded border-border text-accent focus:ring-accent mt-0.5" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
+              <span><strong>我已核对报价原件、硬性条件与到货成本</strong><small className="block text-text-muted mt-0.5">该操作会形成正式供应商选定结论并写入审计记录</small></span>
             </label>
-            {error ? <p className="proc-form-error" role="alert"><AlertTriangle size={14} />{error}</p> : null}
-            <footer>
-              <button type="button" className="proc-button secondary" onClick={() => setConfirmOpen(false)}>取消</button>
+            {error ? <p className="proc-form-error text-xs text-danger font-medium p-2.5 rounded-lg bg-danger-soft border border-danger/30 flex items-center gap-1.5" role="alert"><AlertTriangle size={14} />{error}</p> : null}
+            <footer className="flex items-center justify-end gap-2 pt-3 border-t border-border/60">
+              <button type="button" className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" onClick={() => setConfirmOpen(false)}>取消</button>
               <button
                 type="button"
-                className="proc-button danger"
+                className="proc-button primary px-4 py-1.5 rounded-lg text-xs font-semibold bg-accent text-white hover:bg-accent-strong inline-flex items-center gap-1.5 shadow-xs"
                 disabled={!confirmed || busy === "approve"}
                 onClick={() => void onApprove(selected.quote_id, note)}
               >
@@ -315,24 +315,24 @@ export function ComparisonView({
       ) : null}
 
       {noAwardOpen ? (
-        <div className="proc-modal-backdrop" role="presentation">
-          <section className="proc-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="no-award-title">
-            <header>
-              <div><Ban size={18} /><h2 id="no-award-title">确认本轮流标</h2></div>
-              <button className="proc-icon-button" type="button" title="关闭" aria-label="关闭" onClick={() => setNoAwardOpen(false)}><X size={18} /></button>
+        <div className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation">
+          <section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="no-award-title">
+            <header className="flex items-center justify-between pb-3 border-b border-border/60">
+              <div className="flex items-center gap-2 text-text font-bold text-base"><Ban size={18} className="text-danger" /><h2 id="no-award-title">确认本轮流标</h2></div>
+              <button className="proc-icon-button compact w-7 h-7 rounded-lg border border-border flex items-center justify-center text-text-muted hover:text-text" type="button" title="关闭" aria-label="关闭" onClick={() => setNoAwardOpen(false)}><X size={16} /></button>
             </header>
-            <p className="proc-confirm-warning">当前快照中没有任何合格报价。流标后本任务不可编辑，只能复制为新任务重新询价。</p>
-            <label className="proc-field"><span>流标原因</span><textarea value={noAwardNote} onChange={(event) => setNoAwardNote(event.target.value)} maxLength={2000} placeholder="请说明未满足的条件或下一步安排" /></label>
-            <label className="proc-check approval-confirm">
-              <input type="checkbox" checked={noAwardConfirmed} onChange={(event) => setNoAwardConfirmed(event.target.checked)} />
-              <span><strong>我确认本轮没有合格报价，并结束本轮询价</strong><small>该操作会写入不可编辑的采购决策和审计记录</small></span>
+            <p className="proc-confirm-warning text-xs text-text-muted leading-relaxed">当前快照中没有任何合格报价。流标后本任务不可编辑，只能复制为新任务重新询价。</p>
+            <label className="proc-field flex flex-col gap-1 text-xs font-medium text-text"><span>流标原因</span><textarea className="p-2.5 rounded-lg border border-border bg-surface-subtle text-text focus:outline-accent text-xs" value={noAwardNote} onChange={(event) => setNoAwardNote(event.target.value)} maxLength={2000} placeholder="请说明未满足的条件或下一步安排" /></label>
+            <label className="proc-check approval-confirm flex items-start gap-2.5 text-xs text-text cursor-pointer p-3 rounded-lg bg-surface-subtle/60 border border-border/60">
+              <input type="checkbox" className="rounded border-border text-accent focus:ring-accent mt-0.5" checked={noAwardConfirmed} onChange={(event) => setNoAwardConfirmed(event.target.checked)} />
+              <span><strong>我确认本轮没有合格报价，并结束本轮询价</strong><small className="block text-text-muted mt-0.5">该操作会写入不可编辑的采购决策和审计记录</small></span>
             </label>
-            {error ? <p className="proc-form-error" role="alert"><AlertTriangle size={14} />{error}</p> : null}
-            <footer>
-              <button type="button" className="proc-button secondary" onClick={() => setNoAwardOpen(false)}>取消</button>
+            {error ? <p className="proc-form-error text-xs text-danger font-medium p-2.5 rounded-lg bg-danger-soft border border-danger/30 flex items-center gap-1.5" role="alert"><AlertTriangle size={14} />{error}</p> : null}
+            <footer className="flex items-center justify-end gap-2 pt-3 border-t border-border/60">
+              <button type="button" className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" onClick={() => setNoAwardOpen(false)}>取消</button>
               <button
                 type="button"
-                className="proc-button danger"
+                className="proc-button danger px-4 py-1.5 rounded-lg text-xs font-semibold bg-danger text-white hover:bg-rose-700 inline-flex items-center gap-1.5 shadow-xs"
                 disabled={!noAwardConfirmed || !noAwardNote.trim() || busy === "no_award" || !onNoAward}
                 onClick={() => onNoAward && void onNoAward(noAwardNote.trim())}
               >

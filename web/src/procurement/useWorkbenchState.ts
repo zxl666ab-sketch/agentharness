@@ -9,6 +9,11 @@ import {
   type WorkbenchView,
 } from "./workbenchUrl";
 
+export type PendingOperation = {
+  operationId: string;
+  taskId: string;
+};
+
 /**
  * P1-5 拆分 1/5：URL 状态 + 视图导航。
  * 职责：读写 workbench URL 状态（view/task/ai/review/tab/filter/q/page/orderTask），
@@ -26,6 +31,7 @@ export type WorkbenchState = {
   search: string;
   showCreate: boolean;
   pendingRunId: string | null;
+  pendingOperation: PendingOperation | null;
   orderTask: string | null;
   actionError: string | null;
   urlState: WorkbenchUrlState;
@@ -35,6 +41,7 @@ export type WorkbenchState = {
   setSearch: (value: string) => void;
   setShowCreate: (value: boolean) => void;
   setPendingRunId: (value: string | null) => void;
+  setPendingOperation: (value: PendingOperation | null) => void;
   setSelectedId: (value: string | null) => void;
   setActionError: (value: string | null) => void;
   navigate: (patch: Partial<WorkbenchUrlState>, push?: boolean) => void;
@@ -57,6 +64,7 @@ export function useWorkbenchState(): WorkbenchState {
   const [taskPage, setTaskPage] = useState(initialUrl.page);
   const [showCreate, setShowCreate] = useState(false);
   const [pendingRunId, setPendingRunId] = useState<string | null>(null);
+  const [pendingOperation, setPendingOperation] = useState<PendingOperation | null>(null);
   const [orderTask, setOrderTask] = useState<string | null>(initialUrl.orderTask);
   const [search, setSearch] = useState(initialUrl.q);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -156,6 +164,7 @@ export function useWorkbenchState(): WorkbenchState {
     search,
     showCreate,
     pendingRunId,
+    pendingOperation,
     orderTask,
     actionError,
     urlState,
@@ -165,6 +174,7 @@ export function useWorkbenchState(): WorkbenchState {
     setSearch,
     setShowCreate,
     setPendingRunId,
+    setPendingOperation,
     setSelectedId,
     setActionError,
     navigate,

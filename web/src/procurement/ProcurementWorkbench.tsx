@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   FileCheck2,
   Files,
+  LoaderCircle,
   Moon,
   Plus,
   Scale,
@@ -19,32 +20,23 @@ import {
   Wifi,
   ChevronUp,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 
-import { AuditLogCenter } from "./AuditLogCenter";
 import { AuditView } from "./AuditView";
-import { AiTaskCenter } from "./AiTaskCenter";
 import { AiTaskRecovery } from "./AiTaskRecovery";
 import { ComparisonView } from "./ComparisonView";
 import { ConfigDrawer } from "./ConfigDrawer";
-import { ContractCenter } from "./ContractCenter";
 import { DeleteDialog } from "./DeleteDialog";
-import { InvoiceCenter } from "./InvoiceCenter";
 import { HumanInteractionPanel } from "./HumanInteractionPanel";
 import { NextStepBar } from "./NextStepBar";
-import { OrderCenter } from "./OrderCenter";
 import {
   NewProcurementConversation,
   ProcurementConversation,
 } from "./ProcurementConversation";
 import { QuoteWorkspace } from "./QuoteWorkspace";
-import { ReportsCenter } from "./ReportsCenter";
 import { ReportView } from "./ReportView";
 import { RequirementReview } from "./RequirementReview";
-import { ReviewCenter } from "./ReviewCenter";
 import { readRole, ROLE_LABELS, type DemoRole, visibleViewOrDefault, writeRole } from "./roles";
-import { SupplierCenter } from "./SupplierCenter";
-import { SystemInfo } from "./SystemInfo";
 import type { ProcurementRequest } from "./types";
 import { useEscape } from "./useEscape";
 import { errorText, useWorkbenchActions } from "./useWorkbenchActions";
@@ -53,7 +45,6 @@ import { useWorkbenchState } from "./useWorkbenchState";
 import {
   FULFILLMENT_STEPS,
   PROCUREMENT_DECISION_STEPS,
-  contractStatusLabel,
   fulfillmentProgress,
   procurementDecisionProgress,
   statusLabel,
@@ -67,6 +58,22 @@ type Props = {
   backendVersion: string;
   onToggleTheme: () => void;
 };
+
+// Business centers are independent routes.  Deferring them keeps the first
+// workbench paint focused on the task dashboard and current task canvas.
+const AiTaskCenter = lazy(() => import("./AiTaskCenter").then(({ AiTaskCenter: Component }) => ({ default: Component })));
+const AuditLogCenter = lazy(() => import("./AuditLogCenter").then(({ AuditLogCenter: Component }) => ({ default: Component })));
+const ContractCenter = lazy(() => import("./ContractCenter").then(({ ContractCenter: Component }) => ({ default: Component })));
+const InvoiceCenter = lazy(() => import("./InvoiceCenter").then(({ InvoiceCenter: Component }) => ({ default: Component })));
+const OrderCenter = lazy(() => import("./OrderCenter").then(({ OrderCenter: Component }) => ({ default: Component })));
+const ReportsCenter = lazy(() => import("./ReportsCenter").then(({ ReportsCenter: Component }) => ({ default: Component })));
+const ReviewCenter = lazy(() => import("./ReviewCenter").then(({ ReviewCenter: Component }) => ({ default: Component })));
+const SupplierCenter = lazy(() => import("./SupplierCenter").then(({ SupplierCenter: Component }) => ({ default: Component })));
+const SystemInfo = lazy(() => import("./SystemInfo").then(({ SystemInfo: Component }) => ({ default: Component })));
+
+function DeferredCenter({ children }: { children: ReactNode }) {
+  return <Suspense fallback={<div className="proc-loading-state">正在加载业务中心…</div>}>{children}</Suspense>;
+}
 
 function requestDate(value: string) {
   return new Date(value).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
@@ -95,6 +102,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
   const queries = useRequestQueries(state);
   const actions = useWorkbenchActions(state, queries);
   const [role, setRole] = useState<DemoRole>(() => readRole());
+  const [taskListCollapsed, setTaskListCollapsed] = useState(false);
   const {
     view, selectedId, selectedAiId, selectedReviewId, activeTab, taskFilter, taskPage,
     search, showCreate, orderTask, actionError,
@@ -140,16 +148,20 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
 
   return (
     <div className="proc-app">
-      <header className="proc-topbar">
-        <div className="proc-brand">
-          <span><Scale size={20} /></span>
-          <div><strong>采价台</strong><small>采购询价与供应商比价</small></div>
+      <header className="proc-topbar h-14 px-5 flex items-center justify-between gap-4 border-b border-border bg-surface/85 backdrop-blur-md sticky top-0 z-30 shadow-xs">
+        <div className="proc-brand flex items-center gap-3 min-w-0">
+          <span className="w-8 h-8 rounded-lg flex items-center justify-center bg-gradient-to-br from-accent to-teal-600 text-white shadow-xs flex-shrink-0"><Scale size={18} /></span>
+          <div className="flex flex-col min-w-0">
+            <strong className="text-sm font-bold text-text leading-tight tracking-tight">采价台</strong>
+            <small className="text-[11px] text-text-muted leading-tight truncate max-w-xs">采购询价与供应商比价</small>
+          </div>
         </div>
-        <div className="proc-topbar-meta">
-          <label className="proc-role-selector" title="演示角色切换（K9，纯前端视角控制）">
-            <span>角色</span>
+        <div className="proc-topbar-meta flex items-center gap-2.5">
+          <label className="proc-role-selector inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-subtle border border-border hover:border-border-strong text-xs font-medium text-text-secondary transition-all cursor-pointer" title="演示角色切换（K9，纯前端视角控制）">
+            <span className="text-text-muted text-[11px]">角色</span>
             <select
               aria-label="演示角色"
+              className="bg-transparent border-0 text-text font-medium text-xs focus:ring-0 cursor-pointer p-0"
               value={role}
               onChange={(event) => {
                 const next = event.target.value as DemoRole;
@@ -164,17 +176,17 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
               ))}
             </select>
           </label>
-          <span className="proc-runtime-state"><Wifi size={14} />采购服务 {backendVersion}</span>
-          <button className="proc-icon-button" type="button" title="API / 模型配置" aria-label="API / 模型配置" onClick={() => openConfig(configQuery.data)}>
+          <span className="proc-runtime-state inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-accent-soft text-accent border border-accent/20"><Wifi size={14} />采购服务 {backendVersion}</span>
+          <button className="proc-icon-button w-8 h-8 rounded-lg border border-border bg-surface hover:bg-surface-subtle hover:border-border-strong text-text-secondary hover:text-text flex items-center justify-center transition-all" type="button" title="API / 模型配置" aria-label="API / 模型配置" onClick={() => openConfig(configQuery.data)}>
             <Settings size={16} />
           </button>
-          <button className="proc-icon-button" type="button" title="切换主题" aria-label="切换主题" onClick={onToggleTheme}>
+          <button className="proc-icon-button w-8 h-8 rounded-lg border border-border bg-surface hover:bg-surface-subtle hover:border-border-strong text-text-secondary hover:text-text flex items-center justify-center transition-all" type="button" title="切换主题" aria-label="切换主题" onClick={onToggleTheme}>
             {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
           </button>
         </div>
       </header>
 
-      <main className={`proc-layout ${view === "tasks" ? "with-tasks" : ""}`}>
+      <main className={`proc-layout ${view === "tasks" && !taskListCollapsed ? "with-tasks" : ""}`}>
         <aside className="proc-rail">
           <WorkbenchNavigation
             active={view}
@@ -188,12 +200,25 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
           </div>
         </aside>
 
-        {view === "tasks" ? <aside className="proc-sidebar">
+        {view === "tasks" && !taskListCollapsed ? <aside className="proc-sidebar">
           <div className="proc-sidebar-head">
             <span>采购任务</span>
-            <button className="proc-icon-button primary-icon" type="button" title="新建采购对话" aria-label="新建采购对话" onClick={openCreate}>
-              <Plus size={17} />
-            </button>
+            <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+              {selectedId ? (
+                <button
+                  className="proc-icon-button compact"
+                  type="button"
+                  title="收起任务列表"
+                  aria-label="收起任务列表"
+                  onClick={() => setTaskListCollapsed(true)}
+                >
+                  <ChevronLeft size={16} />
+                </button>
+              ) : null}
+              <button className="proc-icon-button primary-icon compact" type="button" title="新建采购对话" aria-label="新建采购对话" onClick={openCreate}>
+                <Plus size={16} />
+              </button>
+            </div>
           </div>
           <div className="proc-task-filters" aria-label="采购任务状态筛选">
             {(["all", "attention", "active", "completed"] as const).map((filter) => (
@@ -251,7 +276,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
           ) : null}
         </aside> : null}
 
-        <section className="proc-main">
+        <section className={`proc-main ${view !== "tasks" ? "proc-scroll-page" : ""}`}>
           {view === "workbench" ? (
             <WorkbenchHome
               role={role}
@@ -259,19 +284,14 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
               aiTasks={allAiTasks}
               reviews={reviews}
               loading={requestsQuery.isPending || allAiTasksQuery.isPending || reviewsQuery.isPending}
-              createBusy={busy === "conversation"}
-              createError={actionError}
-              maxFileBytes={metaQuery.data?.max_file_bytes ?? 5 * 1024 * 1024}
-              maxTotalBytes={metaQuery.data?.max_conversation_upload_bytes ?? 20 * 1024 * 1024}
-              maxQuotes={Math.min(metaQuery.data?.max_quotes_per_request ?? 10, 10)}
-              onStart={startConversation}
               onOpenTask={openTask}
               onOpenTasks={openTaskFilter}
+              onOpenCreate={openCreate}
               onOpenView={openView}
               onOpenOrders={() => openView("orders")}
             />
           ) : view === "ai" ? (
-            <AiTaskCenter
+            <DeferredCenter><AiTaskCenter
               requests={requests}
               tasks={allAiTasks}
               loading={allAiTasksQuery.isPending}
@@ -279,9 +299,9 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
               selectedId={selectedAiId}
               onSelect={selectAiTask}
               onOpenTask={openTask}
-            />
+            /></DeferredCenter>
           ) : view === "reviews" ? (
-            <ReviewCenter
+            <DeferredCenter><ReviewCenter
               requests={requests}
               reviews={reviews}
               loading={reviewsQuery.isPending}
@@ -289,59 +309,108 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
               selectedId={selectedReviewId}
               onSelect={selectReview}
               onOpenTask={openTask}
-            />
+            /></DeferredCenter>
           ) : view === "suppliers" ? (
-            <SupplierCenter onOpenTask={openTask} />
+            <DeferredCenter><SupplierCenter onOpenTask={openTask} /></DeferredCenter>
           ) : view === "orders" ? (
-            <OrderCenter highlightTaskId={orderTask} onBackToTask={(taskId) => openTask(taskId)} />
+            <DeferredCenter><OrderCenter highlightTaskId={orderTask} onBackToTask={(taskId) => openTask(taskId)} /></DeferredCenter>
           ) : view === "invoices" ? (
-            <InvoiceCenter />
+            <DeferredCenter><InvoiceCenter /></DeferredCenter>
           ) : view === "contracts" ? (
-            <ContractCenter />
+            <DeferredCenter><ContractCenter /></DeferredCenter>
           ) : view === "reports" ? (
-            <ReportsCenter />
+            <DeferredCenter><ReportsCenter /></DeferredCenter>
           ) : view === "audit" ? (
-            <AuditLogCenter />
+            <DeferredCenter><AuditLogCenter /></DeferredCenter>
           ) : view === "system" ? (
-            <SystemInfo />
+            <DeferredCenter><SystemInfo /></DeferredCenter>
+          ) : busy === "conversation" ? (
+            <section className="proc-empty-state first" role="status" aria-live="polite">
+              <LoaderCircle className="spin text-accent" size={30} />
+              <h1>正在创建采购任务</h1>
+              <p>报价已受理，正在持久化文件并安排后台并发解析。</p>
+            </section>
           ) : showCreate || (!selectedId && !detail) ? (
-            <NewProcurementConversation
-              busy={busy === "conversation"}
-              error={actionError}
-              maxFileBytes={metaQuery.data?.max_file_bytes ?? 5 * 1024 * 1024}
-              maxTotalBytes={metaQuery.data?.max_conversation_upload_bytes ?? 20 * 1024 * 1024}
-              maxQuotes={metaQuery.data?.max_quotes_per_request ?? 50}
-              onStart={startConversation}
-            />
+            <div className="flex-1 w-full min-h-full flex items-center justify-center p-4 sm:p-8 bg-surface-subtle/30 overflow-auto">
+              <NewProcurementConversation
+                busy={busy === "conversation"}
+                error={actionError}
+                maxFileBytes={metaQuery.data?.max_file_bytes ?? 5 * 1024 * 1024}
+                maxTotalBytes={metaQuery.data?.max_conversation_upload_bytes ?? 20 * 1024 * 1024}
+                maxQuotes={metaQuery.data?.max_quotes_per_request ?? 50}
+                onStart={startConversation}
+              />
+            </div>
           ) : detail ? (
             <>
-              <header className="proc-request-head">
-                <div className="proc-title-line">
-                  <div><span>{detail.reference}</span><h1>{detail.title}</h1></div>
-                  <span className={`proc-status ${statusTone(detail.status)}`}><i />{statusLabel(detail.status)}</span>
+              <header className="proc-request-head flex flex-col bg-surface border-b border-border">
+                <div className="proc-title-line flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                    {taskListCollapsed ? (
+                      <button
+                        className="proc-icon-button compact w-8 h-8 rounded-lg border border-border flex items-center justify-center text-text-muted hover:text-text"
+                        type="button"
+                        title="展开任务列表"
+                        aria-label="展开任务列表"
+                        onClick={() => setTaskListCollapsed(false)}
+                      >
+                        <ChevronRight size={16} />
+                      </button>
+                    ) : null}
+                    <div className="flex flex-col gap-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <code className="font-mono text-xs font-bold text-accent bg-accent-soft px-2 py-0.5 rounded border border-accent/20">
+                          {detail.reference}
+                        </code>
+                      </div>
+                      <h1 className="text-lg font-bold text-text tracking-tight truncate">{detail.title}</h1>
+                    </div>
+                  </div>
+                  <span className={`proc-status ${statusTone(detail.status)} text-xs font-semibold px-3 py-1 rounded-full border inline-flex items-center gap-1.5 flex-shrink-0`}>
+                    <i className="w-2 h-2 rounded-full bg-current" />{statusLabel(detail.status)}
+                  </span>
                 </div>
-                <div className="proc-request-facts">
-                  <span><small>物料</small><strong>{detail.item_name}</strong></span>
-                  <span><small>采购量</small><strong>{quantityUnitText(detail.quantity, detail.unit)}</strong></span>
-                  <span><small>规格</small><strong>{specificationText(detail.specifications)}</strong></span>
-                  <span><small>最长交期</small><strong>{String(detail.constraints.max_lead_days ?? "-")} 天</strong></span>
+
+                <div className="proc-request-facts flex flex-wrap items-center gap-2 text-xs">
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-subtle border border-border/60 text-text">
+                    <small className="text-text-muted">物料</small>
+                    <strong className="font-semibold">{detail.item_name}</strong>
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-subtle border border-border/60 text-text">
+                    <small className="text-text-muted">采购量</small>
+                    <strong className="font-semibold font-mono">{quantityUnitText(detail.quantity, detail.unit)}</strong>
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-subtle border border-border/60 text-text">
+                    <small className="text-text-muted">规格</small>
+                    <strong className="font-semibold">{specificationText(detail.specifications)}</strong>
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-subtle border border-border/60 text-text">
+                    <small className="text-text-muted">最长交期</small>
+                    <strong className="font-semibold font-mono">{String(detail.constraints.max_lead_days ?? "-")} 天</strong>
+                  </span>
                 </div>
-                <div className="proc-progress-context">
-                  <span>{fulfillmentStage ? "采购方案已确认 · 当前履约阶段" : "当前采购决策阶段"}</span>
+
+                <div className="flex flex-col gap-1.5 pt-2 border-t border-border/40">
+                  <div className="proc-progress-context text-[11px] font-medium text-text-muted">
+                    <span>{fulfillmentStage ? "采购方案已确认 · 当前履约阶段" : "当前采购决策阶段"}</span>
+                  </div>
+                  <ol className={`proc-progress ${fulfillmentStage ? "fulfillment" : "decision"} flex items-center gap-2 overflow-x-auto w-full list-none p-0 m-0`} aria-label={fulfillmentStage ? "履约进度" : "采购决策进度"}>
+                    {progressSteps.map((step, index) => {
+                      const position = index + 1;
+                      const done = position < progressCurrent || (fulfillmentStage && position === 6 && taskOrder?.settlement?.status === "PAID");
+                      const current = position === progressCurrent && !done;
+                      return (
+                        <li key={step} className={`flex items-center gap-2 text-xs font-medium whitespace-nowrap ${done ? "done text-accent font-semibold" : current ? "current text-info font-bold" : "text-text-muted"}`} aria-current={current ? "step" : undefined}>
+                          <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-mono font-bold border ${done ? "bg-accent-soft text-accent border-accent/40" : current ? "bg-info-soft text-info border-info ring-2 ring-info/20" : "bg-surface-subtle text-text-muted border-border"}`}>
+                            {done ? <CheckCircle2 size={13} /> : position}
+                          </span>
+                          <strong>{step}</strong>
+                          {index < progressSteps.length - 1 ? <span className="text-border text-xs px-1">→</span> : null}
+                        </li>
+                      );
+                    })}
+                  </ol>
                 </div>
-                <ol className={`proc-progress ${fulfillmentStage ? "fulfillment" : "decision"}`} aria-label={fulfillmentStage ? "履约进度" : "采购决策进度"}>
-                  {progressSteps.map((step, index) => {
-                    const position = index + 1;
-                    const done = position < progressCurrent || (fulfillmentStage && position === 6 && taskOrder?.settlement?.status === "PAID");
-                    const current = position === progressCurrent && !done;
-                    return (
-                      <li key={step} className={done ? "done" : current ? "current" : ""} aria-current={current ? "step" : undefined}>
-                        <span>{done ? <CheckCircle2 size={14} /> : position}</span>
-                        <strong>{step}</strong>
-                      </li>
-                    );
-                  })}
-                </ol>
               </header>
 
               {latestInteraction ? (
@@ -354,24 +423,13 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                 </section>
               ) : null}
 
-              <NextStepBar request={detail} order={taskOrder ?? null} onAction={handleNextStep} />
-
-              {detail.status === "approved" ? (
-                <div className="proc-contract-entry">
-                  {taskContract ? (
-                    <span><FileCheck2 size={14} />合同 {taskContract.contract_no} · {contractStatusLabel(taskContract.status)}</span>
-                  ) : (
-                    <span><FileCheck2 size={14} />定标完成，可生成合同（金额/交期/供应商自动注入）</span>
-                  )}
-                  <button
-                    type="button"
-                    className="proc-button compact"
-                    onClick={() => openView("contracts")}
-                  >
-                    {taskContract ? "合同中心 →" : "生成合同（AI 草拟）"}
-                  </button>
-                </div>
-              ) : null}
+              <NextStepBar
+                request={detail}
+                order={taskOrder ?? null}
+                contract={taskContract ?? null}
+                onAction={handleNextStep}
+                onOpenContract={() => openView("contracts")}
+              />
 
               {aiTaskQuery.data ? (
                 <AiTaskRecovery
@@ -384,8 +442,8 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                 />
               ) : null}
 
-              <div className="proc-task-body">
-                <div className="proc-conversation-shell">
+              <div className={`proc-task-body ${conversationOpen ? "conv-open" : "conv-collapsed"}`}>
+                <div className={`proc-conversation-shell ${conversationOpen ? "open" : "collapsed"}`}>
                   <button
                     type="button"
                     className={`proc-conversation-toggle ${conversationOpen ? "open" : ""}`}

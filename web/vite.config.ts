@@ -62,7 +62,13 @@ export default defineConfig(({ command }) => ({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://127.0.0.1:8741",
+      "/api": {
+        target: "http://127.0.0.1:8741",
+        changeOrigin: true,
+        headers: {
+          Origin: "http://127.0.0.1:8741",
+        },
+      },
     },
   },
   build: {

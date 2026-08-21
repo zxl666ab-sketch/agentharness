@@ -120,6 +120,15 @@ describe("procurement view model", () => {
     });
     expect(collecting.blocker).toContain("至少需要 2 家报价");
 
+    const parsing = nextStepGuide({
+      ...base,
+      status: "collecting",
+      quote_count: 0,
+      attachments: [{ artifact_id: "artifact", filename: "quote.xlsx", sha256: "a", content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", size_bytes: 1 }],
+    });
+    expect(parsing.hint).toContain("并发解析");
+    expect(parsing.actionLabel).toBe("查看解析进度");
+
     const reviewUnconfirmed = nextStepGuide({
       status: "review",
       requirement_confirmed: false,

@@ -84,6 +84,16 @@ public class ProcurementController {
         return accepted(accepted);
     }
 
+    @PostMapping(path = "/requests/{taskId}/quotes/batch", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<ProcurementDtos.OperationAccepted> uploadQuotes(
+            @PathVariable String taskId,
+            @RequestPart("files") List<MultipartFile> files,
+            @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey) {
+        var accepted = service.uploadQuotes(taskId, files, idempotencyKey);
+        insightsCache.evictAll();
+        return accepted(accepted);
+    }
+
     @PostMapping("/requests/{taskId}/quotes/{quoteId}/corrections")
     public Map<String, Object> correctQuote(
             @PathVariable String taskId,
