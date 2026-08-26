@@ -74,7 +74,9 @@ export function ContractCenter() {
   const contractsQuery = useQuery({
     queryKey: ["procurement-contracts", status],
     queryFn: () => procurementApi.contracts(status || undefined, undefined, 0, 100),
-    refetchInterval: 5_000,
+    // 全部终态（CLOSED）后停止轮询；在途合同才持续刷新
+    refetchInterval: (query) =>
+      query.state.data?.items?.some((item) => item.status !== "CLOSED") ? 5_000 : false,
   });
   const tasksQuery = useQuery({
     queryKey: ["procurement-contracts-tasks"],

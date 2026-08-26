@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -60,6 +61,17 @@ class Harness:
         self.data_dir = Path(data_dir or Path.home() / ".agentharness").expanduser()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.redactor = redactor or default_redactor
+        # 把进程凭据注册为脱敏哨兵：一旦进入自由文本（模型回显/错误消息/工具参数），
+        # 持久化与 SSE 输出前都会被替换，杜绝明文密钥落库或外泄。
+        for _env_name in (
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "AGENT_INTERNAL_TOKEN",
+            "AGENT_INTERNAL_HMAC_KEY",
+        ):
+            _env_value = (os.environ.get(_env_name) or "").strip()
+            if _env_value:
+                self.redactor.add_sentinel(_env_value)
         self.storage = Storage(self.data_dir, redactor=self.redactor)
         self.recovered_run_ids = self.storage.recover_expired_run_leases()
         self.tools: dict[str, Any] = dict(tools or {})

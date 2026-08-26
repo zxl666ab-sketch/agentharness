@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 import os
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
@@ -20,9 +21,12 @@ from agentharness import __version__
 from agentharness.api.compatibility import API_CAPABILITIES, API_SCHEMA_VERSION
 from agentharness.api.internal_agent import internal_agent_router
 from agentharness.api.reporting import build_run_report
+from agentharness.config import resolve_internal_token
 from agentharness.harness import Harness
 
 LEASE_SWEEP_INTERVAL_S = 30.0
+
+logger = logging.getLogger("agentharness.api.server")
 
 
 async def _sweep_expired_leases(harness: Harness, interval_s: float | None = None) -> None:
@@ -34,8 +38,11 @@ async def _sweep_expired_leases(harness: Harness, interval_s: float | None = Non
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - a failed sweep cannot stop the Web process
+            # 静默吞掉会让租约恢复"看似在工作实则一直失败"，必须留痕
+            logger.exception("lease sweep failed; expired run leases not recovered")
             continue
         if recovered:
+            logger.info("recovered expired run leases: %s", recovered)
             harness.recovered_run_ids = list(
                 dict.fromkeys([*harness.recovered_run_ids, *recovered])
             )
@@ -103,9 +110,9 @@ def create_app(
         if internal_only is None
         else internal_only
     )
-    internal_token = os.environ.get(
-        "AGENT_INTERNAL_TOKEN", "development-only-change-me"
-    )
+    # 共享解析：空/未设置 env 时回退进程内随机 token（弱默认值已移除，空 token 无法通过认证）
+    internal_token = resolve_internal_token()
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         sweeper = asyncio.create_task(_sweep_expired_leases(runtime))
@@ -154,7 +161,10 @@ def create_app(
             internal_mode and path != "/api/health"
         )
         if needs_internal_token and not hmac.compare_digest(
-            request.headers.get("X-Agent-Internal-Token", ""), internal_token
+            # encode 后比较：非 ASCII 头会让 compare_digest 抛 TypeError 变 500，
+            # 拒绝语义应稳定为 401
+            request.headers.get("X-Agent-Internal-Token", "").encode("utf-8"),
+            internal_token.encode("utf-8"),
         ):
             return JSONResponse(
                 {
@@ -177,6 +187,8 @@ def create_app(
     @app.get("/api/health")
     async def health(response: Response) -> dict[str, Any]:
         response.headers["Cache-Control"] = "no-store"
+        # SQLite 为同步存储：读路径统一 to_thread，避免写锁竞争时阻塞事件循环
+        max_global_seq = await asyncio.to_thread(runtime.storage.max_global_seq)
         return redactor.redact_obj(
             {
                 "service": "agentharness",
@@ -187,7 +199,7 @@ def create_app(
                 "web_build_id": web_build_id,
                 "server_started_at": server_started_at,
                 "data_dir": str(runtime.data_dir.resolve()),
-                "max_global_seq": runtime.storage.max_global_seq(),
+                "max_global_seq": max_global_seq,
                 "internal_only": internal_mode,
             }
         )
@@ -195,27 +207,28 @@ def create_app(
     @app.get("/api/runtime")
     async def runtime_info(response: Response) -> dict[str, Any]:
         response.headers["Cache-Control"] = "no-store"
+        run_count = await asyncio.to_thread(lambda: len(runtime.list_runs()))
         return public_redact(
             {
                 "mode": "procurement_control_plane",
                 "execution_enabled": False,
                 "providers": sorted(runtime.providers),
                 "tools": sorted(runtime.tools),
-                "runs": len(runtime.list_runs()),
+                "runs": run_count,
             }
         )
 
     @app.get("/api/sessions")
     async def sessions(limit: int = Query(100, ge=1, le=500)) -> list[dict[str, Any]]:
-        return public_redact(runtime.list_sessions(limit=limit))
+        rows = await asyncio.to_thread(runtime.list_sessions, limit=limit)
+        return public_redact(rows)
 
     @app.get("/api/sessions/{session_id}/transcript")
     async def transcript(session_id: str) -> list[dict[str, Any]]:
-        if runtime.get_session(session_id) is None:
+        if await asyncio.to_thread(runtime.get_session, session_id) is None:
             raise HTTPException(404, "session not found")
-        return public_redact(
-            [item.model_dump(mode="json") for item in runtime.get_session_transcript(session_id)]
-        )
+        items = await asyncio.to_thread(runtime.get_session_transcript, session_id)
+        return public_redact([item.model_dump(mode="json") for item in items])
 
     @app.get("/api/runs")
     async def runs(
@@ -223,31 +236,33 @@ def create_app(
         limit: int = Query(100, ge=1, le=500),
         offset: int = Query(0, ge=0),
     ) -> list[dict[str, Any]]:
-        return public_redact(
-            runtime.list_runs(session_id=session_id, limit=limit, offset=offset)
+        rows = await asyncio.to_thread(
+            runtime.list_runs, session_id=session_id, limit=limit, offset=offset
         )
+        return public_redact(rows)
 
     @app.get("/api/runs/{run_id}")
     async def run(run_id: str) -> dict[str, Any]:
-        row = runtime.get_run(run_id)
+        row = await asyncio.to_thread(runtime.get_run, run_id)
         if row is None:
             raise HTTPException(404, "run not found")
         return public_redact(row)
 
     @app.get("/api/runs/{run_id}/report")
     async def run_report(run_id: str) -> dict[str, Any]:
-        report = build_run_report(runtime, run_id)
+        # build_run_report 拉 10k 事件 + 逐 artifact/invocation 查询，长 Run 秒级耗时，
+        # 必须离开事件循环执行
+        report = await asyncio.to_thread(build_run_report, runtime, run_id)
         if report is None:
             raise HTTPException(404, "run not found")
         return public_redact(report)
 
     @app.get("/api/runs/{run_id}/messages")
     async def messages(run_id: str) -> list[dict[str, Any]]:
-        if runtime.get_run(run_id) is None:
+        if await asyncio.to_thread(runtime.get_run, run_id) is None:
             raise HTTPException(404, "run not found")
-        return public_redact(
-            [item.model_dump(mode="json") for item in runtime.get_run_messages(run_id)]
-        )
+        items = await asyncio.to_thread(runtime.get_run_messages, run_id)
+        return public_redact([item.model_dump(mode="json") for item in items])
 
     @app.get("/api/runs/{run_id}/events")
     async def events(
@@ -255,53 +270,48 @@ def create_app(
         after: int = Query(0, ge=0),
         limit: int = Query(500, ge=1, le=5_000),
     ) -> list[dict[str, Any]]:
-        if runtime.get_run(run_id) is None:
+        if await asyncio.to_thread(runtime.get_run, run_id) is None:
             raise HTTPException(404, "run not found")
-        return public_redact(
-            [
-                item.model_dump(mode="json")
-                for item in runtime.get_events(
-                    run_id=run_id, after_global_seq=after, limit=limit
-                )
-            ]
+        items = await asyncio.to_thread(
+            runtime.get_events, run_id=run_id, after_global_seq=after, limit=limit
         )
+        return public_redact([item.model_dump(mode="json") for item in items])
 
     @app.get("/api/runs/{run_id}/approvals")
     async def approvals(run_id: str) -> list[dict[str, Any]]:
-        if runtime.get_run(run_id) is None:
+        if await asyncio.to_thread(runtime.get_run, run_id) is None:
             raise HTTPException(404, "run not found")
-        return public_redact(runtime.list_approvals(run_id))
+        rows = await asyncio.to_thread(runtime.list_approvals, run_id)
+        return public_redact(rows)
 
     @app.get("/api/runs/{run_id}/tool-invocations")
     async def tool_invocations(run_id: str) -> list[dict[str, Any]]:
-        if runtime.get_run(run_id) is None:
+        if await asyncio.to_thread(runtime.get_run, run_id) is None:
             raise HTTPException(404, "run not found")
-        return public_redact(
-            [
-                item.model_dump(mode="json")
-                for item in runtime.list_tool_invocations(run_id)
-            ]
-        )
+        items = await asyncio.to_thread(runtime.list_tool_invocations, run_id)
+        return public_redact([item.model_dump(mode="json") for item in items])
 
     @app.get("/api/tool-invocations/{invocation_id}")
     async def tool_invocation(invocation_id: str) -> dict[str, Any]:
-        item = runtime.get_tool_invocation(invocation_id)
+        item = await asyncio.to_thread(runtime.get_tool_invocation, invocation_id)
         if item is None:
             raise HTTPException(404, "tool invocation not found")
         payload = item.model_dump(mode="json")
-        payload["attempts_audit"] = runtime.list_tool_attempts(invocation_id)
+        payload["attempts_audit"] = await asyncio.to_thread(
+            runtime.list_tool_attempts, invocation_id
+        )
         return public_redact(payload)
 
     @app.get("/api/runs/{run_id}/checkpoint")
     async def checkpoint(run_id: str) -> dict[str, Any] | None:
-        if runtime.get_run(run_id) is None:
+        if await asyncio.to_thread(runtime.get_run, run_id) is None:
             raise HTTPException(404, "run not found")
-        value = runtime.get_checkpoint(run_id)
+        value = await asyncio.to_thread(runtime.get_checkpoint, run_id)
         return public_redact(value.model_dump(mode="json")) if value else None
 
     @app.get("/api/artifacts/{artifact_id}")
     async def artifact(artifact_id: str) -> dict[str, Any]:
-        value = runtime.get_artifact(artifact_id)
+        value = await asyncio.to_thread(runtime.get_artifact, artifact_id)
         if value is None:
             raise HTTPException(404, "artifact not found")
         payload: dict[str, Any] = {
@@ -312,17 +322,19 @@ def create_app(
             "summary": redactor.redact_public_text(value.get("summary") or ""),
             "created_at": value.get("created_at"),
         }
-        text = runtime.storage.artifacts.get_text(value["sha256"])
+        text = await asyncio.to_thread(runtime.storage.artifacts.get_text, value["sha256"])
         if text is not None:
             payload["content"] = redactor.redact_public_text(text[:100_000])
         return public_redact(payload)
 
     @app.get("/api/artifacts/{artifact_id}/raw")
     async def raw_artifact(artifact_id: str) -> Response:
-        value = runtime.get_artifact(artifact_id)
+        value = await asyncio.to_thread(runtime.get_artifact, artifact_id)
         if value is None:
             raise HTTPException(404, "artifact not found")
-        content = runtime.storage.artifacts.get_bytes(value["sha256"])
+        content = await asyncio.to_thread(
+            runtime.storage.artifacts.get_bytes, value["sha256"]
+        )
         if content is None:
             raise HTTPException(404, "artifact content not found")
         content_type = str(value.get("content_type") or "application/octet-stream")
@@ -349,18 +361,30 @@ def create_app(
         last_event_id: str | None = Header(None, alias="Last-Event-ID"),
         after: int | None = Query(None),
     ) -> StreamingResponse:
-        cursor = runtime.storage.max_global_seq() if after is None else after
+        cursor = (
+            after if after is not None else await asyncio.to_thread(runtime.storage.max_global_seq)
+        )
         if last_event_id:
             with suppress(ValueError):
                 cursor = max(cursor, int(last_event_id))
 
         async def generate():  # type: ignore[no-untyped-def]
+            queue: asyncio.Queue[Any] = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def on_event(event: Any) -> None:
+                # 引擎在事件循环线程内回调；Kafka 线程等场景用 threadsafe 投递
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+
+            unsubscribe = runtime.subscribe_events(on_event)
             nonlocal cursor
             idle = 0
-            while not await request.is_disconnected():
-                rows = runtime.get_events(after_global_seq=cursor, limit=200)
-                if rows:
-                    idle = 0
+            try:
+                # 1) 先补齐游标之后已有的事件（分页拉完）
+                rows = await asyncio.to_thread(
+                    runtime.get_events, after_global_seq=cursor, limit=200
+                )
+                while rows:
                     for event in rows:
                         cursor = max(cursor, event.global_seq)
                         payload = public_redact(event.model_dump(mode="json"))
@@ -369,13 +393,44 @@ def create_app(
                             f"event: {event.type}\n"
                             f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
                         )
-                    await asyncio.sleep(0.05)
-                else:
-                    yield ": heartbeat\n\n"
-                    idle += 1
-                    if idle > 3 and request.headers.get("x-test-short-stream") == "1":
+                    if len(rows) < 200:
                         break
-                    await asyncio.sleep(0.25)
+                    rows = await asyncio.to_thread(
+                        runtime.get_events, after_global_seq=cursor, limit=200
+                    )
+                # 2) 实时推送为主，心跳期做一次 DB 补偿轮询兜底（订阅间隙不丢事件）
+                while not await request.is_disconnected():
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=2.0)
+                    except TimeoutError:
+                        yield ": heartbeat\n\n"
+                        idle += 1
+                        if idle > 3 and request.headers.get("x-test-short-stream") == "1":
+                            break
+                        rows = await asyncio.to_thread(
+                            runtime.get_events, after_global_seq=cursor, limit=200
+                        )
+                        for event in rows:
+                            cursor = max(cursor, event.global_seq)
+                            payload = public_redact(event.model_dump(mode="json"))
+                            yield (
+                                f"id: {event.global_seq}\n"
+                                f"event: {event.type}\n"
+                                f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+                            )
+                        continue
+                    idle = 0
+                    if event.global_seq <= cursor:
+                        continue
+                    cursor = event.global_seq
+                    payload = public_redact(event.model_dump(mode="json"))
+                    yield (
+                        f"id: {event.global_seq}\n"
+                        f"event: {event.type}\n"
+                        f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+                    )
+            finally:
+                unsubscribe()
 
         return StreamingResponse(
             generate(),

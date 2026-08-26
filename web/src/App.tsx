@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, LoaderCircle } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { api } from "./api/client";
 import { checkBackendCompatibility } from "./api/compatibility";
@@ -16,28 +16,63 @@ function message(error: unknown) {
   return error instanceof Error ? error.message : String(error || "未知错误");
 }
 
-function Gate({ title, detail, loading = false }: { title: string; detail?: string; loading?: boolean }) {
+function Gate({
+  title,
+  detail,
+  loading = false,
+  children,
+}: { title: string; detail?: string; loading?: boolean; children?: ReactNode }) {
   return (
     <main className="proc-gate">
       <span>{loading ? <LoaderCircle className="spin" size={22} /> : <AlertTriangle size={22} />}</span>
       <h1>{title}</h1>
       {detail ? <p>{detail}</p> : null}
+      {children}
     </main>
   );
 }
 
 export default function App() {
-  const [theme, setTheme] = useState<"light" | "dark">(() =>
-    window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light"
-  );
-  const health = useQuery({ queryKey: ["health"], queryFn: api.health, retry: 1 });
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    // 与 index.html 内联脚本同键：优先用户显式选择，其次系统偏好
+    try {
+      const stored = localStorage.getItem("caijiatai.theme");
+      if (stored === "dark" || stored === "light") return stored;
+    } catch {
+      /* localStorage 不可用时回退系统偏好 */
+    }
+    return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
+  const health = useQuery({
+    queryKey: ["health"],
+    queryFn: api.health,
+    retry: 1,
+    // 尚未拿到健康数据（含失败重试期）时每 5s 自动重试；健康后停止，避免常态轮询
+    refetchInterval: (query) => (query.state.data ? false : 5_000),
+  });
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem("caijiatai.theme", theme);
+    } catch {
+      /* 隐私模式等场景下持久化失败可忽略 */
+    }
   }, [theme]);
 
   if (health.isPending) return <Gate title="正在连接采购服务" loading />;
   if (health.isError || !health.data) {
-    return <Gate title="无法连接采购服务" detail={message(health.error)} />;
+    return (
+      <Gate title="无法连接采购服务" detail={message(health.error)}>
+        <button
+          type="button"
+          className="mt-4 px-4 py-2 rounded-lg bg-accent text-white text-sm font-semibold hover:bg-accent-hover transition-colors disabled:opacity-60"
+          onClick={() => void health.refetch()}
+          disabled={health.isFetching}
+        >
+          {health.isFetching ? "重试中…" : "重试连接"}
+        </button>
+      </Gate>
+    );
   }
   const compatibility = checkBackendCompatibility(health.data);
   if (!compatibility.compatible) {

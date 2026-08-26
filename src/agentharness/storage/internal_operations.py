@@ -82,6 +82,14 @@ class InternalOperationRepo:
             "updated_at": now,
         }
 
+    def set_run_id(self, operation_id: str, run_id: str) -> None:
+        """Bind the run created for this operation (indexed idempotent-replay lookup)."""
+        with self.core.transaction():
+            self.core.conn.execute(
+                "UPDATE internal_operations SET run_id = ?, updated_at = ? WHERE operation_id = ?",
+                (run_id, _utcnow(), operation_id),
+            )
+
     def complete(self, operation_id: str, result: dict[str, Any]) -> None:
         now = _utcnow()
         with self.core.transaction():

@@ -11,11 +11,12 @@ import {
   Truck,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 
 import { newIdempotencyKey, procurementApi } from "./api";
 import type { OrderStatus, OrderView, SettlementStatus, SettlementView } from "./types";
 import { fulfillmentNextStep } from "./viewModel";
+import { useModalFocus } from "./useModalFocus";
 
 const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
   PENDING_SHIPMENT: "待发货",
@@ -144,6 +145,110 @@ function transitionKey(keys: Map<string, string>, scope: string, payload: unknow
   return { fingerprint, key };
 }
 
+type OrderCardProps = {
+  order: OrderView;
+  busy: string | null;
+  onShip: (order: OrderView) => void;
+  onSettle: (orderId: string, settlementId: string) => void;
+  onOpenReceive: (order: OrderView) => void;
+  onCloseRequest: (order: OrderView, notes: string) => void;
+  onOpenPay: (order: OrderView) => void;
+};
+
+/** 单张订单卡（memo 化：弹窗表单打字时 props 不变，卡片不重渲）。 */
+const OrderCard = memo(function OrderCard({
+  order,
+  busy,
+  onShip,
+  onSettle,
+  onOpenReceive,
+  onCloseRequest,
+  onOpenPay,
+}: OrderCardProps) {
+  const next = fulfillmentNextStep(order);
+  return (
+    <article className="proc-order-card glass-panel bg-surface/80 hover:bg-surface border border-border/80 hover:border-accent/40 rounded-xl p-5 shadow-sm hover:shadow-md transition-all duration-150 flex flex-col justify-between gap-4">
+      <header className="flex items-start justify-between gap-3">
+        <div className="proc-order-title flex flex-col gap-1 min-w-0">
+          <code className="font-mono text-xs font-semibold text-accent">{order.order_no}</code>
+          <strong className="text-sm font-bold text-text truncate">{order.item_name} × {formatQuantity(order.quantity)} {order.unit}</strong>
+          <small className="text-[11px] text-text-muted truncate">{order.task_reference} · {order.task_title}</small>
+        </div>
+        <span className={`proc-status ${statusTone(order.status)} flex-shrink-0 text-xs font-medium px-2.5 py-0.5 rounded-full border inline-flex items-center gap-1.5`}><i className="w-1.5 h-1.5 rounded-full bg-current" />{ORDER_STATUS_LABELS[order.status]}</span>
+      </header>
+      <div className="proc-order-facts grid grid-cols-2 gap-2 text-xs bg-surface-subtle/50 p-3 rounded-lg border border-border/40">
+        <span className="flex flex-col"><small className="text-[11px] text-text-muted">供应商</small><strong className="font-semibold text-text truncate">{order.supplier_name}</strong></span>
+        <span className="flex flex-col"><small className="text-[11px] text-text-muted">到货总价</small><strong className="font-semibold text-text font-mono">{formatAmount(order.landed_total)}</strong></span>
+        <span className="flex flex-col"><small className="text-[11px] text-text-muted">收货数量</small><strong className="font-semibold text-text font-mono">{formatQuantity(order.received_quantity)}</strong></span>
+        <span className="flex flex-col"><small className="text-[11px] text-text-muted">到货日期</small><strong className="font-semibold text-text">{order.arrival_date ? new Date(order.arrival_date).toLocaleDateString("zh-CN") : "—"}</strong></span>
+        <span className="flex flex-col"><small className="text-[11px] text-text-muted">发票状态</small><strong className="font-semibold text-text">{order.invoice_count === 0 ? "尚未上传" : order.invoice_status ? INVOICE_STATUS_LABELS[order.invoice_status] : "待确认"}</strong></span>
+        <span className="flex flex-col"><small className="text-[11px] text-text-muted">对账状态</small><strong className="font-semibold text-text">{order.settlement ? SETTLEMENT_STATUS_LABELS[order.settlement.status] : "尚未生成"}</strong></span>
+        <span className={`proc-order-next col-span-2 p-2 rounded-md text-xs flex flex-col gap-0.5 border ${next.tone === "success" ? "bg-accent-soft text-accent border-accent/30" : next.tone === "warning" ? "bg-warning-soft text-warning border-warning/30" : "bg-info-soft text-info border-info/30"}`}><small className="text-[10px] font-semibold uppercase opacity-80">当前下一步</small><strong className="font-bold">{next.label}</strong><em className="not-italic text-[11px] opacity-90">{next.detail}</em></span>
+      </div>
+      <div className="proc-order-actions flex flex-wrap items-center gap-2 pt-2 border-t border-border/40">
+        {order.status === "PENDING_SHIPMENT" ? (
+          <>
+            <button className="proc-button inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-accent text-white hover:bg-accent-strong transition-all shadow-xs" type="button" disabled={busy === `ship:${order.id}`} onClick={() => void onShip(order)}>
+              {busy === `ship:${order.id}` ? <LoaderCircle className="spin" size={14} /> : <Truck size={14} />}标记发货
+            </button>
+            <button className="proc-button secondary inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-border bg-surface hover:bg-surface-subtle transition-all" type="button" onClick={() => onCloseRequest(order, "")}>
+              <X size={14} />取消订单
+            </button>
+          </>
+        ) : null}
+        {order.status === "SHIPPED" || order.status === "PARTIALLY_RECEIVED" ? (
+          <button className="proc-button inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-accent text-white hover:bg-accent-strong transition-all shadow-xs" type="button" onClick={() => onOpenReceive(order)}>
+            <PackageCheck size={14} />{order.status === "PARTIALLY_RECEIVED" ? "继续收货" : "确认收货"}
+          </button>
+        ) : null}
+        {order.status === "RECEIVED" ? (
+          <>
+            {order.settlement ? (
+              <span className="proc-settlement-inline inline-flex items-center gap-2 text-xs font-medium text-text-secondary bg-surface-subtle px-2.5 py-1 rounded-lg border border-border">
+                <CreditCard size={14} className="text-accent" />
+                <code>{order.settlement.settlement_no}</code> · {SETTLEMENT_STATUS_LABELS[order.settlement.status]}
+                {order.settlement.status === "UNSETTLED" && next.canSettle ? (
+                  <button className="proc-link-button text-accent font-semibold hover:underline ml-1" type="button" disabled={busy === `settle:${order.settlement.id}`} onClick={() => void onSettle(order.id, order.settlement!.id)}>
+                    确认对账
+                  </button>
+                ) : null}
+                {order.settlement.status === "SETTLED" && next.canPay ? (
+                  <button className="proc-link-button text-accent font-semibold hover:underline ml-1" type="button" onClick={() => onOpenPay(order)}>
+                    登记付款
+                  </button>
+                ) : null}
+              </span>
+            ) : (
+              <span className="proc-settlement-inline muted inline-flex items-center gap-1.5 text-xs text-text-muted"><CreditCard size={14} />对账单缺失</span>
+            )}
+            {next.canClose ? (
+              <button className="proc-button secondary inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-border bg-surface hover:bg-surface-subtle transition-all" type="button" onClick={() => onCloseRequest(order, "订单已完成")}>
+                <CheckCircle2 size={14} />完成关闭
+              </button>
+            ) : null}
+          </>
+        ) : null}
+      </div>
+      <footer className="proc-order-footer flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-border/40 text-[11px] text-text-muted">
+        <div className="flex items-center gap-2">
+          {order.artifacts.length ? order.artifacts.map((artifact) => (
+            <a
+              key={artifact.id}
+              className="proc-artifact-link inline-flex items-center gap-1 text-accent hover:text-accent-strong hover:underline"
+              href={`/api/artifacts/${artifact.id}/raw`}
+              title={artifact.filename}
+            >
+              <Download size={13} />
+              {artifact.kind === "supplier_confirmation_email" ? "供应商确认邮件" : "订单草稿"}
+            </a>
+          )) : <span className="proc-muted">暂无订单工件</span>}
+        </div>
+        <small className="font-mono">更新于 {new Date(order.updated_at).toLocaleString("zh-CN")}</small>
+      </footer>
+    </article>
+  );
+});
+
 export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<OrderStatus | "">("");
@@ -159,26 +264,41 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
   const [paidAt, setPaidAt] = useState("");
   const [payNotes, setPayNotes] = useState("");
   const transitionKeys = useRef(new Map<string, string>());
+  const receiveDialogRef = useRef<HTMLElement | null>(null);
+  const receiveQuantityInputRef = useRef<HTMLInputElement | null>(null);
+  const closeDialogRef = useRef<HTMLElement | null>(null);
+  const closeCancelRef = useRef<HTMLButtonElement | null>(null);
+  const payDialogRef = useRef<HTMLElement | null>(null);
+  const paidAtInputRef = useRef<HTMLInputElement | null>(null);
+  // 收货/付款是表单弹窗：初始焦点落在首个输入；关闭订单是不可回退确认：落在「取消」。
+  useModalFocus(!!receiveTarget, receiveDialogRef, receiveQuantityInputRef);
+  useModalFocus(!!closeTarget, closeDialogRef, closeCancelRef);
+  useModalFocus(!!payTarget, payDialogRef, paidAtInputRef);
 
   const ordersQuery = useQuery({
     queryKey: ["procurement-orders", status],
     queryFn: () => procurementApi.orders(status || undefined, 0, 100),
-    refetchInterval: 10_000,
+    // 全部终态（CLOSED，付款后才能关闭）后停止轮询
+    refetchInterval: (query) =>
+      query.state.data?.items?.some((item) => item.status !== "CLOSED") ? 10_000 : false,
   });
   const allOrders = ordersQuery.data?.items || [];
   const focused = highlightTaskId ? allOrders.filter((item) => item.task_id === highlightTaskId) : null;
   const orders = focused ?? allOrders;
   const focusTask = highlightTaskId && focused ? focused[0] : null;
 
-  const invalidate = () =>
-    Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["procurement-orders"] }),
-      queryClient.invalidateQueries({ queryKey: ["procurement-settlements"] }),
-    ]);
+  const invalidate = useCallback(
+    () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["procurement-orders"] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-settlements"] }),
+      ]),
+    [queryClient],
+  );
 
   /** Run an async order/settlement operation; resolves true only on success so
    *  callers can keep dialogs open with user input intact when the API fails. */
-  async function run<T>(key: string, operation: () => Promise<T>): Promise<boolean> {
+  const run = useCallback(async function run<T>(key: string, operation: () => Promise<T>): Promise<boolean> {
     setBusy(key);
     setError(null);
     setNotice(null);
@@ -192,7 +312,7 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
     } finally {
       setBusy(null);
     }
-  }
+  }, [invalidate]);
 
   function parseDatePart(value: string) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
@@ -212,7 +332,8 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [busy, closeTarget, payTarget, receiveTarget]);
 
-  const ship = async (order: OrderView) => {
+  // 以下回调以稳定引用传给 memo 化的 OrderCard：弹窗输入打字时卡片不重渲。
+  const ship = useCallback(async (order: OrderView) => {
     const input = { action: "ship" } as const;
     const request = transitionKey(transitionKeys.current, `order:${order.id}`, input);
     const ok = await run(`ship:${order.id}`, () =>
@@ -221,7 +342,21 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
       transitionKeys.current.delete(request.fingerprint);
       setNotice(`订单 ${order.order_no} 已标记发货。`);
     }
-  };
+  }, [run]);
+
+  const openReceive = useCallback((order: OrderView) => {
+    const remaining = subtractDecimals(order.quantity, order.received_quantity ?? "0");
+    setReceiveTarget(order);
+    setReceiveQuantity(remaining ?? order.quantity);
+    setArrivalDate(new Date().toISOString().slice(0, 10));
+    setError(null);
+  }, []);
+
+  const openClose = useCallback((order: OrderView, notes: string) => {
+    setCloseTarget(order);
+    setCloseNotes(notes);
+    setError(null);
+  }, []);
 
   const receive = async () => {
     if (!receiveTarget) return;
@@ -280,7 +415,7 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
     }
   };
 
-  const settle = async (orderId: string, settlementId: string) => {
+  const settle = useCallback(async (orderId: string, settlementId: string) => {
     const input = { action: "settle" } as const;
     const request = transitionKey(transitionKeys.current, `settlement:${settlementId}`, input);
     const ok = await run(`settle:${settlementId}`, () =>
@@ -289,7 +424,14 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
       transitionKeys.current.delete(request.fingerprint);
       setNotice("已确认对账。");
     }
-  };
+  }, [run]);
+
+  const openPay = useCallback((order: OrderView) => {
+    setPayTarget({ orderId: order.id, settlementId: order.settlement!.id, settlementNo: order.settlement!.settlement_no, orderNo: order.order_no });
+    setPaidAt(new Date().toISOString().slice(0, 10));
+    setError(null);
+    setNotice(null);
+  }, []);
 
   const pay = async () => {
     if (!payTarget) return;
@@ -375,96 +517,18 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
               : "正式采购方案确认后会立即生成唯一订单。"}</p>
           </div>
         ) : null}
-        {orders.map((order) => {
-          const next = fulfillmentNextStep(order);
-          return (
-          <article className="proc-order-card glass-panel bg-surface/80 hover:bg-surface border border-border/80 hover:border-accent/40 rounded-xl p-5 shadow-sm hover:shadow-md transition-all duration-150 flex flex-col justify-between gap-4" key={order.id}>
-            <header className="flex items-start justify-between gap-3">
-              <div className="proc-order-title flex flex-col gap-1 min-w-0">
-                <code className="font-mono text-xs font-semibold text-accent">{order.order_no}</code>
-                <strong className="text-sm font-bold text-text truncate">{order.item_name} × {formatQuantity(order.quantity)} {order.unit}</strong>
-                <small className="text-[11px] text-text-muted truncate">{order.task_reference} · {order.task_title}</small>
-              </div>
-              <span className={`proc-status ${statusTone(order.status)} flex-shrink-0 text-xs font-medium px-2.5 py-0.5 rounded-full border inline-flex items-center gap-1.5`}><i className="w-1.5 h-1.5 rounded-full bg-current" />{ORDER_STATUS_LABELS[order.status]}</span>
-            </header>
-            <div className="proc-order-facts grid grid-cols-2 gap-2 text-xs bg-surface-subtle/50 p-3 rounded-lg border border-border/40">
-              <span className="flex flex-col"><small className="text-[11px] text-text-muted">供应商</small><strong className="font-semibold text-text truncate">{order.supplier_name}</strong></span>
-              <span className="flex flex-col"><small className="text-[11px] text-text-muted">到货总价</small><strong className="font-semibold text-text font-mono">{formatAmount(order.landed_total)}</strong></span>
-              <span className="flex flex-col"><small className="text-[11px] text-text-muted">收货数量</small><strong className="font-semibold text-text font-mono">{formatQuantity(order.received_quantity)}</strong></span>
-              <span className="flex flex-col"><small className="text-[11px] text-text-muted">到货日期</small><strong className="font-semibold text-text">{order.arrival_date ? new Date(order.arrival_date).toLocaleDateString("zh-CN") : "—"}</strong></span>
-              <span className="flex flex-col"><small className="text-[11px] text-text-muted">发票状态</small><strong className="font-semibold text-text">{order.invoice_count === 0 ? "尚未上传" : order.invoice_status ? INVOICE_STATUS_LABELS[order.invoice_status] : "待确认"}</strong></span>
-              <span className="flex flex-col"><small className="text-[11px] text-text-muted">对账状态</small><strong className="font-semibold text-text">{order.settlement ? SETTLEMENT_STATUS_LABELS[order.settlement.status] : "尚未生成"}</strong></span>
-              <span className={`proc-order-next col-span-2 p-2 rounded-md text-xs flex flex-col gap-0.5 border ${next.tone === "success" ? "bg-accent-soft text-accent border-accent/30" : next.tone === "warning" ? "bg-warning-soft text-warning border-warning/30" : "bg-info-soft text-info border-info/30"}`}><small className="text-[10px] font-semibold uppercase opacity-80">当前下一步</small><strong className="font-bold">{next.label}</strong><em className="not-italic text-[11px] opacity-90">{next.detail}</em></span>
-            </div>
-            <div className="proc-order-actions flex flex-wrap items-center gap-2 pt-2 border-t border-border/40">
-              {order.status === "PENDING_SHIPMENT" ? (
-                <>
-                  <button className="proc-button inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-accent text-white hover:bg-accent-strong transition-all shadow-xs" type="button" disabled={busy === `ship:${order.id}`} onClick={() => void ship(order)}>
-                    {busy === `ship:${order.id}` ? <LoaderCircle className="spin" size={14} /> : <Truck size={14} />}标记发货
-                  </button>
-                  <button className="proc-button secondary inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-border bg-surface hover:bg-surface-subtle transition-all" type="button" onClick={() => { setCloseTarget(order); setCloseNotes(""); setError(null); }}>
-                    <X size={14} />取消订单
-                  </button>
-                </>
-              ) : null}
-              {order.status === "SHIPPED" || order.status === "PARTIALLY_RECEIVED" ? (
-                <button className="proc-button inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-accent text-white hover:bg-accent-strong transition-all shadow-xs" type="button" onClick={() => {
-                  const remaining = subtractDecimals(order.quantity, order.received_quantity ?? "0");
-                  setReceiveTarget(order);
-                  setReceiveQuantity(remaining ?? order.quantity);
-                  setArrivalDate(new Date().toISOString().slice(0, 10));
-                  setError(null);
-                }}>
-                  <PackageCheck size={14} />{order.status === "PARTIALLY_RECEIVED" ? "继续收货" : "确认收货"}
-                </button>
-              ) : null}
-              {order.status === "RECEIVED" ? (
-                <>
-                  {order.settlement ? (
-                    <span className="proc-settlement-inline inline-flex items-center gap-2 text-xs font-medium text-text-secondary bg-surface-subtle px-2.5 py-1 rounded-lg border border-border">
-                      <CreditCard size={14} className="text-accent" />
-                      <code>{order.settlement.settlement_no}</code> · {SETTLEMENT_STATUS_LABELS[order.settlement.status]}
-                      {order.settlement.status === "UNSETTLED" && next.canSettle ? (
-                        <button className="proc-link-button text-accent font-semibold hover:underline ml-1" type="button" disabled={busy === `settle:${order.settlement.id}`} onClick={() => void settle(order.id, order.settlement!.id)}>
-                          确认对账
-                        </button>
-                      ) : null}
-                      {order.settlement.status === "SETTLED" && next.canPay ? (
-                        <button className="proc-link-button text-accent font-semibold hover:underline ml-1" type="button" onClick={() => { setPayTarget({ orderId: order.id, settlementId: order.settlement!.id, settlementNo: order.settlement!.settlement_no, orderNo: order.order_no }); setPaidAt(new Date().toISOString().slice(0, 10)); setError(null); setNotice(null); }}>
-                          登记付款
-                        </button>
-                      ) : null}
-                    </span>
-                  ) : (
-                    <span className="proc-settlement-inline muted inline-flex items-center gap-1.5 text-xs text-text-muted"><CreditCard size={14} />对账单缺失</span>
-                  )}
-                  {next.canClose ? (
-                    <button className="proc-button secondary inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-border bg-surface hover:bg-surface-subtle transition-all" type="button" onClick={() => { setCloseTarget(order); setCloseNotes("订单已完成"); setError(null); }}>
-                      <CheckCircle2 size={14} />完成关闭
-                    </button>
-                  ) : null}
-                </>
-              ) : null}
-            </div>
-            <footer className="proc-order-footer flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-border/40 text-[11px] text-text-muted">
-              <div className="flex items-center gap-2">
-                {order.artifacts.length ? order.artifacts.map((artifact) => (
-                  <a
-                    key={artifact.id}
-                    className="proc-artifact-link inline-flex items-center gap-1 text-accent hover:text-accent-strong hover:underline"
-                    href={`/api/artifacts/${artifact.id}/raw`}
-                    title={artifact.filename}
-                  >
-                    <Download size={13} />
-                    {artifact.kind === "supplier_confirmation_email" ? "供应商确认邮件" : "订单草稿"}
-                  </a>
-                )) : <span className="proc-muted">暂无订单工件</span>}
-              </div>
-              <small className="font-mono">更新于 {new Date(order.updated_at).toLocaleString("zh-CN")}</small>
-            </footer>
-          </article>
-          );
-        })}
+        {orders.map((order) => (
+          <OrderCard
+            key={order.id}
+            order={order}
+            busy={busy}
+            onShip={ship}
+            onSettle={settle}
+            onOpenReceive={openReceive}
+            onCloseRequest={openClose}
+            onOpenPay={openPay}
+          />
+        ))}
       </div>
 
       {receiveTarget ? (
@@ -475,7 +539,7 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
             if (event.target === event.currentTarget && busy !== `receive:${receiveTarget.id}`) setReceiveTarget(null);
           }}
         >
-          <section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="receive-title">
+          <section ref={receiveDialogRef} className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="receive-title">
             <header className="flex items-center justify-between pb-3 border-b border-border/60">
               <div className="flex items-center gap-2 text-text font-bold text-base"><PackageCheck size={18} className="text-accent" /><h2 id="receive-title">确认收货</h2></div>
               <button className="proc-icon-button compact w-7 h-7 rounded-lg border border-border flex items-center justify-center text-text-muted hover:text-text" type="button" title="关闭" aria-label="关闭" onClick={() => setReceiveTarget(null)} disabled={busy === `receive:${receiveTarget.id}`}><X size={16} /></button>
@@ -483,7 +547,7 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
             <div className="proc-supplier-form flex flex-col gap-3">
               <label className="proc-field flex flex-col gap-1 text-xs font-medium text-text">
                 <span>收货数量 <b>*</b></span>
-                <input className="px-3 py-2 rounded-lg border border-border bg-surface-subtle text-text focus:outline-accent font-mono text-sm" type="number" min="0" step="any" value={receiveQuantity} onChange={(event) => setReceiveQuantity(event.target.value)} />
+                <input ref={receiveQuantityInputRef} className="px-3 py-2 rounded-lg border border-border bg-surface-subtle text-text focus:outline-accent font-mono text-sm" type="number" min="0" step="any" value={receiveQuantity} onChange={(event) => setReceiveQuantity(event.target.value)} />
                 <small className="text-[11px] text-text-muted">已收 {formatQuantity(receiveTarget.received_quantity)}，本批不得超过剩余数量 {formatQuantity(subtractDecimals(receiveTarget.quantity, receiveTarget.received_quantity ?? "0"))}</small>
               </label>
               <label className="proc-field flex flex-col gap-1 text-xs font-medium text-text">
@@ -510,7 +574,7 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
             if (event.target === event.currentTarget && busy !== `close:${closeTarget.id}`) setCloseTarget(null);
           }}
         >
-          <section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="close-title">
+          <section ref={closeDialogRef} className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="close-title">
             <header className="flex items-center justify-between pb-3 border-b border-border/60">
               <div className="flex items-center gap-2 text-text font-bold text-base"><X size={18} className="text-danger" /><h2 id="close-title">{closeTarget.status === "PENDING_SHIPMENT" ? "取消订单" : "完成关闭订单"}</h2></div>
               <button className="proc-icon-button compact w-7 h-7 rounded-lg border border-border flex items-center justify-center text-text-muted hover:text-text" type="button" title="关闭" aria-label="关闭" onClick={() => setCloseTarget(null)} disabled={busy === `close:${closeTarget.id}`}><X size={16} /></button>
@@ -525,7 +589,7 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
             </label>
             {error ? <p className="proc-form-error text-xs text-danger font-medium p-2.5 rounded-lg bg-danger-soft border border-danger/30" role="alert">{error}</p> : null}
             <footer className="flex items-center justify-end gap-2 pt-3 border-t border-border/60">
-              <button className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" type="button" onClick={() => setCloseTarget(null)} disabled={busy === `close:${closeTarget.id}`}>取消</button>
+              <button ref={closeCancelRef} className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" type="button" onClick={() => setCloseTarget(null)} disabled={busy === `close:${closeTarget.id}`}>取消</button>
               <button className={`proc-button px-4 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs ${closeTarget.status === "PENDING_SHIPMENT" ? "danger bg-danger text-white hover:bg-rose-700" : "bg-accent text-white hover:bg-accent-strong"}`} type="button" disabled={busy === `close:${closeTarget.id}`} onClick={() => void closeOrder()}>
                 {busy === `close:${closeTarget.id}` ? <LoaderCircle className="spin" size={15} /> : <CheckCircle2 size={15} />}{closeTarget.status === "PENDING_SHIPMENT" ? "确认取消" : "确认完成"}
               </button>
@@ -542,7 +606,7 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
             if (event.target === event.currentTarget && busy !== `pay:${payTarget.settlementId}`) setPayTarget(null);
           }}
         >
-          <section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="pay-title">
+          <section ref={payDialogRef} className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="pay-title">
             <header className="flex items-center justify-between pb-3 border-b border-border/60">
               <div className="flex items-center gap-2 text-text font-bold text-base"><CreditCard size={18} className="text-accent" /><h2 id="pay-title">登记付款</h2></div>
               <button className="proc-icon-button compact w-7 h-7 rounded-lg border border-border flex items-center justify-center text-text-muted hover:text-text" type="button" title="关闭" aria-label="关闭" onClick={() => setPayTarget(null)} disabled={busy === `pay:${payTarget.settlementId}`}><X size={16} /></button>
@@ -554,7 +618,7 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
             <div className="proc-supplier-form flex flex-col gap-3">
               <label className="proc-field flex flex-col gap-1 text-xs font-medium text-text">
                 <span>付款时间 <b>*</b></span>
-                <input className="px-3 py-2 rounded-lg border border-border bg-surface-subtle text-text focus:outline-accent text-sm" type="date" value={paidAt} onChange={(event) => setPaidAt(event.target.value)} />
+                <input ref={paidAtInputRef} className="px-3 py-2 rounded-lg border border-border bg-surface-subtle text-text focus:outline-accent text-sm" type="date" value={paidAt} onChange={(event) => setPaidAt(event.target.value)} />
               </label>
               <label className="proc-field flex flex-col gap-1 text-xs font-medium text-text">
                 <span>备注</span>

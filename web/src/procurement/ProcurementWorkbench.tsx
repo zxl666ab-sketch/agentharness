@@ -18,6 +18,7 @@ import {
   Sun,
   Trash2,
   Wifi,
+  WifiOff,
   ChevronUp,
 } from "lucide-react";
 import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
@@ -177,6 +178,25 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
             </select>
           </label>
           <span className="proc-runtime-state inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-accent-soft text-accent border border-accent/20"><Wifi size={14} />采购服务 {backendVersion}</span>
+          {queries.streamStatus !== "live" ? (
+            <span
+              className="proc-stream-state inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-warning-soft text-warning border border-warning/30"
+              role="status"
+              aria-label="实时事件流状态"
+            >
+              <WifiOff size={14} />
+              {queries.streamStatus === "error" ? "实时连接已断开" : "实时连接中…"}
+              {queries.streamStatus === "error" ? (
+                <button
+                  type="button"
+                  className="underline underline-offset-2 font-semibold hover:text-warning"
+                  onClick={queries.reconnectStream}
+                >
+                  立即重连
+                </button>
+              ) : null}
+            </span>
+          ) : null}
           <button className="proc-icon-button w-8 h-8 rounded-lg border border-border bg-surface hover:bg-surface-subtle hover:border-border-strong text-text-secondary hover:text-text flex items-center justify-center transition-all" type="button" title="API / 模型配置" aria-label="API / 模型配置" onClick={() => openConfig(configQuery.data)}>
             <Settings size={16} />
           </button>

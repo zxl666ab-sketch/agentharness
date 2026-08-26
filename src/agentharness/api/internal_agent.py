@@ -16,6 +16,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentharness.api.reporting import build_run_report
+from agentharness.config import resolve_internal_token
 from agentharness.contracts import (
     BudgetConfig,
     MessageRole,
@@ -171,9 +172,7 @@ class InternalAgentCommands:
         self.java_base_url = os.environ.get(
             "PROCUREMENT_INTERNAL_BASE_URL", "http://127.0.0.1:8741"
         ).rstrip("/")
-        self.token = os.environ.get(
-            "AGENT_INTERNAL_TOKEN", "development-only-change-me"
-        )
+        self.token = resolve_internal_token()
         self._fetch_context = fetch_context or self._http_json
         self._fetch_artifact = fetch_artifact or self._http_bytes
         # P2-3 语义缓存：Redis 可用则启用（AGENT_REDIS_URL），否则 no-op
@@ -215,6 +214,14 @@ class InternalAgentCommands:
         except Exception as exc:  # noqa: BLE001 - failure must be durable for idempotency
             self.harness.storage.internal_operations.fail(body.operation_id, str(exc))
             return self._envelope(body.operation_id, "failed", None, str(exc))
+        # 统一回写点：把本次 run 绑定到 operation（幂等重放走索引直达）
+        dispatch_run_id = (
+            str(result.get("run_id") or "") if isinstance(result, dict) else ""
+        )
+        if dispatch_run_id:
+            self.harness.storage.internal_operations.set_run_id(
+                body.operation_id, dispatch_run_id
+            )
         self.harness.storage.internal_operations.complete(body.operation_id, result)
         return self._envelope(body.operation_id, "completed", result)
 
@@ -875,14 +882,21 @@ class InternalAgentCommands:
         raise ValueError(f"{tool_name} did not produce durable evidence")
 
     def _run_for_operation(self, operation_id: str) -> dict[str, Any] | None:
-        return next(
-            (
-                run
-                for run in self.harness.storage.list_runs(limit=500)
-                if (run.get("metadata") or {}).get("operation_id") == operation_id
-            ),
-            None,
-        )
+        # 索引优先：internal_operations.run_id 直达（O(1)）；旧数据回退全量扫描
+        # 并回填 run_id，避免 list_runs(limit=500) 之外的历史 operation 永远查不到。
+        operation = self.harness.storage.internal_operations.get(operation_id)
+        indexed_run_id = str(operation.get("run_id") or "") if operation else ""
+        if indexed_run_id:
+            run = self.harness.storage.get_run(indexed_run_id)
+            if run is not None:
+                return run
+        for run in self.harness.storage.list_runs(limit=500):
+            if (run.get("metadata") or {}).get("operation_id") == operation_id:
+                self.harness.storage.internal_operations.set_run_id(
+                    operation_id, str(run["id"])
+                )
+                return run
+        return None
 
     def _run_result(self, run: dict[str, Any]):  # type: ignore[no-untyped-def]
         from agentharness.contracts import RunResult, Usage
@@ -989,6 +1003,26 @@ def _model_config_path(data_dir: Path) -> Path:
     return data_dir / "procurement-model-config.json"
 
 
+def _env_api_key() -> str:
+    return (os.environ.get("OPENAI_API_KEY") or "").strip()
+
+
+def _sanitize_for_disk(config: dict[str, Any]) -> dict[str, Any]:
+    """落盘前脱敏：与 env 相同的 api_key 不写明文，只存引用标记。
+
+    旧格式（文件里直接存 key 字符串）仍可读取；下次写入时自动归一化为引用形态。
+    """
+    stored = dict(config)
+    api_key = str(stored.get("api_key") or "").strip()
+    if api_key and api_key == _env_api_key():
+        stored["api_key"] = None
+        stored["api_key_from_env"] = True
+    else:
+        stored["api_key"] = api_key or None
+        stored["api_key_from_env"] = False
+    return stored
+
+
 def _default_model_config() -> dict[str, Any]:
     return {
         "provider": os.environ.get("AGENTHARNESS_PROCUREMENT_PROVIDER", "openai"),
@@ -1021,6 +1055,14 @@ def _load_model_config(data_dir: Path) -> dict[str, Any]:
         value = {}
     if isinstance(value, dict):
         config.update(value)
+    # 引用形态回填：文件只存标记，运行时从 env 取回真实 key（行为与旧格式一致）
+    if (
+        not str(config.get("api_key") or "").strip()
+        and config.get("api_key_from_env")
+    ):
+        env_key = _env_api_key()
+        if env_key:
+            config["api_key"] = env_key
     return config
 
 
@@ -1081,7 +1123,13 @@ def _write_model_config(data_dir: Path, body: dict[str, Any]) -> dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(
-        json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(_sanitize_for_disk(current), ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
     os.replace(temporary, path)
+    try:
+        # 明文密钥绝不落盘；即便存了用户显式输入的自定义 key，也收紧文件权限
+        path.chmod(0o600)
+    except OSError:
+        pass  # Windows FAT 等文件系统不支持 POSIX 权限，忽略
     return _read_model_config(data_dir)

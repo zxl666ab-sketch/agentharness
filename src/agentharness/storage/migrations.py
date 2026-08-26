@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -384,6 +384,11 @@ MIGRATIONS: dict[int, str] = {
     );
     CREATE INDEX IF NOT EXISTS idx_internal_operations_status
         ON internal_operations(status, updated_at);
+    """,
+    12: """
+    ALTER TABLE internal_operations ADD COLUMN run_id TEXT;
+    CREATE INDEX IF NOT EXISTS idx_internal_operations_run
+        ON internal_operations(run_id);
     """,
 }
 

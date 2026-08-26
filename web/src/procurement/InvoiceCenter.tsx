@@ -73,7 +73,13 @@ export function InvoiceCenter() {
   const invoicesQuery = useQuery({
     queryKey: ["procurement-invoices", status],
     queryFn: () => procurementApi.invoices(status || undefined, undefined, 0, 100),
-    refetchInterval: 5_000,
+    // 仅存在在途发票（REGISTERED/DIFF_HOLD）时轮询；全部终态后停止
+    refetchInterval: (query) =>
+      query.state.data?.items?.some(
+        (item) => item.status === "REGISTERED" || item.status === "DIFF_HOLD"
+      )
+        ? 5_000
+        : false,
   });
   const ordersQuery = useQuery({
     queryKey: ["procurement-invoices-orders"],

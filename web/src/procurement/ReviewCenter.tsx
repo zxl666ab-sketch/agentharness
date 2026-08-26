@@ -16,10 +16,11 @@ import {
   X,
   XCircle,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { procurementApi } from "./api";
 import { useEscape } from "./useEscape";
+import { useModalFocus } from "./useModalFocus";
 import type {
   ProcurementRequestSummary,
   ReviewAction,
@@ -116,6 +117,8 @@ export function ReviewCenter({
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const confirmDialogRef = useRef<HTMLElement | null>(null);
+  const confirmCancelRef = useRef<HTMLButtonElement | null>(null);
   const requestMap = useMemo(() => new Map(requests.map((item) => [item.id, item])), [requests]);
   const riskOptions = useMemo(() => [...new Set(reviews.flatMap((item) => item.risk_flags))], [reviews]);
   const filtered = useMemo(() => {
@@ -193,6 +196,8 @@ export function ReviewCenter({
   }, [detail]);
 
   useEscape(confirmOpen && !!detail, () => setConfirmOpen(false), busy);
+  // 审批提交是不可回退动作：初始焦点放在「取消」上，Tab 循环限制在弹窗内。
+  useModalFocus(confirmOpen && !!detail, confirmDialogRef, confirmCancelRef);
 
   async function submit() {
     if (!detail || !pending || !formValid || busy) return;
@@ -368,7 +373,7 @@ export function ReviewCenter({
         </section>
       </div>
 
-      {confirmOpen && detail ? <div className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation"><section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="review-confirm-title"><header className="flex items-center justify-between pb-3 border-b border-border/60"><div className="flex items-center gap-2 text-text font-bold text-base">{action === "NO_AWARD" ? <Ban size={18} className="text-danger" /> : <ShieldCheck size={18} className="text-accent" />}<h2 id="review-confirm-title">确认提交：{ACTION_LABELS[action]}</h2></div><button className="proc-icon-button w-7 h-7 rounded-lg border border-border flex items-center justify-center text-text-muted hover:text-text" type="button" title="关闭" aria-label="关闭" disabled={busy} onClick={() => setConfirmOpen(false)}><X size={18} /></button></header><p className="proc-confirm-warning text-xs text-text-muted leading-relaxed">本次操作绑定当前采购版本、AI 结果和比价快照。提交后会写入不可变审核历史；证据变化时服务端会拒绝旧页面提交。</p><div className="proc-confirm-supplier p-3 rounded-lg bg-surface-subtle border border-border flex flex-col gap-0.5 text-xs"><span className="text-text-muted">{confirmQuote?.supplier_name || (action === "NO_AWARD" ? "本轮不选定供应商" : "返回补充资料与重跑")}</span><strong className="text-sm font-bold text-text">{ACTION_LABELS[action]}</strong><small className="text-text-secondary">{reason.trim() || "未填写额外说明"}</small></div><label className="proc-check approval-confirm flex items-start gap-2.5 text-xs text-text cursor-pointer p-3 rounded-lg bg-surface-subtle/60 border border-border/60"><input type="checkbox" className="rounded border-border text-accent focus:ring-accent mt-0.5" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span><strong className="block font-semibold">我已核对 AI 建议、报价原件与确定性比价证据</strong><small className="block text-text-muted mt-0.5">确认使用当前证据指纹提交人工决定</small></span></label>{actionError ? <p className="proc-form-error text-xs text-danger font-medium p-2.5 rounded-lg bg-danger-soft border border-danger/30 flex items-center gap-1.5" role="alert"><AlertTriangle size={14} />{actionError}</p> : null}<footer className="flex items-center justify-end gap-2 pt-3 border-t border-border/60"><button type="button" className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" disabled={busy} onClick={() => setConfirmOpen(false)}>取消</button><button type="button" className={`proc-button px-4 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs ${action === "NO_AWARD" ? "danger bg-danger text-white hover:bg-rose-700" : "primary bg-accent text-white hover:bg-accent-strong"}`} disabled={!confirmed || busy} onClick={() => void submit()}>{busy ? <LoaderCircle className="spin" size={16} /> : <ClipboardCheck size={16} />}确认提交</button></footer></section></div> : null}
+      {confirmOpen && detail ? <div className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation"><section ref={confirmDialogRef} className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="review-confirm-title"><header className="flex items-center justify-between pb-3 border-b border-border/60"><div className="flex items-center gap-2 text-text font-bold text-base">{action === "NO_AWARD" ? <Ban size={18} className="text-danger" /> : <ShieldCheck size={18} className="text-accent" />}<h2 id="review-confirm-title">确认提交：{ACTION_LABELS[action]}</h2></div><button className="proc-icon-button w-7 h-7 rounded-lg border border-border flex items-center justify-center text-text-muted hover:text-text" type="button" title="关闭" aria-label="关闭" disabled={busy} onClick={() => setConfirmOpen(false)}><X size={18} /></button></header><p className="proc-confirm-warning text-xs text-text-muted leading-relaxed">本次操作绑定当前采购版本、AI 结果和比价快照。提交后会写入不可变审核历史；证据变化时服务端会拒绝旧页面提交。</p><div className="proc-confirm-supplier p-3 rounded-lg bg-surface-subtle border border-border flex flex-col gap-0.5 text-xs"><span className="text-text-muted">{confirmQuote?.supplier_name || (action === "NO_AWARD" ? "本轮不选定供应商" : "返回补充资料与重跑")}</span><strong className="text-sm font-bold text-text">{ACTION_LABELS[action]}</strong><small className="text-text-secondary">{reason.trim() || "未填写额外说明"}</small></div><label className="proc-check approval-confirm flex items-start gap-2.5 text-xs text-text cursor-pointer p-3 rounded-lg bg-surface-subtle/60 border border-border/60"><input type="checkbox" className="rounded border-border text-accent focus:ring-accent mt-0.5" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span><strong className="block font-semibold">我已核对 AI 建议、报价原件与确定性比价证据</strong><small className="block text-text-muted mt-0.5">确认使用当前证据指纹提交人工决定</small></span></label>{actionError ? <p className="proc-form-error text-xs text-danger font-medium p-2.5 rounded-lg bg-danger-soft border border-danger/30 flex items-center gap-1.5" role="alert"><AlertTriangle size={14} />{actionError}</p> : null}<footer className="flex items-center justify-end gap-2 pt-3 border-t border-border/60"><button type="button" ref={confirmCancelRef} className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" disabled={busy} onClick={() => setConfirmOpen(false)}>取消</button><button type="button" className={`proc-button px-4 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs ${action === "NO_AWARD" ? "danger bg-danger text-white hover:bg-rose-700" : "primary bg-accent text-white hover:bg-accent-strong"}`} disabled={!confirmed || busy} onClick={() => void submit()}>{busy ? <LoaderCircle className="spin" size={16} /> : <ClipboardCheck size={16} />}确认提交</button></footer></section></div> : null}
     </div>
   );
 }

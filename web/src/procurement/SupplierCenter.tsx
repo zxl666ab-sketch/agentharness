@@ -12,7 +12,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 
 import { procurementApi } from "./api";
 import { useEscape } from "./useEscape";
@@ -70,9 +70,12 @@ export function SupplierCenter({ onOpenTask }: Props) {
   const [profileId, setProfileId] = useState<string | null>(null);
 
   const pageSize = 50;
+  // 服务端搜索防抖：输入保持即时回显，请求跟随低优先级渲染后的值，
+  // 连续击键不再逐字符打接口。
+  const deferredSearch = useDeferredValue(search.trim());
   const suppliersQuery = useQuery({
-    queryKey: ["procurement-suppliers", search.trim(), status, page],
-    queryFn: () => procurementApi.suppliers(search.trim() || undefined, status || undefined, page, pageSize),
+    queryKey: ["procurement-suppliers", deferredSearch, status, page],
+    queryFn: () => procurementApi.suppliers(deferredSearch || undefined, status || undefined, page, pageSize),
   });
   const profileQuery = useQuery({
     queryKey: ["procurement-supplier-profile", profileId],

@@ -20,7 +20,13 @@ _DEFAULT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         r"\1=[REDACTED]",
     ),
+    # sk- 后接 20+ 位连续字母数字（经典形态）；sk-proj-/sk-svcacct- 等带中缀的
+    # 新形态由下一条覆盖——中缀 `-` 会打断上面的连续匹配，必须单独声明。
     (re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"), "[REDACTED_API_KEY]"),
+    (
+        re.compile(r"\bsk-(?:proj|svcacct|admin|none)-[A-Za-z0-9_-]{20,}"),
+        "[REDACTED_API_KEY]",
+    ),
     (re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{20,}\b"), "[REDACTED_API_KEY]"),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED_AWS_KEY]"),
     (

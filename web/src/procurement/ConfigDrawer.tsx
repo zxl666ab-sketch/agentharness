@@ -1,8 +1,11 @@
+import { useRef } from "react";
+
 import type { UseQueryResult } from "@tanstack/react-query";
 import { LoaderCircle, Save, Settings, ShieldCheck, X } from "lucide-react";
 
 import type { ProcurementModelConfig, ProcurementModelConfigUpdate } from "./types";
 import { errorText } from "./useWorkbenchActions";
+import { useModalFocus } from "./useModalFocus";
 
 type Props = {
   query: UseQueryResult<ProcurementModelConfig, Error>;
@@ -20,6 +23,10 @@ type Props = {
 
 /** API / 模型配置抽屉（P1-5 从工作台拆出）。 */
 export function ConfigDrawer({ query, form, busy, error, notice, onClose, onFieldChange, onSave }: Props) {
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const firstFieldRef = useRef<HTMLSelectElement | null>(null);
+  // 组件由父级条件挂载：打开即聚焦首个表单控件（Provider），Tab 循环限制在抽屉内。
+  useModalFocus(true, drawerRef, firstFieldRef);
   return (
     <div
       className="proc-drawer-backdrop"
@@ -28,7 +35,7 @@ export function ConfigDrawer({ query, form, busy, error, notice, onClose, onFiel
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <aside className="proc-config-drawer" role="dialog" aria-modal="true" aria-labelledby="proc-config-title">
+      <aside ref={drawerRef} className="proc-config-drawer" role="dialog" aria-modal="true" aria-labelledby="proc-config-title">
         <header className="proc-config-head">
           <div>
             <span className="proc-config-icon"><Settings size={17} /></span>
@@ -57,7 +64,7 @@ export function ConfigDrawer({ query, form, busy, error, notice, onClose, onFiel
                 <div className="proc-config-section-title"><strong>模型服务</strong><span>选择离线演示或 OpenAI 兼容接口</span></div>
                 <label className="proc-field proc-span-2">
                   <span>Provider</span>
-                  <select value={form.provider} onChange={(event) => {
+                  <select ref={firstFieldRef} value={form.provider} onChange={(event) => {
                     const provider = event.target.value as ProcurementModelConfigUpdate["provider"];
                     onFieldChange("provider", provider);
                     if (provider === "procurement_fake") onFieldChange("model", "procurement-fake-v1");

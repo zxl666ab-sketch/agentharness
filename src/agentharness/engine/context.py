@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from copy import deepcopy
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -92,6 +92,9 @@ def estimate_messages_tokens(messages: list[Message]) -> int:
 
 def estimate_tool_tokens(tool: ToolSpec) -> int:
     return estimate_tokens(tool.name + tool.description + _stable_json(tool.parameters))
+
+
+logger = logging.getLogger("agentharness.engine.context")
 
 
 class ContextPlanner:
@@ -475,7 +478,11 @@ class ContextPlanner:
             if self.storage is not None:
                 meta["id"] = self.storage.register_artifact(meta)
             return str(meta.get("id") or "") or None
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - 压缩流程不能因外链失败中断
+            # 但审计外链断裂必须留痕：返回 None 意味着原始消息只存在于压缩摘要里
+            logger.exception(
+                "context externalize failed: original messages will have no artifact audit trail"
+            )
             return None
 
     def select_state(
@@ -618,90 +625,3 @@ def _stable_json(value: Any) -> str:
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
-
-# Compatibility helpers kept for public callers while RunEngine migrates to ContextPlanner.
-def assemble_context(
-    *,
-    system: str | None,
-    skills: list[str],
-    memories: list[str],
-    summary: str | None,
-    messages: list[Message],
-    tools: list[ToolSpec],
-    max_tokens: int = 100_000,
-) -> tuple[str | None, list[Message], dict[str, Any]]:
-    request = RunRequest(message="", system=system)
-    state_items = [
-        ContextPinnedItem(
-            section="system",
-            source="legacy.system",
-            content=system or "",
-            content_hash=_sha256(system or ""),
-            token_estimate=estimate_tokens(system or ""),
-        )
-    ]
-    state_items.extend(
-        ContextPinnedItem(
-            section="skills",
-            source=f"legacy.skill:{index}",
-            content=value,
-            content_hash=_sha256(value),
-            token_estimate=estimate_tokens(value),
-        )
-        for index, value in enumerate(skills)
-    )
-    state_items.extend(
-        ContextPinnedItem(
-            section="memories",
-            source=f"legacy.memory:{index}",
-            content=value,
-            content_hash=_sha256(value),
-            token_estimate=estimate_tokens(value),
-        )
-        for index, value in enumerate(memories)
-    )
-    if summary:
-        state_items.append(
-            ContextPinnedItem(
-                section="memories",
-                source="legacy.summary",
-                content=summary,
-                content_hash=_sha256(summary),
-                token_estimate=estimate_tokens(summary),
-            )
-        )
-    bundle = ContextPlanner().plan(
-        run_id="legacy",
-        request=request,
-        messages=messages,
-        tools=tools,
-        model_turn=0,
-        state=ContextState(items=state_items),
-        max_tokens=max_tokens,
-    )
-    return (
-        bundle.system,
-        bundle.messages,
-        {
-            "token_estimate": bundle.manifest.total_tokens,
-            "token_method": bundle.manifest.token_method,
-            "compacted": bundle.manifest.compacted,
-            "prefix_fingerprint": bundle.manifest.prefix_fingerprint,
-        },
-    )
-
-
-def compact_messages(messages: list[Message]) -> list[Message]:
-    """Compatibility wrapper that retains only valid groups around the latest user."""
-    copied = deepcopy(messages)
-    groups = _message_groups(copied)
-    last_user = max(
-        (index for index, message in enumerate(copied) if message.role == MessageRole.user),
-        default=-1,
-    )
-    kept = [
-        group
-        for group in groups
-        if group["valid"] and (int(group["end"]) >= max(0, last_user - 4))
-    ]
-    return [message for group in kept for message in group["messages"]]

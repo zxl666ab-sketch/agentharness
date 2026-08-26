@@ -237,8 +237,10 @@ class ProcurementAgentTools:
                     raise ValueError("procurement source message is missing")
                 # P2-3 语义缓存：相同需求消息（精确 SHA-256 + schema 版本）→ 确定性复用
                 message_sha = hashlib.sha256(message.encode("utf-8")).hexdigest()
-                cached = self.semantic_cache.get_requirement(
-                    message_sha, REQUIREMENT_SCHEMA_VERSION
+                cached = await asyncio.to_thread(
+                    self.semantic_cache.get_requirement,
+                    message_sha,
+                    REQUIREMENT_SCHEMA_VERSION,
                 )
                 if cached is not None:
                     requirement = cached
@@ -247,8 +249,11 @@ class ProcurementAgentTools:
                     requirement = extract_requirement(
                         [Message(role=MessageRole.user, content=message)]
                     )
-                    self.semantic_cache.put_requirement(
-                        message_sha, REQUIREMENT_SCHEMA_VERSION, requirement
+                    await asyncio.to_thread(
+                        self.semantic_cache.put_requirement,
+                        message_sha,
+                        REQUIREMENT_SCHEMA_VERSION,
+                        requirement,
                     )
                     source = "deterministic_offline_adapter"
             else:
@@ -392,8 +397,11 @@ class ProcurementAgentTools:
         if expected_sha and hashlib.sha256(content).hexdigest() != expected_sha:
             raise ValueError("business artifact SHA-256 mismatch")
         # P2-3 语义缓存：精确层命中（原件 SHA-256 + 解析器版本）→ 确定性复用，不重新解析
+        # Redis 为同步客户端（socket_timeout=1s）：必须离开事件循环调用
         cached = (
-            self.semantic_cache.get_quote_parse(expected_sha, PARSER_VERSION)
+            await asyncio.to_thread(
+                self.semantic_cache.get_quote_parse, expected_sha, PARSER_VERSION
+            )
             if expected_sha
             else None
         )
@@ -405,7 +413,12 @@ class ProcurementAgentTools:
             extracted = {**extracted, "review_fields": review_fields}
             if expected_sha and not review_fields:
                 # 只缓存已通过字段校验（无待复核字段）的解析结果，与设计纪律一致
-                self.semantic_cache.put_quote_parse(expected_sha, PARSER_VERSION, extracted)
+                await asyncio.to_thread(
+                    self.semantic_cache.put_quote_parse,
+                    expected_sha,
+                    PARSER_VERSION,
+                    extracted,
+                )
         review_fields = extracted.get("review_fields") or fields_requiring_review(extracted)
         supplier = str(
             ((extracted.get("fields") or {}).get("supplier_name") or {}).get("value")

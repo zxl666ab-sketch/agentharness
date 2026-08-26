@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from types import SimpleNamespace
@@ -1034,14 +1034,14 @@ async def test_approval_only_allows_exact_java_binding(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_internal_only_requires_token_except_health(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("AGENT_INTERNAL_TOKEN", "test-token")
+    monkeypatch.setenv("AGENT_INTERNAL_TOKEN", "test-token-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     app = create_app(data_dir=tmp_path / "runtime", internal_only=True)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://agent") as client:
         assert (await client.get("/api/health")).status_code == 200
         assert (await client.get("/api/sessions")).status_code == 401
         authorized = await client.get(
-            "/api/sessions", headers={"X-Agent-Internal-Token": "test-token"}
+            "/api/sessions", headers={"X-Agent-Internal-Token": "test-token-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
         )
         assert authorized.status_code == 200
 
@@ -1050,7 +1050,7 @@ async def test_internal_only_requires_token_except_health(tmp_path, monkeypatch)
 async def test_internal_token_allows_runtime_reads_when_remote_execution_is_disabled(
     tmp_path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("AGENT_INTERNAL_TOKEN", "test-token")
+    monkeypatch.setenv("AGENT_INTERNAL_TOKEN", "test-token-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     app = create_app(
         data_dir=tmp_path / "runtime",
         internal_only=True,
@@ -1060,7 +1060,7 @@ async def test_internal_token_allows_runtime_reads_when_remote_execution_is_disa
     async with httpx.AsyncClient(transport=transport, base_url="http://agent") as client:
         denied = await client.get("/api/sessions")
         authorized = await client.get(
-            "/api/sessions", headers={"X-Agent-Internal-Token": "test-token"}
+            "/api/sessions", headers={"X-Agent-Internal-Token": "test-token-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
         )
 
     assert denied.status_code == 401

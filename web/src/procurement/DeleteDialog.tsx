@@ -1,7 +1,10 @@
+import { useRef } from "react";
+
 import { AlertTriangle, LoaderCircle, Trash2, X } from "lucide-react";
 
 import type { ProcurementRequestSummary } from "./types";
 import { statusLabel, statusTone } from "./viewModel";
+import { useModalFocus } from "./useModalFocus";
 
 type Props = {
   target: ProcurementRequestSummary;
@@ -13,6 +16,10 @@ type Props = {
 
 /** 删除采购任务确认弹窗（现代居中模态设计）。 */
 export function DeleteDialog({ target, busy, error, onClose, onConfirm }: Props) {
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  // 危险操作：初始焦点放在「取消」上，避免回车误触删除
+  useModalFocus(true, dialogRef, cancelRef);
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs animate-in fade-in duration-150"
@@ -22,6 +29,7 @@ export function DeleteDialog({ target, busy, error, onClose, onConfirm }: Props)
       }}
     >
       <section
+        ref={dialogRef}
         className="glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-auto flex flex-col gap-4 animate-in zoom-in-95 duration-150"
         role="dialog"
         aria-modal="true"
@@ -76,6 +84,7 @@ export function DeleteDialog({ target, busy, error, onClose, onConfirm }: Props)
 
         <footer className="flex items-center justify-end gap-2.5 pt-3 border-t border-border/60">
           <button
+            ref={cancelRef}
             className="proc-button secondary px-4 py-2 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle transition-colors"
             type="button"
             onClick={onClose}

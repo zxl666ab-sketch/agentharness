@@ -123,7 +123,8 @@ export function useRequestQueries(state: WorkbenchState) {
       return page.items.find((item) => item.task_id === selectedId) || null;
     },
     enabled: !!selectedId && detailQuery.data?.status === "approved",
-    refetchInterval: 10_000,
+    // 任务订单轮询：订单到达 CLOSED 终态（付款后关闭）即停止；尚未生成时继续等待生成。
+    refetchInterval: (query) => query.state.data?.status === "CLOSED" ? false : 10_000,
   });
   const taskContractQuery = useQuery({
     queryKey: ["procurement-task-contract", selectedId],
@@ -132,7 +133,8 @@ export function useRequestQueries(state: WorkbenchState) {
       return page.items[0] || null;
     },
     enabled: !!selectedId && detailQuery.data?.status === "approved",
-    refetchInterval: 5_000,
+    // 任务合同轮询：合同 CLOSED 为终态即停止；尚未起草（null）时继续等待。
+    refetchInterval: (query) => query.state.data?.status === "CLOSED" ? false : 5_000,
   });
 
   const requests = useMemo(() => requestsQuery.data || [], [requestsQuery.data]);
@@ -193,7 +195,7 @@ export function useRequestQueries(state: WorkbenchState) {
   const disconnectPolls = useRef(0);
   const streamRefreshTimer = useRef<number | null>(null);
   const currentRunId = detailQuery.data?.analysis_run_id || pendingRunId;
-  const latestEvent = stream.events.at(-1);
+  const latestEvent = stream.latestEvent;
   useEffect(() => {
     if (!latestEvent || latestEvent.run_id !== currentRunId || !selectedId) return;
     // A streamed run can emit many token/tool events in a burst.  Coalescing
@@ -225,18 +227,22 @@ export function useRequestQueries(state: WorkbenchState) {
       disconnectPolls.current = 0;
       return;
     }
-    const timer = window.setInterval(() => {
-      if (disconnectPolls.current >= 15) {
-        window.clearInterval(timer);
-        return;
-      }
+    let timer: number | null = null;
+    const poll = () => {
       disconnectPolls.current += 1;
       void Promise.all([
         queryClient.invalidateQueries({ queryKey: ["procurement-request", selectedId] }),
         queryClient.invalidateQueries({ queryKey: ["procurement-requests"] }),
       ]);
-    }, 2_000);
-    return () => window.clearInterval(timer);
+      // 前 15 次每 2s，之后退避到 10s 持续兜底：断线期间数据保持最终一致，
+      // 不再像旧实现那样 30s 后彻底静默放弃（UI 也不会再无声变死）。
+      const delay = disconnectPolls.current >= 15 ? 10_000 : 2_000;
+      timer = window.setTimeout(poll, delay);
+    };
+    timer = window.setTimeout(poll, 2_000);
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+    };
   }, [queryClient, selectedId, stream.status]);
 
   async function commit(updated: ProcurementRequest) {
@@ -276,6 +282,8 @@ export function useRequestQueries(state: WorkbenchState) {
     totalTaskPages,
     latestAiTaskId,
     currentRunId,
+    streamStatus: stream.status,
+    reconnectStream: stream.reconnect,
   };
 }
 

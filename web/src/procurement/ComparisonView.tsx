@@ -16,9 +16,10 @@ import {
   X,
   XCircle,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useEscape } from "./useEscape";
+import { useModalFocus } from "./useModalFocus";
 import type { ComparisonQuote, ProcurementRequest } from "./types";
 
 type Props = {
@@ -75,6 +76,10 @@ export function ComparisonView({
   const [noAwardConfirmed, setNoAwardConfirmed] = useState(false);
   const [noAwardNote, setNoAwardNote] = useState("");
   const [showDetails, setShowDetails] = useState(false);
+  const confirmDialogRef = useRef<HTMLElement | null>(null);
+  const confirmCancelRef = useRef<HTMLButtonElement | null>(null);
+  const noAwardDialogRef = useRef<HTMLElement | null>(null);
+  const noAwardCancelRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
     setSelectedId(result?.recommended_quote_id || null);
     setConfirmOpen(false);
@@ -97,6 +102,9 @@ export function ComparisonView({
 
   useEscape(confirmOpen, () => setConfirmOpen(false), busy === "approve");
   useEscape(noAwardOpen, () => setNoAwardOpen(false), busy === "no_award");
+  // 定标/流标都是不可回退的正式决策：初始焦点放在「取消」上，Tab 循环限制在弹窗内。
+  useModalFocus(confirmOpen && !!selected, confirmDialogRef, confirmCancelRef);
+  useModalFocus(noAwardOpen, noAwardDialogRef, noAwardCancelRef);
 
   if (!snapshot || !result) {
     return (
@@ -282,7 +290,7 @@ export function ComparisonView({
 
       {confirmOpen && selected ? (
         <div className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation">
-          <section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+          <section ref={confirmDialogRef} className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
             <header className="flex items-center justify-between pb-3 border-b border-border/60">
               <div className="flex items-center gap-2 text-text font-bold text-base"><ShieldCheck size={18} className="text-accent" /><h2 id="confirm-title">正式选定供应商</h2></div>
               <button className="proc-icon-button compact w-7 h-7 rounded-lg border border-border flex items-center justify-center text-text-muted hover:text-text" type="button" title="关闭" aria-label="关闭" onClick={() => setConfirmOpen(false)}><X size={16} /></button>
@@ -299,7 +307,7 @@ export function ComparisonView({
             </label>
             {error ? <p className="proc-form-error text-xs text-danger font-medium p-2.5 rounded-lg bg-danger-soft border border-danger/30 flex items-center gap-1.5" role="alert"><AlertTriangle size={14} />{error}</p> : null}
             <footer className="flex items-center justify-end gap-2 pt-3 border-t border-border/60">
-              <button type="button" className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" onClick={() => setConfirmOpen(false)}>取消</button>
+              <button type="button" ref={confirmCancelRef} className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" onClick={() => setConfirmOpen(false)}>取消</button>
               <button
                 type="button"
                 className="proc-button primary px-4 py-1.5 rounded-lg text-xs font-semibold bg-accent text-white hover:bg-accent-strong inline-flex items-center gap-1.5 shadow-xs"
@@ -316,7 +324,7 @@ export function ComparisonView({
 
       {noAwardOpen ? (
         <div className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation">
-          <section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="no-award-title">
+          <section ref={noAwardDialogRef} className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="no-award-title">
             <header className="flex items-center justify-between pb-3 border-b border-border/60">
               <div className="flex items-center gap-2 text-text font-bold text-base"><Ban size={18} className="text-danger" /><h2 id="no-award-title">确认本轮流标</h2></div>
               <button className="proc-icon-button compact w-7 h-7 rounded-lg border border-border flex items-center justify-center text-text-muted hover:text-text" type="button" title="关闭" aria-label="关闭" onClick={() => setNoAwardOpen(false)}><X size={16} /></button>
@@ -329,7 +337,7 @@ export function ComparisonView({
             </label>
             {error ? <p className="proc-form-error text-xs text-danger font-medium p-2.5 rounded-lg bg-danger-soft border border-danger/30 flex items-center gap-1.5" role="alert"><AlertTriangle size={14} />{error}</p> : null}
             <footer className="flex items-center justify-end gap-2 pt-3 border-t border-border/60">
-              <button type="button" className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" onClick={() => setNoAwardOpen(false)}>取消</button>
+              <button type="button" ref={noAwardCancelRef} className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" onClick={() => setNoAwardOpen(false)}>取消</button>
               <button
                 type="button"
                 className="proc-button danger px-4 py-1.5 rounded-lg text-xs font-semibold bg-danger text-white hover:bg-rose-700 inline-flex items-center gap-1.5 shadow-xs"
