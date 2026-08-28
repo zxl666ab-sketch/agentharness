@@ -39,8 +39,8 @@
 |---|------|-------|-------------|--------|
 | M1 | Design System & Styling Foundation | Tailwind CSS + PostCSS configuration, tokens.css mapping, dark/light theme toggle, glassmorphism, glow-pulse, `cn()` utility, lint cleanup | none | DONE |
 | M2 | Cockpit Dashboard & Business Centers Overhaul | Redesign `WorkbenchHome.tsx`, `Navigation.tsx`, `Header.tsx`, `RoleSwitcher.tsx`, `OrderCenter.tsx`, `ContractCenter.tsx`, `InvoiceCenter.tsx`, `SupplierCenter.tsx`, `ReviewCenter.tsx`, `ReportsCenter.tsx`, `AuditLogCenter.tsx`, `AiTaskCenter.tsx` | M1 | DONE |
-| M3 | Dual-Pane AI & Canvas Workspace Layout | Redesign `ProcurementWorkbench.tsx`, `ProcurementConversation.tsx`, `HumanInteractionPanel.tsx`, `AiTaskRecovery.tsx`, `QuoteWorkspace.tsx`, `ComparisonView.tsx`, `ReportView.tsx`, `AuditView.tsx`, `NextStepBar.tsx` | M1, M2 | PLANNED |
-| M4 | Final Integration, Test Pass & Hardening | Full test run (16+ test files, 104+ tests), Phase 2 Adversarial coverage hardening, Forensic integrity audit | M3 | PLANNED |
+| M3 | Dual-Pane AI & Canvas Workspace Layout | Redesign `ProcurementWorkbench.tsx`, `ProcurementConversation.tsx`, `HumanInteractionPanel.tsx`, `AiTaskRecovery.tsx`, `QuoteWorkspace.tsx`, `ComparisonView.tsx`, `ReportView.tsx`, `AuditView.tsx`, `NextStepBar.tsx` | M1, M2 | DONE |
+| M4 | Final Integration, Test Pass & Hardening | Full test run (16 test files, 111+ tests), Phase 2 Adversarial coverage hardening, Forensic integrity audit | M3 | DONE |
 
 ---
 
@@ -57,7 +57,7 @@
 Must be preserved alongside new Tailwind utility classes:
 - `.proc-order-card`, `.proc-settlement-row`, `.proc-inline-error`, `.proc-invoice-actions`
 - `.proc-home-section`, `.proc-conflict-chip`, `details.proc-evidence-panel`
-- `.effect-badge`, `.run-report`, `.proc-app`, `.proc-workbench`
+- `.effect-badge`, `.run-report`, `.proc-app`
 
 ### 3. ARIA Roles & Labels
 - `role="alert"` — Error and warning notification boxes
@@ -100,13 +100,13 @@ web/
 │   │   ├── Navigation.tsx         [M2: DONE]
 │   │   ├── Header.tsx             [M2: DONE]
 │   │   ├── RoleSwitcher.tsx       [M2: DONE]
-│   │   ├── ProcurementWorkbench.tsx [M3: Worker 3]
-│   │   ├── ProcurementConversation.tsx [M3: Worker 3]
-│   │   ├── HumanInteractionPanel.tsx [M3: Worker 3]
-│   │   ├── AiTaskRecovery.tsx     [M3: Worker 3]
-│   │   ├── QuoteWorkspace.tsx     [M3: Worker 3]
-│   │   ├── ComparisonView.tsx     [M3: Worker 3]
-│   │   ├── ReportView.tsx         [M3: Worker 3]
-│   │   ├── AuditView.tsx          [M3: Worker 3]
-│   │   └── NextStepBar.tsx        [M3: Worker 3]
+│   │   ├── ProcurementWorkbench.tsx [M3: DONE]
+│   │   ├── ProcurementConversation.tsx [M3: DONE]
+│   │   ├── HumanInteractionPanel.tsx [M3: DONE]
+│   │   ├── AiTaskRecovery.tsx     [M3: DONE]
+│   │   ├── QuoteWorkspace.tsx     [M3: DONE]
+│   │   ├── ComparisonView.tsx     [M3: DONE]
+│   │   ├── ReportView.tsx         [M3: DONE]
+│   │   ├── AuditView.tsx          [M3: DONE]
+│   │   └── NextStepBar.tsx        [M3: DONE]
 ```

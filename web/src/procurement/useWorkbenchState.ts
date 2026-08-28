@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 
 import {
   readWorkbenchUrl,
@@ -100,7 +100,9 @@ export function useWorkbenchState(): WorkbenchState {
     return () => window.removeEventListener("popstate", restore);
   }, []);
 
-  function navigate(patch: Partial<WorkbenchUrlState>, push = true) {
+  // W-M6：导航回调全部 useCallback 稳定化，返回对象 useMemo 包裹。
+  // 此前每次渲染都产生新函数/新对象，令一切依赖 `state` 的 effect 无谓重跑。
+  const navigate = useCallback((patch: Partial<WorkbenchUrlState>, push = true) => {
     const next = { ...urlState, ...patch };
     writeWorkbenchUrl(next, push);
     setView(next.view);
@@ -112,9 +114,9 @@ export function useWorkbenchState(): WorkbenchState {
     setSearch(next.q);
     setTaskPage(next.page);
     setOrderTask(next.orderTask);
-  }
+  }, [urlState]);
 
-  function openView(nextView: WorkbenchView) {
+  const openView = useCallback((nextView: WorkbenchView) => {
     setShowCreate(false);
     setActionError(null);
     navigate({
@@ -125,35 +127,35 @@ export function useWorkbenchState(): WorkbenchState {
       page: 0,
       orderTask: null,
     });
-  }
+  }, [navigate, selectedAiId, selectedId, selectedReviewId]);
 
-  function openTask(taskId: string, tab: TaskTab = "quotes") {
+  const openTask = useCallback((taskId: string, tab: TaskTab = "quotes") => {
     setShowCreate(false);
     setActionError(null);
     navigate({ view: "tasks", task: taskId, ai: null, review: null, tab, orderTask: null });
-  }
+  }, [navigate]);
 
-  function openTaskFilter(filter: TaskFilter) {
+  const openTaskFilter = useCallback((filter: TaskFilter) => {
     setShowCreate(false);
     navigate({ view: "tasks", status: filter, task: null, ai: null, review: null, page: 0, orderTask: null });
-  }
+  }, [navigate]);
 
-  function openCreate() {
+  const openCreate = useCallback(() => {
     setActionError(null);
     setSelectedId(null);
     setShowCreate(true);
     navigate({ view: "tasks", task: null, ai: null, review: null, tab: "quotes", orderTask: null });
-  }
+  }, [navigate]);
 
-  function selectAiTask(aiTaskId: string | null, push = true) {
+  const selectAiTask = useCallback((aiTaskId: string | null, push = true) => {
     navigate({ view: "ai", task: null, ai: aiTaskId, review: null, orderTask: null }, push);
-  }
+  }, [navigate]);
 
-  function selectReview(reviewId: string | null, push = true) {
+  const selectReview = useCallback((reviewId: string | null, push = true) => {
     navigate({ view: "reviews", task: null, ai: null, review: reviewId, orderTask: null }, push);
-  }
+  }, [navigate]);
 
-  return {
+  return useMemo<WorkbenchState>(() => ({
     view,
     selectedId,
     selectedAiId,
@@ -184,5 +186,27 @@ export function useWorkbenchState(): WorkbenchState {
     openCreate,
     selectAiTask,
     selectReview,
-  };
+  }), [
+    view,
+    selectedId,
+    selectedAiId,
+    selectedReviewId,
+    activeTab,
+    taskFilter,
+    taskPage,
+    search,
+    showCreate,
+    pendingRunId,
+    pendingOperation,
+    orderTask,
+    actionError,
+    urlState,
+    navigate,
+    openView,
+    openTask,
+    openTaskFilter,
+    openCreate,
+    selectAiTask,
+    selectReview,
+  ]);
 }

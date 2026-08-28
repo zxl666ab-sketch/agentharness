@@ -303,6 +303,58 @@ class TestGatewayAcquire:
         assert gateway.snapshot()["stats"]["requests"] == 0  # record() only from adapter
 
     @pytest.mark.asyncio
+    async def test_rate_limited_probe_frees_the_half_open_slot(self) -> None:
+        """P-H1: a local QPS refusal must not leave the probe位 consumed forever.
+
+        Before the fix the breaker stayed `half_open` with `_probe_inflight`
+        stuck, so every later request was refused as `circuit_open` until the
+        process restarted.
+        """
+        clock = _FakeClock()
+        gateway = _gateway(
+            clock, qps=1.0, bucket_wait_s=0.0, window_s=30.0, failure_rate=0.5,
+            min_samples=2, open_s=60.0,
+        )
+        gateway.record(False)
+        gateway.record(False)
+        assert gateway.snapshot()["state"] == "open"
+        clock.advance(61.0)  # half_open；令牌桶同时回满
+        # 令牌被别的在途请求耗尽后，半开探测在拿到探测位之后才被本地限流拒绝
+        assert gateway._bucket.take() == 0.0
+        with pytest.raises(GatewayBlockedError) as refused:
+            await gateway.acquire()
+        assert refused.value.code == "rate_limited"
+        assert gateway._breaker._probe_inflight is False, "探测位泄漏"
+
+        clock.advance(1.0)  # 桶回填 → 下一次请求应当真的能探测
+        await gateway.acquire()
+        gateway.record(True)
+        assert gateway.snapshot()["state"] == "closed"
+
+    @pytest.mark.asyncio
+    async def test_cancelled_probe_frees_slot_and_does_not_leak_quota(self) -> None:
+        """P-H1: cancellation while queueing on the semaphore releases the probe."""
+        clock = _FakeClock()
+        gateway = _gateway(
+            clock, max_concurrency=1, qps=100.0, window_s=30.0, failure_rate=0.5,
+            min_samples=2, open_s=60.0,
+        )
+        await gateway.acquire()  # 占满唯一并发额度（closed 态，无探测位）
+        gateway.record(False)
+        gateway.record(False)
+        clock.advance(61.0)  # half_open
+        waiting = asyncio.create_task(gateway.acquire())  # 拿探测位后卡在信号量
+        await asyncio.sleep(0.01)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert gateway._breaker._probe_inflight is False, "取消路径泄漏探测位"
+        gateway.release()  # 归还第一个请求的额度
+        await gateway.acquire()  # 额度没被吞掉，且可以重新探测
+        gateway.record(True)
+        assert gateway.snapshot()["state"] == "closed"
+
+    @pytest.mark.asyncio
     async def test_concurrency_quota_queues(self) -> None:
         clock = _FakeClock()
         active: list[int] = []

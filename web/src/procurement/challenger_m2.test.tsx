@@ -38,11 +38,7 @@ describe("CHALLENGER 1: Visual Layout & Empty / Extreme Data Resilience", () => 
           aiTasks={[]}
           reviews={[]}
           loading={false}
-          createBusy={false}
-          maxFileBytes={5 * 1024 * 1024}
-          maxTotalBytes={20 * 1024 * 1024}
-          maxQuotes={10}
-          onStart={vi.fn()}
+          onOpenCreate={vi.fn()}
           onOpenTask={vi.fn()}
           onOpenTasks={vi.fn()}
           onOpenView={vi.fn()}
@@ -67,7 +63,9 @@ describe("CHALLENGER 1: Visual Layout & Empty / Extreme Data Resilience", () => 
       item_name: `物料规格 ${"A".repeat(50)}`,
       quantity: 999999999999,
       unit: "piece-extra-long-unit-name",
-      specifications: { detail: { label: "规格", value: "超长规格说明".repeat(10), unit: "mm" } },
+      specifications: {
+        detail: { label: "规格", value: "超长规格说明".repeat(10), unit: "mm", type: "text", match: "exact", priority: "hard" },
+      },
       constraints: { max_lead_days: 9999 },
       status: i % 2 === 0 ? "waiting_human" : "approved",
       requirement_confirmed: true,
@@ -87,11 +85,7 @@ describe("CHALLENGER 1: Visual Layout & Empty / Extreme Data Resilience", () => 
           aiTasks={[]}
           reviews={[]}
           loading={false}
-          createBusy={false}
-          maxFileBytes={5 * 1024 * 1024}
-          maxTotalBytes={20 * 1024 * 1024}
-          maxQuotes={10}
-          onStart={vi.fn()}
+          onOpenCreate={vi.fn()}
           onOpenTask={vi.fn()}
           onOpenTasks={vi.fn()}
           onOpenView={vi.fn()}
@@ -294,6 +288,7 @@ describe("CHALLENGER 4: DOM Selector Stability & Semantic Interactive Invariants
         win_rate_score: "60",
         activity_score: "80",
         status_score: "100",
+        base_score: "75",
       },
       notes: "老牌供应商",
       created_at: "2026-08-01T00:00:00Z",
@@ -326,6 +321,7 @@ describe("CHALLENGER 4: DOM Selector Stability & Semantic Interactive Invariants
         win_rate_score: "60",
         activity_score: "80",
         status_score: "100",
+        base_score: "75",
       },
       items: ["热敏标签"],
       recent_quotes: [],

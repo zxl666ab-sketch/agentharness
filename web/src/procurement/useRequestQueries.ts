@@ -1,8 +1,8 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { useAgentStream } from "../useAgentStream";
-import { operationRefetchInterval, procurementApi } from "./api";
+import { operationRefetchInterval, POLL_FETCH_CAP, pollFetchCount, procurementApi } from "./api";
 import type {
   AiTaskDetail,
   ProcurementRequest,
@@ -23,6 +23,7 @@ const TRANSIENT_TASK_STATUSES = new Set<ProcurementRequestSummary["status"]>([
   "draft", "collecting", "analyzing", "approval_pending",
 ]);
 const TERMINAL_OPERATION_STATUSES = new Set(["completed", "failed", "cancelled"]);
+// W-M4：任务订单/合同的兜底轮询受 POLL_FETCH_CAP（api.ts）约束。
 
 function taskRefetchInterval(status: ProcurementRequestSummary["status"] | undefined) {
   return status && TRANSIENT_TASK_STATUSES.has(status) ? 750 : false;
@@ -116,15 +117,29 @@ export function useRequestQueries(state: WorkbenchState) {
     queryFn: () => procurementApi.report(selectedId!),
     enabled: !!selectedId && activeTab === "report" && !!detailQuery.data?.decision,
   });
+  // W-M3：后端支持 task_id 过滤时精确查询；探测到旧后端忽略该参数
+  // （返回项 task_id 与请求不符）则回退“取 100 条前端 find”的旧行为。
+  const ordersTaskFilterSupported = useRef(true);
   const taskOrderQuery = useQuery({
     queryKey: ["procurement-task-order", selectedId],
     queryFn: async () => {
+      const taskId = selectedId!;
+      if (ordersTaskFilterSupported.current) {
+        const filtered = await procurementApi.orders(undefined, 0, 100, taskId);
+        if (!filtered.items.some((item) => item.task_id !== taskId)) {
+          return filtered.items.find((item) => item.task_id === taskId) || null;
+        }
+        ordersTaskFilterSupported.current = false;
+      }
       const page = await procurementApi.orders(undefined, 0, 100);
-      return page.items.find((item) => item.task_id === selectedId) || null;
+      return page.items.find((item) => item.task_id === taskId) || null;
     },
     enabled: !!selectedId && detailQuery.data?.status === "approved",
-    // 任务订单轮询：订单到达 CLOSED 终态（付款后关闭）即停止；尚未生成时继续等待生成。
-    refetchInterval: (query) => query.state.data?.status === "CLOSED" ? false : 10_000,
+    // 任务订单轮询：订单到达 CLOSED 终态（付款后关闭）即停止；尚未生成时继续
+    // 等待生成，但受 POLL_FETCH_CAP 约束（W-M4），一条在途/缺失订单不能无限轮询。
+    refetchInterval: (query) => pollFetchCount(query.state) > POLL_FETCH_CAP
+      ? false
+      : query.state.data?.status === "CLOSED" ? false : 10_000,
   });
   const taskContractQuery = useQuery({
     queryKey: ["procurement-task-contract", selectedId],
@@ -133,8 +148,11 @@ export function useRequestQueries(state: WorkbenchState) {
       return page.items[0] || null;
     },
     enabled: !!selectedId && detailQuery.data?.status === "approved",
-    // 任务合同轮询：合同 CLOSED 为终态即停止；尚未起草（null）时继续等待。
-    refetchInterval: (query) => query.state.data?.status === "CLOSED" ? false : 5_000,
+    // 任务合同轮询：合同 CLOSED 为终态即停止；尚未起草（null）时继续等待，
+    // 同样受 POLL_FETCH_CAP 约束（W-M4）。
+    refetchInterval: (query) => pollFetchCount(query.state) > POLL_FETCH_CAP
+      ? false
+      : query.state.data?.status === "CLOSED" ? false : 5_000,
   });
 
   const requests = useMemo(() => requestsQuery.data || [], [requestsQuery.data]);
@@ -223,29 +241,36 @@ export function useRequestQueries(state: WorkbenchState) {
   }, []);
 
   useEffect(() => {
-    if (stream.status !== "error" || !selectedId) {
+    // W-M2：断线退避计数器只在流真正恢复（live）且收到过事件后清零。
+    // 旧实现任何非 error 状态（包括每次重连尝试的 connecting）都会清零，
+    // 导致长断线永远维持 2s 高频全表轮询、从不退避到 10s。
+    if (stream.status === "live" && latestEvent) {
       disconnectPolls.current = 0;
-      return;
     }
+    if (stream.status !== "error" || !selectedId) return;
     let timer: number | null = null;
+    const schedule = (handler: () => void) => {
+      // 前 15 次每 2s，之后退避到 10s 持续兜底：断线期间数据保持最终一致，
+      // 不再像旧实现那样 30s 后彻底静默放弃（UI 也不会再无声变死）。
+      // 首次延迟同样按计数器取：重连循环令状态在 connecting/error 间反复
+      // 切换、effect 重挂时，也不会把节奏拉回 2s。
+      timer = window.setTimeout(handler, disconnectPolls.current >= 15 ? 10_000 : 2_000);
+    };
     const poll = () => {
       disconnectPolls.current += 1;
       void Promise.all([
         queryClient.invalidateQueries({ queryKey: ["procurement-request", selectedId] }),
         queryClient.invalidateQueries({ queryKey: ["procurement-requests"] }),
       ]);
-      // 前 15 次每 2s，之后退避到 10s 持续兜底：断线期间数据保持最终一致，
-      // 不再像旧实现那样 30s 后彻底静默放弃（UI 也不会再无声变死）。
-      const delay = disconnectPolls.current >= 15 ? 10_000 : 2_000;
-      timer = window.setTimeout(poll, delay);
+      schedule(poll);
     };
-    timer = window.setTimeout(poll, 2_000);
+    schedule(poll);
     return () => {
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [queryClient, selectedId, stream.status]);
+  }, [latestEvent, queryClient, selectedId, stream.status]);
 
-  async function commit(updated: ProcurementRequest) {
+  const commit = useCallback(async (updated: ProcurementRequest) => {
     queryClient.setQueryData(["procurement-request", updated.id], updated);
     await queryClient.invalidateQueries({ queryKey: ["procurement-requests"] });
     await queryClient.invalidateQueries({ queryKey: ["procurement-report", updated.id] });
@@ -256,7 +281,7 @@ export function useRequestQueries(state: WorkbenchState) {
       await queryClient.invalidateQueries({ queryKey: ["run-report", updated.analysis_run_id] });
       await queryClient.invalidateQueries({ queryKey: ["run-checkpoint", updated.analysis_run_id] });
     }
-  }
+  }, [queryClient]);
 
   return {
     queryClient,

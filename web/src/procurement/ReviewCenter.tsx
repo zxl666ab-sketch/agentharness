@@ -178,14 +178,21 @@ export function ReviewCenter({
     setSearch("");
   }, [filtered, reviews, selectedId]);
 
+  // W-M5：待审核详情每 1.5s 轮询刷新，`detail` 的对象身份每轮都变。
+  // 表单只在切换到另一条审核（review_id 变化）时重置，避免覆盖用户正在
+  // 填写的动作/供应商/理由/确认勾选；轮询结果通过渲染路径正常反映状态。
+  const detailId = detail?.review_id;
+  const detailRef = useRef(detail);
+  detailRef.current = detail;
   useEffect(() => {
-    if (!detail) return;
-    const nextAction: ReviewAction = detail.suggested_quote_id ? "APPROVE_SUGGESTION" : "NO_AWARD";
+    const current = detailRef.current;
+    if (!current) return;
+    const nextAction: ReviewAction = current.suggested_quote_id ? "APPROVE_SUGGESTION" : "NO_AWARD";
     setAction(nextAction);
     setFinalQuoteId(
-      detail.comparison.result.quotes.find((item) => item.eligible && item.quote_id !== detail.suggested_quote_id)?.quote_id
-      || detail.suggested_quote_id
-      || detail.comparison.result.quotes.find((item) => item.eligible)?.quote_id
+      current.comparison.result.quotes.find((item) => item.eligible && item.quote_id !== current.suggested_quote_id)?.quote_id
+      || current.suggested_quote_id
+      || current.comparison.result.quotes.find((item) => item.eligible)?.quote_id
       || "",
     );
     setReason("");
@@ -193,7 +200,7 @@ export function ReviewCenter({
     setConfirmOpen(false);
     setActionError(null);
     setNotice(null);
-  }, [detail]);
+  }, [detailId]);
 
   useEscape(confirmOpen && !!detail, () => setConfirmOpen(false), busy);
   // 审批提交是不可回退动作：初始焦点放在「取消」上，Tab 循环限制在弹窗内。

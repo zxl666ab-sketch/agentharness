@@ -505,6 +505,14 @@ class ToolInvocationExecutor:
             requires_confirmation = bool(
                 getattr(tool, "requires_confirmation", False)
             ) or effect == EffectKind.destructive
+            # P-M8: `ToolSpec.requires_approval` is a governance promise, not a
+            # hint — a tool that declares it must never be auto-approved. The
+            # effect-derived `requires_confirmation` alone let an auto run call a
+            # declared-approval tool (e.g. a `pure` tool the author flagged)
+            # straight through.
+            force_approval = requires_confirmation or bool(
+                getattr(spec, "requires_approval", False)
+            )
             # Child runs default readonly — block write effects without grant
             if not request.allow_write and effect in (
                 EffectKind.workspace_write,
@@ -540,9 +548,9 @@ class ToolInvocationExecutor:
 
             decision = (
                 ApprovalDecision.deny
-                if requires_confirmation and request.approval == ApprovalMode.never
+                if force_approval and request.approval == ApprovalMode.never
                 else None
-                if requires_confirmation
+                if force_approval
                 else auto_decision(effect, request.approval)
             )
             # Run-level allow list

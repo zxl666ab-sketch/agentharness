@@ -252,6 +252,16 @@ class Storage:
     def max_global_seq(self) -> int:
         return self.events.max_global_seq()
 
+    def max_event_seq(self) -> int:
+        return self.events.max_event_seq()
+
+    def global_seq_watermark(self) -> int:
+        return self.events.global_seq_watermark()
+
+    def bump_global_seq(self, seq: int) -> int:
+        """Persist the durable event high-water mark (MAX upsert); returns stored value."""
+        return self.events.bump_global_seq(seq)
+
     def explain_query_plan(self, sql: str, params: tuple[Any, ...] = ()) -> list[str]:
         return self.events.explain_query_plan(sql, params)
 
@@ -334,9 +344,6 @@ class Storage:
     def list_tool_attempts(self, invocation_id: str) -> list[dict[str, Any]]:
         return self.tool_invocations.list_tool_attempts(invocation_id)
 
-    def mark_running_invocations_indeterminate(self, run_id: str) -> list[str]:
-        return self.tool_invocations.mark_running_invocations_indeterminate(run_id)
-
     # -- approvals ----------------------------------------------------------
 
     def save_approval(self, approval: dict[str, Any]) -> None:
@@ -356,9 +363,6 @@ class Storage:
             invocation_id=invocation_id,
             arguments_sha256=arguments_sha256,
         )
-
-    def expire_pending_approvals(self, run_id: str) -> int:
-        return self.approvals.expire_pending_approvals(run_id)
 
     def list_approvals(self, run_id: str) -> list[dict[str, Any]]:
         return self.approvals.list_approvals(run_id)

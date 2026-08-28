@@ -101,4 +101,24 @@ class StateMachineTest {
         assertThat(machine.can(State.B, Event.TO_C)).isFalse();
         assertThat(List.of()).isEmpty();
     }
+
+    @Test
+    void duplicateSourceEventRegistrationFailsFast() {
+        // 旧报告 S2：map.put 静默覆盖 → 注册顺序决定语义。现在必须在定义期抛错。
+        assertThatThrownBy(() -> StateMachine.define(State.class, Event.class)
+                .permit(State.A, Event.TO_B, State.B)
+                .permit(State.A, Event.TO_B, State.C))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("重复注册流转");
+    }
+
+    @Test
+    void sameEventFromDifferentSourcesIsAllowed() {
+        var machine = StateMachine.define(State.class, Event.class)
+                .permit(State.A, Event.TO_C, State.C)
+                .permit(State.B, Event.TO_C, State.C)
+                .build();
+        assertThat(machine.transition("o1", State.A, Event.TO_C, Map.of())).isEqualTo(State.C);
+        assertThat(machine.transition("o2", State.B, Event.TO_C, Map.of())).isEqualTo(State.C);
+    }
 }

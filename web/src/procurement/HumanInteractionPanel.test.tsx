@@ -181,7 +181,8 @@ describe("HumanInteractionPanel", () => {
   });
 
   it("requires a second click to cancel a waiting task", async () => {
-    const fetchMock = vi.fn(async () => jsonResponse(interaction({ status: "CANCELLED" })));
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse(interaction({ status: "CANCELLED" })));
     vi.stubGlobal("fetch", fetchMock);
     const mounted = mount(<HumanInteractionPanel interaction={interaction()} />);
     roots.push(mounted.root);
@@ -237,6 +238,7 @@ describe("structured interaction conversation boundary", () => {
       specifications: {},
       constraints: {},
       status: "waiting_human",
+      requirement_confirmed: true,
       session_id: "session-1",
       analysis_run_id: "run-1",
       attachments: [],

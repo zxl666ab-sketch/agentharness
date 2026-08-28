@@ -56,6 +56,7 @@ class Harness:
         lease_heartbeat_s: float = 10.0,
         on_gateway_event: GatewayEventCallback | None = None,
         gateway_config: dict[str, dict[str, Any]] | None = None,
+        workspace_roots: list[str | Path] | None = None,
     ) -> None:
         """``gateway_config`` 提供按 provider 的网关参数覆盖（限流/熔断/降级演示用）。"""
         self.data_dir = Path(data_dir or Path.home() / ".agentharness").expanduser()
@@ -99,8 +100,20 @@ class Harness:
             lease_owner_id=lease_owner_id,
             lease_ttl_s=lease_ttl_s,
             lease_heartbeat_s=lease_heartbeat_s,
+            workspace_roots=workspace_roots,
         )
         self._closed = False
+
+    @property
+    def workspace_roots(self) -> list[Path]:
+        """Authorized workspace roots; empty means Runs are not cwd-bound."""
+        return self.engine.workspace_roots
+
+    @workspace_roots.setter
+    def workspace_roots(self, roots: list[str | Path] | None) -> None:
+        self.engine.workspace_roots = [
+            Path(root).expanduser().resolve() for root in (roots or [])
+        ]
 
     def set_approval_callback(self, callback: ApprovalCallback | None) -> None:
         self.engine.approval_callback = callback

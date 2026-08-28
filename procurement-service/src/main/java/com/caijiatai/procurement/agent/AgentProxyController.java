@@ -73,8 +73,7 @@ public final class AgentProxyController {
         config.put("reasoning_effort", env.getOrDefault(
                 "AGENTHARNESS_PROCUREMENT_REASONING_EFFORT", "none"));
         config.put("api_key_configured", provider.equals("openai") && !apiKey.isBlank());
-        config.put("api_key_preview", apiKey.isBlank() ? null
-                : apiKey.substring(0, Math.min(4, apiKey.length())) + "…");
+        // J-M6: no key material (not even a 4-char prefix) in GET responses.
         config.put("input_price_per_million_usd", null);
         config.put("output_price_per_million_usd", null);
         config.put("cached_input_price_per_million_usd", null);
@@ -95,18 +94,7 @@ public final class AgentProxyController {
                 .body(frozenEvaluation);
     }
 
-    @GetMapping("/api/procurement/evaluation-ext")
-    ResponseEntity<byte[]> procurementEvaluationExt() {
-        // K5 扩展评测：独立文件，冻结资源一个字节不动
-        try (var input = new ClassPathResource("frozen/frozen-evaluation-ext.json").getInputStream()) {
-            return ResponseEntity.ok()
-                    .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
-                    .body(input.readAllBytes());
-        } catch (IOException error) {
-            throw new ApiException(HttpStatus.NOT_FOUND, "evaluation_ext_missing",
-                    "扩展评测资源不存在");
-        }
-    }
+
 
     @GetMapping("/api/runs")
     ResponseEntity<byte[]> runs() {

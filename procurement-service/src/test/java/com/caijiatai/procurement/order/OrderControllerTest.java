@@ -21,12 +21,28 @@ class OrderControllerTest {
         var properties = mock(AppProperties.class);
         when(properties.localOperator()).thenReturn("采购员");
         var expected = Map.<String, Object>of("items", java.util.List.of(), "total", 0);
-        when(orders.list(null, 0, 20)).thenReturn(expected);
+        when(orders.list(null, null, 0, 20)).thenReturn(expected);
         var controller = new OrderController(orders, settlements, cache, properties);
 
-        assertThat(controller.listOrders(null, 0, 20)).isSameAs(expected);
+        assertThat(controller.listOrders(null, null, 0, 20)).isSameAs(expected);
 
-        verify(orders).list(null, 0, 20);
+        verify(orders).list(null, null, 0, 20);
         verifyNoMoreInteractions(orders);
+    }
+
+    @Test
+    void listOrdersForwardsTaskIdFilter() {
+        var orders = mock(OrderService.class);
+        var properties = mock(AppProperties.class);
+        when(properties.localOperator()).thenReturn("采购员");
+        var expected = Map.<String, Object>of("items", java.util.List.of(), "total", 0);
+        var taskId = "a".repeat(32);
+        when(orders.list(null, taskId, 0, 20)).thenReturn(expected);
+        var controller = new OrderController(orders, mock(SettlementService.class),
+                mock(InsightsCache.class), properties);
+
+        assertThat(controller.listOrders(null, taskId, 0, 20)).isSameAs(expected);
+
+        verify(orders).list(null, taskId, 0, 20);
     }
 }

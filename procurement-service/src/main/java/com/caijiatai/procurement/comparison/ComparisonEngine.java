@@ -180,8 +180,16 @@ public final class ComparisonEngine {
             }
         }
         var deadline = text(constraints.get("required_delivery_date"));
-        if (!deadline.isBlank() && asOf.plusDays(leadDays).isAfter(LocalDate.parse(deadline))) {
-            exclude(exclusions, "required_delivery_date", "预计到货日期晚于要求日期 " + deadline);
+        if (!deadline.isBlank()) {
+            // 与上方有效期复核同款保护（旧报告 M2）：需求侧日期不可解析时按"无截止日"
+            // 处理并出警示，绝不让整条比价链路因外部输入格式失败。
+            try {
+                if (asOf.plusDays(leadDays).isAfter(LocalDate.parse(deadline))) {
+                    exclude(exclusions, "required_delivery_date", "预计到货日期晚于要求日期 " + deadline);
+                }
+            } catch (RuntimeException error) {
+                warnings.add("要求交付日期格式无法复核");
+            }
         }
         return new QuoteResult(
                 quote.getId(),

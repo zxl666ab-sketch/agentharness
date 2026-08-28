@@ -108,6 +108,33 @@ def test_main_disables_execution_for_remote_bind_without_opt_in(
     assert "Web execution disabled" in capsys.readouterr().out
 
 
+def test_main_allows_execution_on_remote_bind_only_with_the_explicit_flag(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """P-M7: `--allow-remote-execution` must be what turns execution on."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    calls = _capture_launcher(monkeypatch)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "agentharness",
+            "--host",
+            "0.0.0.0",
+            "--workspace",
+            str(workspace),
+            "--no-open",
+            "--allow-remote-execution",
+        ],
+    )
+
+    web_main.main()
+
+    assert calls["app_kwargs"]["execution_enabled"] is True
+    assert calls["app_kwargs"]["workspace_roots"] == [workspace.resolve()]
+
+
 def test_main_opens_a_loopback_browser_once(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

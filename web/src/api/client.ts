@@ -107,6 +107,9 @@ export type HealthResponse = {
   web_build_id?: string | null;
   data_dir: string;
   max_global_seq: number;
+  /** LIVE-1：Java 健康聚合面上的 Agent 可用性（心跳新鲜度判定）。 */
+  agent_available?: boolean;
+  agent_status?: { source?: string; status?: "up" | "down" | string } | null;
 };
 
 export type VerificationAttempt = {
@@ -189,7 +192,13 @@ export type RunReport = {
 };
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, init);
+  let response: Response;
+  try {
+    response = await fetch(path, init);
+  } catch {
+    // L1：与 procurement/api.ts 同口径的中文网络错误提示，替换裸 "Failed to fetch"。
+    throw new Error("网络连接失败，请确认采购服务已启动");
+  }
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
     try {
@@ -207,6 +216,8 @@ export const api = {
   health: () => requestJson<HealthResponse>("/api/health"),
   run: (runId: string) => requestJson<RunRow>(`/api/runs/${runId}`),
   report: (runId: string) => requestJson<RunReport>(`/api/runs/${runId}/report`),
+  checkpoint: (runId: string) =>
+    requestJson<Record<string, unknown> | null>(`/api/runs/${runId}/checkpoint`),
   messages: (runId: string) =>
     requestJson<MessageRow[]>(`/api/runs/${runId}/messages`),
   toolInvocations: (runId: string) =>

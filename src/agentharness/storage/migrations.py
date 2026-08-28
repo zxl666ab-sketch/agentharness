@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -389,6 +389,18 @@ MIGRATIONS: dict[int, str] = {
     ALTER TABLE internal_operations ADD COLUMN run_id TEXT;
     CREATE INDEX IF NOT EXISTS idx_internal_operations_run
         ON internal_operations(run_id);
+    """,
+    13: """
+    -- LIVE-1：持久化「已发布事件」的全局序号高水位。
+    -- 心跳/网关事件只发 Kafka，从不写 events 表；Kafka retention（7 天）修剪掉
+    -- 高位消息后，仅靠 events 表播种会让 seq 相对 Java 投影回退，健康判定与
+    -- 全局去重（existsByGlobalSeq）随之失效。单行计数器让心跳也进入本地持久化。
+    CREATE TABLE IF NOT EXISTS global_seq_counter (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        seq INTEGER NOT NULL
+    );
+    INSERT OR IGNORE INTO global_seq_counter(id, seq)
+    SELECT 1, COALESCE(MAX(global_seq), 0) FROM events;
     """,
 }
 

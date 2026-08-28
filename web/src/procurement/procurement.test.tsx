@@ -71,6 +71,7 @@ const request: ProcurementRequest = {
   specifications: { width_mm: "250", length_mm: "350", thickness_um: "60" },
   constraints: { max_lead_days: 15 },
   status: "review",
+  requirement_confirmed: false,
   session_id: "session",
   attachments: [],
   quote_count: 2,
@@ -915,6 +916,7 @@ describe("workbench home entries", () => {
     const host = document.createElement("div");
     document.body.append(host);
     const onOpenTasks = vi.fn();
+    const onOpenCreate = vi.fn();
     const onOpenView = vi.fn();
     const onOpenOrders = vi.fn();
     const root = createRoot(host);
@@ -927,11 +929,7 @@ describe("workbench home entries", () => {
             aiTasks={[]}
             reviews={[]}
             loading={false}
-            createBusy={false}
-            maxFileBytes={5 * 1024 * 1024}
-            maxTotalBytes={20 * 1024 * 1024}
-            maxQuotes={10}
-            onStart={vi.fn(async () => undefined)}
+            onOpenCreate={onOpenCreate}
             onOpenTask={vi.fn()}
             onOpenTasks={onOpenTasks}
             onOpenView={onOpenView}
@@ -944,6 +942,8 @@ describe("workbench home entries", () => {
       const button = [...host.querySelectorAll("button")].find((item) => item.textContent?.includes(text))!;
       button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     };
+    await act(async () => { clickText("新建采购任务"); });
+    expect(onOpenCreate).toHaveBeenCalledTimes(1);
     await act(async () => { clickText("待人工处理"); });
     expect(onOpenTasks).toHaveBeenCalledWith("attention");
     expect(host.textContent).not.toContain("待收货订单");
@@ -979,11 +979,6 @@ describe("workbench home entries", () => {
             aiTasks={[]}
             reviews={[]}
             loading={false}
-            createBusy={false}
-            maxFileBytes={5 * 1024 * 1024}
-            maxTotalBytes={20 * 1024 * 1024}
-            maxQuotes={10}
-            onStart={vi.fn(async () => undefined)}
             onOpenTask={vi.fn()}
             onOpenTasks={vi.fn()}
             onOpenView={vi.fn()}
@@ -1005,7 +1000,7 @@ describe("comparison approval gate", () => {
     const onApprove = vi.fn(async () => undefined);
     const root = createRoot(host);
     await act(async () => {
-      root.render(<ComparisonView request={analyzed()} busy={null} onApprove={onApprove} />);
+      root.render(<ComparisonView request={analyzed()} busy={null} onAnalyze={async () => undefined} onApprove={onApprove} />);
     });
     const submit = [...host.querySelectorAll("button")].find((item) => item.textContent?.includes("提交供应商审批"))!;
     await act(async () => { submit.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
@@ -1211,3 +1206,117 @@ describe("comparison approval gate", () => {
     await act(async () => root.unmount());
     host.remove();
   });
+
+describe("requirement review keeps user input (W-H1/W-M7)", () => {
+  function setInputValue(input: HTMLInputElement, value: string) {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+    setter.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  it("survives identity-changing 750ms refetches and only resets on task switch", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const review = (req: ProcurementRequest) => act(() => {
+      root.render(<RequirementReview request={req} busy={false} onSave={async () => undefined} />);
+    });
+    await review(request);
+    const titleInput = () => host.querySelector("input") as HTMLInputElement;
+    act(() => setInputValue(titleInput(), "正在人工编辑"));
+    expect(titleInput().value).toBe("正在人工编辑");
+
+    // 轮询返回全新对象（服务端字段也变了），但仍是同一条采购需求：
+    // 不得重置用户输入。
+    await review({ ...request, title: "服务端改名", updated_at: "2026-07-28T00:00:00Z" });
+    expect(titleInput().value).toBe("正在人工编辑");
+
+    // 切换到另一条需求：必须整体重置为新的服务端值。
+    await review({ ...request, id: "task-b", title: "另一个任务" });
+    expect(titleInput().value).toBe("另一个任务");
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
+  it("keeps a stable DOM row when the editable spec key changes (W-M7)", async () => {
+    const dynamicRequest: ProcurementRequest = {
+      ...request,
+      schema_version: 2,
+      category: "general",
+      specifications: {
+        length: { label: "长度", type: "number", value: "100", unit: "m", match: "exact", priority: "hard" },
+      },
+    };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(<RequirementReview request={dynamicRequest} busy={false} onSave={async () => undefined} />);
+    });
+    const row = () => host.querySelector(".proc-dynamic-spec-row")!;
+    const before = row();
+    const keyInput = [...host.querySelectorAll<HTMLInputElement>(".proc-dynamic-spec-row input")]
+      .find((item) => item.value === "length")!;
+    act(() => setInputValue(keyInput, "length_mm"));
+    expect(host.querySelector(".proc-dynamic-spec-row")).toBe(before);
+    expect(keyInput.value).toBe("length_mm");
+    await act(async () => root.unmount());
+    host.remove();
+  });
+});
+
+describe("agent availability surfacing (LIVE-1)", () => {
+  it("renders the dismissible agent-offline notice on the cockpit", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })}>
+          <WorkbenchHome
+            role="admin"
+            requests={[]}
+            aiTasks={[]}
+            reviews={[]}
+            loading={false}
+            agentDown
+            onOpenTask={() => undefined}
+            onOpenTasks={() => undefined}
+            onOpenView={() => undefined}
+            onOpenOrders={() => undefined}
+          />
+        </QueryClientProvider>,
+      );
+    });
+    const notice = host.querySelector('[role="alert"][aria-label="Agent 服务离线提示"]');
+    expect(notice?.textContent).toContain("Agent 服务离线");
+    const close = notice!.querySelector("button")!;
+    await act(async () => { close.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(host.querySelector('[aria-label="Agent 服务离线提示"]')).toBeNull();
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
+  it("downgrades the rail badge and flags agent downtime inside task detail", () => {
+    const detail: ProcurementRequest = { ...request, requirement_confirmed: true };
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(["procurement-meta"], meta);
+    client.setQueryData(["procurement-requests"], [detail]);
+    client.setQueryData(["procurement-ai-tasks"], { items: [], page: 0, size: 100, total: 0 });
+    client.setQueryData(["procurement-reviews"], { items: [], page: 0, size: 100, total: 0 });
+    client.setQueryData(["procurement-request", detail.id], detail);
+    client.setQueryData(["procurement-interactions", detail.id], []);
+    client.setQueryData(["procurement-ai-tasks", detail.id], { items: [], page: 0, size: 100, total: 0 });
+    window.history.replaceState({}, "", `/?view=tasks&task=${detail.id}`);
+
+    const html = renderToString(
+      <QueryClientProvider client={client}>
+        <ProcurementWorkbench theme="light" backendVersion="0.5.0" agentDown onToggleTheme={() => undefined} />
+      </QueryClientProvider>,
+    );
+    // 徽章不再仅凭 Java status=ok 宣称"服务在线"
+    expect(html).toContain("服务在线 · Agent 离线");
+    expect(html).toContain("Agent 服务离线");
+    window.history.replaceState({}, "", "/");
+  });
+});

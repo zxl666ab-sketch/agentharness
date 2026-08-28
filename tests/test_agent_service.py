@@ -153,6 +153,44 @@ def test_harness_events_are_projected_to_kafka(service) -> None:  # type: ignore
     assert message["global_seq"] == 11
 
 
+def test_heartbeat_seq_is_durable_across_restart(tmp_path, monkeypatch) -> None:
+    """LIVE-1: heartbeats only went to Kafka, so a trimmed topic regressed the seed.
+
+    ``retention.ms`` deletes the high-seq messages after 7 days; the restart seed
+    then fell back below the Java projection's high-water mark, which made
+    ``/api/health`` permanently ``agent_status: down`` and started silently
+    dropping real task events on the global-seq dedupe.
+    """
+    # No broker in unit tests: `_topic_max_global_seq` falls back to local
+    # storage, i.e. exactly the "topic was trimmed to nothing" case.
+    monkeypatch.setattr(svc, "KafkaConsumer", None)
+    config = {**CONFIG, "AGENTHARNESS_DATA_DIR": str(tmp_path)}
+
+    first = svc.AgentService(dict(config))
+    try:
+        first.producer = MagicMock()
+        first._global_seq = 86_565  # the pre-trim era of the incident
+        for _ in range(3):
+            first._emit("heartbeat.ping", "", "", {"agent": "python-agent"})
+        emitted = int(first.producer.send.call_args.kwargs["value"]["global_seq"])
+        assert emitted == 86_568
+        assert first.harness.storage.max_global_seq() == emitted
+    finally:
+        first.close()
+
+    second = svc.AgentService(dict(config))
+    try:
+        second.producer = MagicMock()
+        second._global_seq = second._topic_max_global_seq()
+        assert second._global_seq == emitted, "restart seed lost the heartbeat seq"
+        second._emit("heartbeat.ping", "", "", {"agent": "python-agent"})
+        restarted = int(second.producer.send.call_args.kwargs["value"]["global_seq"])
+        assert restarted > emitted
+        assert second.harness.storage.max_global_seq() == restarted
+    finally:
+        second.close()
+
+
 def test_rpc_client_retries_once() -> None:
     client = svc.RpcClient(dict(CONFIG), CONFIG["AGENT_INTERNAL_HMAC_KEY"])
     client.producer = MagicMock()

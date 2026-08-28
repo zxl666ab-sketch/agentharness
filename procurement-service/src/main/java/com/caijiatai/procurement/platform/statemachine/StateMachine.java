@@ -70,7 +70,15 @@ public final class StateMachine<S extends Enum<S>, E extends Enum<E>> {
         }
 
         public Builder<S, E> permit(S from, E event, S to, StateTransitionHook<S, E> action) {
-            table.get(from).put(event, new Transition<>(to, action));
+            // 注册式流转表禁止同一 (source,event) 重复注册：旧实现 map.put 静默覆盖，
+            // 注册顺序决定语义，是审查报告 2026-08-28 S2 的根因（合同状态机重复 REJECT）。
+            var byEvent = table.get(from);
+            if (byEvent == null) {
+                throw new IllegalStateException("未注册的状态：" + from);
+            }
+            if (byEvent.putIfAbsent(event, new Transition<>(to, action)) != null) {
+                throw new IllegalStateException("重复注册流转：" + from + " --" + event + "--> " + to);
+            }
             return this;
         }
 

@@ -23,8 +23,11 @@ public class ContractStateMachineConfig {
                 .permit(ContractStatus.EFFECTIVE, ContractEvent.REQUEST_CHANGE, ContractStatus.CHANGE_REQUEST)
                 .permit(ContractStatus.EXECUTING, ContractEvent.REQUEST_CHANGE, ContractStatus.CHANGE_REQUEST)
                 .permit(ContractStatus.CHANGE_REQUEST, ContractEvent.APPROVE, ContractStatus.EFFECTIVE)
+                // 变更驳回的注册目标仅是 can()/transition() 门禁的名义值：Contract.reject()
+                // 按 change_history 快照恢复变更前状态（快照缺失兜底 EFFECTIVE）。旧实现把
+                // (CHANGE_REQUEST, REJECT)→EXECUTING 再注册一次，靠 map 覆盖顺序"生效"，
+                // 现引擎禁止重复注册（审查报告 2026-08-28 S2），此处只保留一条。
                 .permit(ContractStatus.CHANGE_REQUEST, ContractEvent.REJECT, ContractStatus.EFFECTIVE)
-                .permit(ContractStatus.CHANGE_REQUEST, ContractEvent.REJECT, ContractStatus.EXECUTING)
                 .build();
     }
 }

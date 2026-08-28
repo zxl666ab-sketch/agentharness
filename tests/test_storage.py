@@ -50,6 +50,51 @@ def test_sqlite_wal_and_events(data_dir):
     store.close()
 
 
+def test_global_seq_counter_survives_event_gc(data_dir):
+    """LIVE-1: the durable watermark must outlive the rows it was derived from."""
+    store = Storage(data_dir)
+    try:
+        sid = store.create_session()
+        rid = "seq-run"
+        store.create_run(run_id=rid, session_id=sid, root_run_id=rid, status=RunStatus.completed)
+        assigned = store.append_events(
+            [
+                EventEnvelope(
+                    session_id=sid,
+                    root_run_id=rid,
+                    run_id=rid,
+                    type=EventType.run_started,
+                    payload={"n": index},
+                )
+                for index in range(3)
+            ]
+        )
+        last_seq = int(assigned[-1].global_seq)
+        # Appending an event raises the watermark by itself …
+        assert store.max_global_seq() == last_seq
+        # … heartbeats (which never touch the events table) raise it further …
+        assert store.bump_global_seq(last_seq + 500) == last_seq + 500
+        assert store.max_event_seq() == last_seq
+        assert store.max_global_seq() == last_seq + 500
+        # … and an MAX upsert never walks it backwards.
+        assert store.bump_global_seq(1) == last_seq + 500
+        assert store.max_global_seq() == last_seq + 500
+    finally:
+        store.close()
+
+    # A fresh store over the same file sees the watermark: this is the restart
+    # seed that used to regress once Kafka trimmed the topic.
+    reopened = Storage(data_dir)
+    try:
+        assert reopened.max_global_seq() == last_seq + 500
+        # GC of every event row cannot pull the seed backwards either.
+        reopened.apply_gc(older_than_days=0)
+        assert reopened.max_event_seq() == 0
+        assert reopened.max_global_seq() == last_seq + 500
+    finally:
+        reopened.close()
+
+
 def test_get_events_query_plans_use_indexes_no_full_scan(data_dir):
     """Goal 1: both get_events paths must be index-driven, never a full table scan."""
     store = Storage(data_dir)

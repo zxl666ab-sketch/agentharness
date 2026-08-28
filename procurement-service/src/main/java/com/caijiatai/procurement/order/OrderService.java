@@ -157,12 +157,21 @@ public class OrderService {
 
     // ---------- 查询 ----------
 
+    /** task_id 过滤（跨层契约：Web /orders 按任务精确查询，响应形状与分页一致）。 */
     @Transactional(readOnly = true)
-    public Map<String, Object> list(String status, int page, int size) {
+    public Map<String, Object> list(String status, String taskId, int page, int size) {
         var pageable = PageRequest.of(Math.max(0, page), Math.min(100, Math.max(1, size)));
-        var query = status == null || status.isBlank()
-                ? orders.findAllByOrderByCreatedAtDesc(pageable)
-                : orders.findByStatusOrderByCreatedAtDesc(status.strip().toUpperCase(java.util.Locale.ROOT), pageable);
+        var normalizedStatus = status == null || status.isBlank()
+                ? null : status.strip().toUpperCase(java.util.Locale.ROOT);
+        var normalizedTaskId = taskId == null || taskId.isBlank() ? null : taskId.strip();
+        var query = normalizedTaskId == null
+                ? (normalizedStatus == null
+                        ? orders.findAllByOrderByCreatedAtDesc(pageable)
+                        : orders.findByStatusOrderByCreatedAtDesc(normalizedStatus, pageable))
+                : (normalizedStatus == null
+                        ? orders.findAllByTaskIdOrderByCreatedAtDesc(normalizedTaskId, pageable)
+                        : orders.findByTaskIdAndStatusOrderByCreatedAtDesc(
+                                normalizedTaskId, normalizedStatus, pageable));
         var items = query.getContent().stream().map(this::view).toList();
         var value = new LinkedHashMap<String, Object>();
         value.put("items", items);

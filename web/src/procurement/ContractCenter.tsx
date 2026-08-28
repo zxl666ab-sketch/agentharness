@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
-import { procurementApi } from "./api";
+import { POLL_FETCH_CAP, pollFetchCount, procurementApi } from "./api";
 import type { ContractStatus, ContractView } from "./types";
 import { useEscape } from "./useEscape";
 import { CONTRACT_STATUS_LABELS } from "./viewModel";
@@ -74,9 +74,11 @@ export function ContractCenter() {
   const contractsQuery = useQuery({
     queryKey: ["procurement-contracts", status],
     queryFn: () => procurementApi.contracts(status || undefined, undefined, 0, 100),
-    // 全部终态（CLOSED）后停止轮询；在途合同才持续刷新
+    // 全部终态（CLOSED）后停止轮询；在途合同才持续刷新。
+    // W-M4：一条长期滞留的在途合同不能把轮询变成永续（fetchCount 封顶）。
     refetchInterval: (query) =>
-      query.state.data?.items?.some((item) => item.status !== "CLOSED") ? 5_000 : false,
+      pollFetchCount(query.state) > POLL_FETCH_CAP ? false
+        : query.state.data?.items?.some((item) => item.status !== "CLOSED") ? 5_000 : false,
   });
   const tasksQuery = useQuery({
     queryKey: ["procurement-contracts-tasks"],
@@ -88,9 +90,13 @@ export function ContractCenter() {
     queryKey: ["procurement-contract", selectedId],
     queryFn: () => procurementApi.contract(selectedId!),
     enabled: !!selectedId,
-    // 仅在途态（AI 草拟中/变更审批）持续刷新；终态不轮询
-    refetchInterval: () =>
-      selected?.status === "DRAFT" || selected?.status === "CHANGE_REQUEST" ? 5_000 : false,
+    // 仅在途态（AI 草拟中/变更审批）持续刷新；终态不轮询。
+    // W-M4：读取 query.state（回调参数）而非渲染闭包里的 `selected`，并封顶 fetchCount。
+    refetchInterval: (query) => {
+      if (pollFetchCount(query.state) > POLL_FETCH_CAP) return false;
+      const state = query.state.data?.status ?? selected?.status;
+      return state === "DRAFT" || state === "CHANGE_REQUEST" ? 5_000 : false;
+    },
   });
   const detail = detailQuery.data ?? selected ?? null;
 

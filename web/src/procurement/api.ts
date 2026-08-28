@@ -140,6 +140,21 @@ export function newIdempotencyKey() {
 
 const idempotencyKey = newIdempotencyKey;
 
+/**
+ * W-M4：兜底轮询的硬性 fetchCount 上限（各查询共用）。单条非终态记录
+ * （在途合同/发票、未生成的订单）不得让轮询永续；超限后停止，靠用户
+ * 操作或 invalidate 重新激活。
+ */
+export const POLL_FETCH_CAP = 120;
+
+/**
+ * 已完成 fetch 次数（react-query v5 的 QueryState 不暴露 fetchCount，
+ * 每次 fetch 必定落在 dataUpdateCount 或 errorUpdateCount 之一）。
+ */
+export function pollFetchCount(state: { dataUpdateCount: number; errorUpdateCount: number }): number {
+  return state.dataUpdateCount + state.errorUpdateCount;
+}
+
 export function operationRefetchInterval(operation?: ProcurementOperation): number | false {
   switch (operation?.status) {
     case "pending":
@@ -441,9 +456,11 @@ export const procurementApi = {
     }),
   supplierProfile: (id: string) =>
     requestJson<SupplierProfile>(`/api/procurement/suppliers/${id}/profile`),
-  orders: (status?: OrderStatus, page = 0, size = 50) => {
+  orders: (status?: OrderStatus, page = 0, size = 50, taskId?: string) => {
     const query = new URLSearchParams({ page: String(page), size: String(size) });
     if (status) query.set("status", status);
+    // W-M3：新后端支持 task_id 精确过滤；旧后端会忽略该参数，调用方需自行校验。
+    if (taskId) query.set("task_id", taskId);
     return requestJson<OrderPage>(`/api/procurement/orders?${query}`);
   },
   order: (id: string) => requestJson<OrderView>(`/api/procurement/orders/${id}`),

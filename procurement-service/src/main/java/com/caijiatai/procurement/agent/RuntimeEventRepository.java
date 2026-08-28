@@ -1,5 +1,6 @@
 package com.caijiatai.procurement.agent;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.data.domain.Pageable;
@@ -19,11 +20,18 @@ public interface RuntimeEventRepository extends JpaRepository<RuntimeEvent, Long
 
     long countByRunIdAndType(String runId, String type);
 
-    RuntimeEvent findFirstByTypeOrderByGlobalSeqDesc(String type);
+    // Freshness lookups must order by occurredAt: the agent-side global_seq counter can
+    // regress after Kafka retention prunes the topic (LIVE-1), so "highest seq" is not
+    // necessarily the "newest" event.
+    Optional<RuntimeEvent> findFirstByTypeOrderByOccurredAtDesc(String type);
 
-    List<RuntimeEvent> findTop10ByTypeStartingWithOrderByGlobalSeqDesc(String typePrefix);
+    List<RuntimeEvent> findTop10ByTypeStartingWithOrderByOccurredAtDesc(String typePrefix);
 
-    boolean existsByGlobalSeq(long globalSeq);
+    /** Bounded recent window for /api/runs discovery (see RuntimeQueryService.runs()). */
+    List<RuntimeEvent> findTop20000ByOrderByGlobalSeqDesc();
+
+    /** Dedup key includes occurredAt so a regressed global_seq cannot silently drop a new event. */
+    boolean existsByGlobalSeqAndOccurredAt(long globalSeq, Instant occurredAt);
 
     @Modifying
     @Query("update RuntimeEvent event set event.payload = :payload where event.globalSeq = :globalSeq")

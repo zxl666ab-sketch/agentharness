@@ -200,31 +200,3 @@ class ToolInvocationRepo:
             (invocation_id,),
         ).fetchall()
         return [dict(row) for row in rows]
-
-    def mark_running_invocations_indeterminate(self, run_id: str) -> list[str]:
-        now = _utcnow()
-        with self._lock:
-            rows = self._conn.execute(
-                """SELECT id FROM tool_invocations
-                   WHERE run_id = ? AND status = ? AND replay_policy = ?""",
-                (run_id, ToolInvocationStatus.running.value, "never"),
-            ).fetchall()
-            ids = [str(row[0]) for row in rows]
-            if ids:
-                self._conn.executemany(
-                    """UPDATE tool_invocations
-                       SET status = ?, error_code = ?, error_category = ?,
-                           updated_at = ?, finished_at = ? WHERE id = ?""",
-                    [
-                        (
-                            ToolInvocationStatus.indeterminate.value,
-                            "outcome_indeterminate",
-                            "recovery",
-                            now,
-                            now,
-                            invocation_id,
-                        )
-                        for invocation_id in ids
-                    ],
-                )
-        return ids

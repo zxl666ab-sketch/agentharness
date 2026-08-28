@@ -23,7 +23,8 @@ const HUMAN_INTERACTION_STATUSES: HumanInteractionStatus[] = [
 
 describe("procurement workbench contract", () => {
   it("keeps Web status values aligned with the shared contract", () => {
-    const definitions = schema.$defs as Record<string, ContractDefinition>;
+    // JSON 模块的字面量类型与松散遍历的契约结构本就不重叠：显式两段转换。
+    const definitions = schema.$defs as unknown as Record<string, ContractDefinition>;
     expect([...PROCUREMENT_STATUSES]).toEqual(definitions.ProcurementStatus.enum);
     expect([...AI_TASK_STATUSES]).toEqual(definitions.AiTaskStatus.enum);
     expect([...AI_TASK_TYPES]).toEqual(definitions.AiTaskType.enum);
@@ -44,7 +45,7 @@ describe("procurement workbench contract", () => {
   });
 
   it("keeps missing draft quantity and unit as explicit unknown facts", () => {
-    const definitions = schema.$defs as Record<string, { properties?: Record<string, { type?: string[] }> }>;
+    const definitions = schema.$defs as unknown as Record<string, { properties?: Record<string, { type?: string[] }> }>;
     expect(definitions.ProcurementRequirementView.properties?.quantity.type).toContain("null");
     expect(definitions.ProcurementRequirementView.properties?.unit.type).toContain("null");
   });

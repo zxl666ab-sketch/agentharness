@@ -6,6 +6,8 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -133,6 +135,37 @@ class TestSemanticCacheCore:
         assert cache.get_quote_parse("sha-a", "v3") is None
         assert cache.stats()["misses"] == 1
         assert cache.stats()["errors"] == 0
+
+    def test_stats_are_exact_under_concurrent_access(self) -> None:
+        """M3（旧报告）：`_stats` 计数器无锁 → 并发丢计数、快照读到半更新。"""
+        clock = _FakeClock()
+        cache = _cache(clock)
+        threads = 8
+        per_thread = 50
+
+        def worker(index: int) -> None:
+            for round_index in range(per_thread):
+                sha = f"sha-{index}-{round_index}"
+                cache.put_quote_parse(sha, "v3", {"fields": {}})
+                cache.get_quote_parse(sha, "v3")
+                cache.get_quote_parse(f"missing-{index}-{round_index}", "v3")
+
+        pool = [threading.Thread(target=worker, args=(index,)) for index in range(threads)]
+        previous_slice = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)  # 强制细粒度切换：无锁计数必定丢更新
+        try:
+            for item in pool:
+                item.start()
+            for item in pool:
+                item.join()
+        finally:
+            sys.setswitchinterval(previous_slice)
+
+        stats = cache.stats()
+        assert stats["puts"] == threads * per_thread
+        assert stats["hits"] == threads * per_thread
+        assert stats["misses"] == threads * per_thread
+        assert stats["errors"] == 0
 
     def test_broken_store_falls_back_to_miss(self) -> None:
         class _Broken:

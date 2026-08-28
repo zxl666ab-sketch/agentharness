@@ -104,11 +104,12 @@ describe("useAgentStream", () => {
   });
 
   afterEach(() => {
-    if (root && host) {
-      act(() => root.unmount());
-    }
+    const currentRoot = root;
+    const currentHost = host;
     root = null;
     host = null;
+    if (currentRoot) act(() => currentRoot.unmount());
+    if (currentHost) currentHost.remove();
     FakeEventSource.instances = [];
     vi.unstubAllGlobals();
     vi.useRealTimers();

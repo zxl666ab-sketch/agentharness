@@ -1,5 +1,5 @@
 import { Check, ChevronDown, ChevronRight, ClipboardEdit, LoaderCircle, Plus, ShieldCheck, X } from "lucide-react";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 
 import type { CreateProcurementRequest, ProcurementRequest, RequirementSpecification } from "./types";
 
@@ -34,6 +34,8 @@ type FormState = {
 };
 
 type DynamicSpecForm = {
+  /** 稳定行标识：仅用于 React key，不随可编辑字段变化（W-M7）。 */
+  uid: string;
   key: string;
   label: string;
   type: "number" | "text" | "boolean";
@@ -45,6 +47,17 @@ type DynamicSpecForm = {
   min: string;
   max: string;
 };
+
+let specRowSeq = 0;
+
+/** 每行规格的稳定 uid：编辑 key/label 等字段时不会导致行重挂载丢焦点。 */
+function nextSpecUid() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  specRowSeq += 1;
+  return `spec-row-${Date.now().toString(36)}-${specRowSeq.toString(36)}`;
+}
 
 function asText(value: unknown) {
   return value == null ? "" : String(value);
@@ -112,6 +125,7 @@ function initialDynamicSpecs(request: ProcurementRequest): DynamicSpecForm[] {
       ? raw as { label?: string; type?: DynamicSpecForm["type"]; value?: unknown; unit?: string; match?: DynamicSpecForm["match"]; priority?: DynamicSpecForm["priority"]; tolerance?: unknown; min?: unknown; max?: unknown }
       : { label: key, type: "text" as const, value: String(raw ?? ""), match: "exact" as const, priority: "hard" as const };
     return {
+      uid: nextSpecUid(),
       key,
       label: asText(value.label || key),
       type: value.type || "text",
@@ -184,10 +198,16 @@ export function RequirementReview({ request, busy, error, onSave }: Props) {
   const baseCurrency = asText(constraints.base_currency || "CNY").toUpperCase();
   const terminal = request.status === "approved" || request.status === "no_award";
 
+  // W-H1：详情以 750ms 轮询刷新，`request` 的对象身份每轮都变。表单只在
+  // 切换到另一条采购需求（request.id 变化）时用最新服务端值整体重置；
+  // 服务端后续更新不自动并入用户正在编辑的表单。
+  const requestId = request.id;
+  const requestRef = useRef(request);
+  requestRef.current = request;
   useEffect(() => {
-    setForm(initialState(request));
-    setDynamicSpecs(initialDynamicSpecs(request));
-  }, [request]);
+    setForm(initialState(requestRef.current));
+    setDynamicSpecs(initialDynamicSpecs(requestRef.current));
+  }, [requestId]);
 
   useEffect(() => {
     setCollapsed(request.status === "approved" || request.status === "no_award");
@@ -225,6 +245,7 @@ export function RequirementReview({ request, busy, error, onSave }: Props) {
     setDynamicSpecs((current) => [
       ...current,
       {
+        uid: nextSpecUid(),
         key: `spec_${current.length + 1}`,
         label: "",
         type: "text",
@@ -319,7 +340,7 @@ export function RequirementReview({ request, busy, error, onSave }: Props) {
               <label className="proc-field"><span>采购单位</span><input value={form.itemUnit} onChange={(event) => update("itemUnit", event.target.value)} disabled={terminal || busy} /></label>
               <div className="proc-dynamic-spec-list proc-span-2">
                 {dynamicSpecs.map((row, index) => (
-                  <div className="proc-dynamic-spec-row" key={`${row.key}-${index}`}>
+                  <div className="proc-dynamic-spec-row" key={row.uid}>
                     <div className="proc-dynamic-spec-main">
                       <label className="proc-field"><span>规格名称</span><input value={row.label} placeholder="例如：长度" onChange={(event) => updateDynamicSpec(index, "label", event.target.value)} disabled={terminal || busy} /></label>
                       <label className="proc-field"><span>规格值</span>{row.type === "boolean" ? <span className="proc-dynamic-spec-bool"><input type="checkbox" checked={row.value === true} onChange={(event) => updateDynamicSpec(index, "value", event.target.checked)} disabled={terminal || busy} /><span>{row.value === true ? "是" : "否"}</span></span> : <input value={String(row.value)} onChange={(event) => updateDynamicSpec(index, "value", event.target.value)} disabled={terminal || busy} />}</label>

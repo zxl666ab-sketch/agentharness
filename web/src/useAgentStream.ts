@@ -28,7 +28,6 @@ export const AGENT_EVENT_TYPES = [
   "context_compacted",
   "provider_retry",
   "budget_warning",
-  "error",
 ];
 
 export type StreamStatus = "connecting" | "live" | "error" | "closed";
@@ -65,6 +64,10 @@ export type AgentStream = {
  * 重连契约：onerror 后手动 close，按内部 lastSequence 重建 `?after=` 游标
  * （服务端按 global_seq 单调续传），指数退避直到重新 live；卸载或
  * enabled=false 时停止并清理全部定时器。
+ *
+ * W-M1：AGENT_EVENT_TYPES 不含 "error"——按 SSE 规范，`event: error` 帧同样会
+ * 先触发 EventSource.onerror；把它注册成普通事件只会让服务端的错误帧被伪装成
+ * 断连引发重连风暴。真正的终态失败本就以 run_failed 事件送达。
  */
 export function useAgentStream(enabled: boolean, after: number): AgentStream {
   const [status, setStatus] = useState<StreamStatus>("closed");

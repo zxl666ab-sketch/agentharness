@@ -25,6 +25,7 @@ import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 
 import { AuditView } from "./AuditView";
 import { AiTaskRecovery } from "./AiTaskRecovery";
+import { AgentOfflineNotice } from "./AgentOfflineNotice";
 import { ComparisonView } from "./ComparisonView";
 import { ConfigDrawer } from "./ConfigDrawer";
 import { DeleteDialog } from "./DeleteDialog";
@@ -57,6 +58,8 @@ import { WorkbenchNavigation } from "./WorkbenchNavigation";
 type Props = {
   theme: "light" | "dark";
   backendVersion: string;
+  /** LIVE-1：/api/health 报 Agent 不可用（心跳过期/agent_available=false）。 */
+  agentDown?: boolean;
   onToggleTheme: () => void;
 };
 
@@ -98,7 +101,7 @@ function specificationText(specifications: ProcurementRequest["specifications"])
 }
 
 /** 工作台布局壳 + 视图分发（P1-5 拆分后仅保留组合职责）。 */
-export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: Props) {
+export function ProcurementWorkbench({ theme, backendVersion, agentDown = false, onToggleTheme }: Props) {
   const state = useWorkbenchState();
   const queries = useRequestQueries(state);
   const actions = useWorkbenchActions(state, queries);
@@ -215,8 +218,12 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
             reviewAttention={reviews.filter((review) => review.status === "PENDING").length}
             onChange={openView}
           />
-          <div className="proc-rail-status">
-            <Wifi size={14} /><span>服务在线</span><small>{backendVersion}</small>
+          <div className="proc-rail-status flex items-center gap-1.5 text-xs font-semibold" title={agentDown ? "Java 采购服务在线，但 Agent 心跳已过期（分析类任务可能停滞）" : undefined}>
+            <Wifi size={14} />
+            <span className={agentDown ? "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-warning-soft text-warning border border-warning/30" : undefined}>
+              {agentDown ? "服务在线 · Agent 离线" : "服务在线"}
+            </span>
+            <small>{backendVersion}</small>
           </div>
         </aside>
 
@@ -304,6 +311,7 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
               aiTasks={allAiTasks}
               reviews={reviews}
               loading={requestsQuery.isPending || allAiTasksQuery.isPending || reviewsQuery.isPending}
+              agentDown={agentDown}
               onOpenTask={openTask}
               onOpenTasks={openTaskFilter}
               onOpenCreate={openCreate}
@@ -433,6 +441,8 @@ export function ProcurementWorkbench({ theme, backendVersion, onToggleTheme }: P
                 </div>
               </header>
 
+              {/* LIVE-1：任务详情内的 Agent 离线降级提示（可关闭）。 */}
+              {agentDown ? <AgentOfflineNotice /> : null}
               {latestInteraction ? (
                 <HumanInteractionPanel interaction={latestInteraction} />
               ) : detail.status === "waiting_human" && interactionsQuery.isError ? (

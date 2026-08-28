@@ -2,7 +2,16 @@ openapi: 3.1.0
 info:
   title: Caijiatai Python Agent Internal API
   version: 0.5.0
-  description: Internal-only API used by the Java procurement control plane.
+  description: >-
+    Internal-only API used by the Java procurement control plane.
+    Production transport is Kafka RPC: commands arrive on topic caijiatai.commands as
+    HMAC-SHA256 signed envelopes (MessageCodec.signEnvelope; signature over the
+    canonical JSON excluding the signature field itself) and results return on
+    caijiatai.results; both sides verify signature plus payload_sha256. The HTTP
+    surface documented here is the legacy loopback mode: every /internal/v1/* path
+    (and, in internal mode, every non-health path) is gated by the
+    X-Agent-Internal-Token header with a constant-time compare; POST is only allowed
+    for /internal/v1/commands and /internal/v1/config.
 servers:
   - url: http://agent:8742
 security:
@@ -62,6 +71,44 @@ paths:
               schema: {$ref: '#/components/schemas/AgentCommandResult'}
         '404':
           description: Unknown operation.
+  /internal/v1/config:
+    get:
+      operationId: getModelConfig
+      responses:
+        '200':
+          description: >-
+            Effective procurement model config. The raw API key is never returned;
+            since v0.5.1 the response carries only the api_key_configured boolean
+            (api_key_preview removed).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ModelConfig'}
+    post:
+      operationId: updateModelConfig
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ModelConfigUpdate'}
+      responses:
+        '200':
+          description: Persisted config echoed back in read form.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ModelConfig'}
+        '422':
+          description: Unknown fields, invalid provider/planner_mode, blank model, or bad price fields.
+  /internal/v1/evaluation:
+    get:
+      operationId: getFrozenEvaluation
+      responses:
+        '200':
+          description: >-
+            Deterministic frozen-comparison evaluation scorecard, recomputed per
+            request on a worker thread.
+          content:
+            application/json:
+              schema: {type: object}
   /api/runs/{runId}:
     get:
       operationId: getRun
@@ -135,6 +182,10 @@ components:
       type: apiKey
       in: header
       name: X-Agent-Internal-Token
+      description: >-
+        Legacy HTTP loopback mode only. In production Kafka RPC mode there is no
+        HTTP hop between Java and Python; authenticity comes from the HMAC-SHA256
+        envelope signature (shared internal HMAC key) plus payload_sha256 checks.
   parameters:
     OperationId:
       name: X-Operation-Id
@@ -180,3 +231,41 @@ components:
         message: {type: string}
         request_id: {type: string, format: uuid}
         status: {type: integer}
+    ModelConfig:
+      type: object
+      description: >-
+        Read form of the procurement model config. api_key/api_key_from_env are
+        internal persistence fields and are stripped from every response.
+      required: [provider, planner_mode, model, api_mode, reasoning_effort, api_key_configured]
+      properties:
+        provider: {type: string, enum: [procurement_fake, openai]}
+        planner_mode: {type: string, enum: [model, hybrid]}
+        model: {type: string}
+        base_url: {type: [string, 'null']}
+        api_mode: {type: string, enum: [auto, responses, chat]}
+        reasoning_effort: {type: string}
+        api_key_configured: {type: boolean}
+        input_price_per_million_usd: {type: [number, 'null']}
+        output_price_per_million_usd: {type: [number, 'null']}
+        cached_input_price_per_million_usd: {type: [number, 'null']}
+        max_cost_usd: {type: [number, 'null']}
+    ModelConfigUpdate:
+      type: object
+      description: >-
+        Write payload for POST /internal/v1/config. A supplied api_key is persisted
+        only when it differs from OPENAI_API_KEY (env-matching keys are stored as an
+        api_key_from_env reference, never in plaintext).
+      additionalProperties: false
+      required: [provider, model]
+      properties:
+        provider: {type: string, enum: [procurement_fake, openai]}
+        planner_mode: {type: string, enum: [model, hybrid]}
+        model: {type: string, minLength: 1}
+        base_url: {type: [string, 'null']}
+        api_mode: {type: string, enum: [auto, responses, chat]}
+        reasoning_effort: {type: string}
+        api_key: {type: [string, 'null']}
+        input_price_per_million_usd: {type: [number, 'null']}
+        output_price_per_million_usd: {type: [number, 'null']}
+        cached_input_price_per_million_usd: {type: [number, 'null']}
+        max_cost_usd: {type: [number, 'null']}

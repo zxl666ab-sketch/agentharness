@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
-import { procurementApi } from "./api";
+import { POLL_FETCH_CAP, pollFetchCount, procurementApi } from "./api";
 import type { InvoiceStatus, InvoiceView } from "./types";
 import { useEscape } from "./useEscape";
 
@@ -73,13 +73,15 @@ export function InvoiceCenter() {
   const invoicesQuery = useQuery({
     queryKey: ["procurement-invoices", status],
     queryFn: () => procurementApi.invoices(status || undefined, undefined, 0, 100),
-    // 仅存在在途发票（REGISTERED/DIFF_HOLD）时轮询；全部终态后停止
+    // 仅存在在途发票（REGISTERED/DIFF_HOLD）时轮询；全部终态后停止。
+    // W-M4：一条长期滞留的在途发票不能永续轮询（fetchCount 封顶）。
     refetchInterval: (query) =>
-      query.state.data?.items?.some(
-        (item) => item.status === "REGISTERED" || item.status === "DIFF_HOLD"
-      )
-        ? 5_000
-        : false,
+      pollFetchCount(query.state) > POLL_FETCH_CAP ? false
+        : query.state.data?.items?.some(
+          (item) => item.status === "REGISTERED" || item.status === "DIFF_HOLD"
+        )
+          ? 5_000
+          : false,
   });
   const ordersQuery = useQuery({
     queryKey: ["procurement-invoices-orders"],
@@ -91,9 +93,13 @@ export function InvoiceCenter() {
     queryKey: ["procurement-invoice", selectedId],
     queryFn: () => procurementApi.invoice(selectedId!),
     enabled: !!selectedId,
-    // 终态（MATCHED/RECONCILED/VOIDED）不再轮询；仅在途态（解析/差异挂起）持续刷新
-    refetchInterval: () =>
-      selected?.status === "REGISTERED" || selected?.status === "DIFF_HOLD" ? 5_000 : false,
+    // 终态（MATCHED/RECONCILED/VOIDED）不再轮询；仅在途态（解析/差异挂起）持续刷新。
+    // W-M4：读取 query.state（回调参数）而非渲染闭包里的 `selected`，并封顶 fetchCount。
+    refetchInterval: (query) => {
+      if (pollFetchCount(query.state) > POLL_FETCH_CAP) return false;
+      const state = query.state.data?.status ?? selected?.status;
+      return state === "REGISTERED" || state === "DIFF_HOLD" ? 5_000 : false;
+    },
   });
   const detail = detailQuery.data ?? selected ?? null;
 

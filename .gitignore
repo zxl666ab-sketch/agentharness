@@ -56,6 +56,29 @@ web/%SystemDrive%/
 # Local screenshots at repo root (optional artifacts)
 agentharness-*.png
 historical-*.png
-
+current-ui.png
 # Claude worktree dirs (transient)
 .claude/worktrees/
+
+# Agent orchestration scratch & local workbench state (never commit)
+.agents/
+.workbuddy/
+*.tsbuildinfo
+
+# Root-level personal doc tooling (resume/interview one-off generators; PII risk)
+/apply_exact_modifications.py
+/check_all_p.py
+/check_exact_template.py
+/check_target_runs.py
+/dump_exact_runs.py
+/generate_exact_date_docx.py
+/generate_interview_guide.py
+/generate_interview_qa_docx.py
+/generate_refined_resume.py
+/inspect_exact_doc.py
+/inspect_heading.py
+/inspect_pbr.py
+/modify_exact_runs_in_place.py
+/print_run_lens.py
+/run_exact_replace.py
+/update_with_git.py

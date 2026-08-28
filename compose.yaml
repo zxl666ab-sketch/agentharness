@@ -19,20 +19,26 @@ services:
       - ./deploy/mysql-init:/docker-entrypoint-initdb.d:ro
       - caijiatai-mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}"]
+      # $$ defers expansion to the container shell: the literal password never
+      # appears in `docker inspect` output (I-H4).
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\""]
       interval: 5s
       timeout: 5s
       retries: 30
+    restart: unless-stopped
 
   redis:
     image: redis:7
     container_name: cjt-redis
-    command: ["redis-server", "--appendonly", "yes"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 20
+    restart: unless-stopped
 
   kafka:
     image: apache/kafka:3.9.0
@@ -58,6 +64,7 @@ services:
       interval: 10s
       timeout: 10s
       retries: 30
+    restart: unless-stopped
 
   kafka-init:
     image: apache/kafka:3.9.0
@@ -91,13 +98,13 @@ services:
       AGENT_PORT: 8742
       AGENTHARNESS_PROCUREMENT_PROVIDER: ${AGENTHARNESS_PROCUREMENT_PROVIDER:-procurement_fake}
       AGENTHARNESS_PROCUREMENT_PLANNER_MODE: ${AGENTHARNESS_PROCUREMENT_PLANNER_MODE:-model}
-      AGENTHARNESS_PROCUREMENT_MODEL: ${OPENAI_MODEL:-gpt-5.4}
+      AGENTHARNESS_PROCUREMENT_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       AGENTHARNESS_PROCUREMENT_REASONING_EFFORT: ${AGENTHARNESS_PROCUREMENT_REASONING_EFFORT:-none}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-}
       # P2-3 语义缓存：独立 DB index 2，避免与 Java（DB 0）互相干扰
-      AGENT_REDIS_URL: redis://redis:6379/2
+      AGENT_REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/2
     volumes:
       - caijiatai-agent-runtime:/data/runtime
     healthcheck:
@@ -140,6 +147,10 @@ services:
       OPENAI_MODEL: ${OPENAI_MODEL:-}
       APP_REDIS_ENABLED: "true"
       SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+      # J-M5: browser traffic arrives via Docker NAT (source = bridge gateway),
+      # so the write-endpoint source gate trusts this CIDR in addition to loopback.
+      APP_TRUSTED_NETWORKS: ${APP_TRUSTED_NETWORKS:-172.16.0.0/12}
     ports:
       - "127.0.0.1:8741:8741"
     volumes:
@@ -150,6 +161,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 40
+    restart: unless-stopped
 
 volumes:
   caijiatai-mysql-data:

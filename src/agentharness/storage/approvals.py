@@ -68,15 +68,6 @@ class ApprovalRepo:
             )
         return cursor.rowcount == 1
 
-    def expire_pending_approvals(self, run_id: str) -> int:
-        with self._lock:
-            cursor = self._conn.execute(
-                """UPDATE approvals SET status = 'expired', resolved_at = ?
-                   WHERE run_id = ? AND status = 'pending' AND decision IS NULL""",
-                (_utcnow(), run_id),
-            )
-        return cursor.rowcount
-
     def list_approvals(self, run_id: str) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(

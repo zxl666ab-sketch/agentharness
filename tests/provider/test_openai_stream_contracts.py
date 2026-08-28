@@ -386,6 +386,35 @@ async def test_responses_404_falls_back_to_chat():
 
 
 @pytest.mark.asyncio
+async def test_text_only_404_does_not_permanently_flip_api_mode():
+    """P-L17: only a real HTTP 404 answer may switch the adapter to chat mode."""
+    client = MagicMock()
+    # A payload-shaped error (model echoing "404 / not found"), no HTTP status.
+    client.responses.create = AsyncMock(
+        side_effect=Exception("Error code: 0 - model said: HTTP 404 not found for file.txt")
+    )
+    client.chat.completions.create = AsyncMock()
+    adapter = OpenAIResponsesAdapter(api_key="test-key", api_mode="responses")
+
+    with patch.object(adapter, "_get_client", return_value=client):
+        items = await _collect(adapter, _req())
+
+    assert any(item.type == StreamItemType.error for item in items)
+    assert adapter.api_mode == "responses", "子串匹配把端点模式永久降级了"
+    client.chat.completions.create.assert_not_called()
+
+
+def test_is_not_found_requires_an_http_status():
+    from agentharness.providers.openai_adapter import _is_not_found
+
+    plain = Exception("Error code: 404 - not found")
+    assert _is_not_found(plain) is False
+    with_status = Exception("boom")
+    with_status.status_code = 404  # type: ignore[attr-defined]
+    assert _is_not_found(with_status) is True
+
+
+@pytest.mark.asyncio
 async def test_responses_late_call_id_keeps_one_stable_tool_identity():
     events = [
         SimpleNamespace(

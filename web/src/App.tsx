@@ -83,10 +83,16 @@ export default function App() {
       />
     );
   }
+  // LIVE-1：Java /api/health 的 status=ok 只代表采购服务进程存活；Agent 心跳
+  // 过期（agent_available=false / agent_status.status="down"）时分析类任务会
+  // 停滞，必须在 UI 上明示，而不是让徽章继续显示"服务在线"。
+  const agentDown = health.data.agent_available === false
+    || health.data.agent_status?.status === "down";
   return (
     <ProcurementWorkbench
       theme={theme}
       backendVersion={health.data.backend_version}
+      agentDown={agentDown}
       onToggleTheme={() => setTheme((value) => (value === "light" ? "dark" : "light"))}
     />
   );

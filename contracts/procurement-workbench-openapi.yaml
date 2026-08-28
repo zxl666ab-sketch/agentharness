@@ -197,6 +197,12 @@ paths:
         - name: status
           in: query
           schema: {$ref: './procurement-workbench.schema.json#/$defs/OrderStatus'}
+        - name: task_id
+          in: query
+          description: >-
+            Optional server-side filter by procurement task (added with the v0.5.1
+            query-filter fix); the paged response shape is unchanged.
+          schema: {type: string, pattern: '^[0-9a-f]{32}$'}
         - {$ref: '#/components/parameters/Page'}
         - {$ref: '#/components/parameters/PageSize'}
       responses:
@@ -370,6 +376,20 @@ paths:
           content:
             application/json:
               schema: {$ref: './procurement-workbench.schema.json#/$defs/PlatformInfo'}
+  /api/procurement/config:
+    get:
+      operationId: getProcurementModelConfig
+      responses:
+        '200':
+          description: >-
+            Effective procurement model config, sourced from environment variables
+            (.env is the single source of truth; a restart applies changes). Since the
+            v0.5.1 hardening the response exposes ONLY the api_key_configured boolean
+            for credentials — no api_key, no api_key_preview prefix echo.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProcurementModelConfigView'}
+        '400': {description: Rejected by RequestBoundaryFilter (non-loopback Host or Forwarded headers).}
   /api/procurement/requests/{businessId}/quotes/{quoteId}/corrections:
     post:
       operationId: correctQuoteField
@@ -681,6 +701,29 @@ paths:
             application/json:
               schema: {$ref: './procurement-workbench.schema.json#/$defs/ProcurementRunAccepted'}
         '409': {description: Contract status does not allow re-drafting.}
+  /api/artifacts/{artifactId}/raw:
+    get:
+      operationId: downloadArtifactRaw
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema: {type: string, pattern: '^jb[0-9a-f]{32}$'}
+      responses:
+        '200':
+          description: >-
+            Original artifact bytes as an attachment (Content-Disposition with the
+            stored filename, Content-Type and Content-Length from the artifact row,
+            plus X-Artifact-Owner and X-Content-SHA256 integrity headers).
+            Auth model per RequestBoundaryFilter: the Host header must name a loopback
+            address (127.0.0.1 / localhost / [::1]), Forwarded/X-Forwarded-* headers are
+            rejected with 400, and GET is a safe method so no same-origin check applies;
+            there is no session/token layer on the workbench plane.
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '400': {description: Non-loopback Host or Forwarded headers (request boundary).}
+        '404': {description: Unknown artifact, or artifact id without a valid jb-prefix owner.}
 components:
   parameters:
     BusinessId:
@@ -846,3 +889,22 @@ components:
             history:
               type: array
               items: {$ref: './procurement-workbench.schema.json#/$defs/ReviewView'}
+    ProcurementModelConfigView:
+      type: object
+      description: >-
+        Environment-derived model config view. Credential exposure is limited to the
+        api_key_configured boolean; the raw key and any key prefix/suffix preview are
+        excluded from this contract by design (v0.5.1 hardening of J-M6).
+      required: [provider, planner_mode, model, api_mode, reasoning_effort, api_key_configured]
+      properties:
+        provider: {type: string}
+        planner_mode: {type: string}
+        model: {type: string}
+        base_url: {type: [string, 'null']}
+        api_mode: {type: string}
+        reasoning_effort: {type: string}
+        api_key_configured: {type: boolean}
+        input_price_per_million_usd: {type: [number, 'null']}
+        output_price_per_million_usd: {type: [number, 'null']}
+        cached_input_price_per_million_usd: {type: [number, 'null']}
+        max_cost_usd: {type: [number, 'null']}

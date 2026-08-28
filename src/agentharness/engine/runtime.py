@@ -9,6 +9,7 @@ import time
 from collections.abc import Awaitable, Callable
 from contextlib import ExitStack, suppress
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 from agentharness.contracts import (
@@ -159,11 +160,18 @@ class RunEngine:
         lease_owner_id: str | None = None,
         lease_ttl_s: float = 60.0,
         lease_heartbeat_s: float = 10.0,
+        workspace_roots: list[str | Path] | None = None,
     ) -> None:
         self.storage = storage
         self.providers = providers
         self.tools = tools
         self.redactor = redactor or default_redactor
+        # P-M7: authorized workspace roots. An empty list keeps the previous
+        # behaviour (Runs are not cwd-bound); a non-empty list rejects Run
+        # requests that explicitly ask for a cwd outside those roots.
+        self.workspace_roots: list[Path] = [
+            Path(root).expanduser().resolve() for root in (workspace_roots or [])
+        ]
         self.lease = LeaseManager(
             storage,
             owner_id=lease_owner_id,
@@ -211,6 +219,24 @@ class RunEngine:
         """Return (creating if needed) the RunContext for a run."""
         return ensure_ctx(self._runs, run_id)
 
+    def _authorize_cwd(self, cwd: str | None) -> None:
+        """P-M7: keep a Run inside the workspace roots the launcher authorized.
+
+        No roots (library use, agent_service) means no restriction at all, so the
+        default behaviour is unchanged; with roots configured, a Run may only
+        touch a directory inside one of them.
+        """
+        if not self.workspace_roots:
+            return
+        target = Path(cwd or ".").expanduser().resolve()
+        for root in self.workspace_roots:
+            if target == root or root in target.parents:
+                return
+        allowed = ", ".join(str(root) for root in self.workspace_roots)
+        raise ValueError(
+            f"workspace {target} is outside the authorized roots ({allowed})"
+        )
+
     @property
     def approval_callback(self) -> ApprovalCallback | None:
         """Owned by the tool executor; kept as an engine attribute for callers
@@ -256,7 +282,9 @@ class RunEngine:
         heartbeat = ctx.lease_heartbeat_task if ctx else None
         if heartbeat is not None:
             heartbeat.cancel()
-            with suppress(asyncio.CancelledError):
+            # P-H3: a heartbeat that gave up (repeatedly failing storage writes)
+            # already ended with its own error; teardown must not re-raise it.
+            with suppress(asyncio.CancelledError, Exception):
                 await heartbeat
         self.lease.release(run_id)
         with ExitStack() as stack:
@@ -369,6 +397,9 @@ class RunEngine:
     async def run(self, request: RunRequest, *, run_id: str | None = None) -> RunResult:
         from agentharness.session_history import session_title_from_message
 
+        run_id = run_id or new_id()
+        # Fail closed on workspace authorization before any state is created.
+        self._authorize_cwd(request.cwd)
         wall_started = time.monotonic()
         parent_run_id = request.parent_run_id
         is_top_level = parent_run_id is None
@@ -396,7 +427,6 @@ class RunEngine:
                             title=session_title_from_message(request.message),
                         )
 
-        run_id = run_id or new_id()
         if self.storage.get_run(run_id) is not None:
             raise ValueError(f"run id already exists: {run_id}")
         root_run_id = request.root_run_id or run_id
@@ -598,6 +628,8 @@ class RunEngine:
         cp = self.storage.load_checkpoint(run_id)
         if not cp:
             raise RuntimeError(f"no checkpoint for run {run_id}")
+        # P-M7: a resumed Run is bound by the same authorized workspace roots.
+        self._authorize_cwd(run.get("cwd"))
 
         cancel = self.get_cancel_event(run_id)
         cancel.clear()
@@ -752,6 +784,20 @@ class RunEngine:
             await self.interrupt(run_id, "cancelled")
             self.lifecycle.mark_interrupted(run_id, "cancelled")
             raise
+        except Exception as exc:  # noqa: BLE001 - mirrors run(); never leave `running`
+            # P-H2: without this, anything the resume path raises (a context
+            # budget error, a lost provider) escaped to the caller while the run
+            # row stayed `running` with its lease already released — and
+            # `running` is not resumable, so the run was stuck forever.
+            self.lifecycle.mark_failed(run_id, str(exc))
+            return RunResult(
+                run_id=run_id,
+                session_id=run["session_id"],
+                status=RunStatus.failed,
+                error=str(exc),
+                parent_run_id=run.get("parent_run_id"),
+                root_run_id=run["root_run_id"],
+            )
         finally:
             stop_watcher.cancel()
             with suppress(asyncio.CancelledError):

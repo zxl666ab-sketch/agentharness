@@ -300,6 +300,56 @@ def test_v10_procurement_decisions_preserve_v1_rows_and_allow_no_award(
         storage.close()
 
 
+def test_v13_seeds_the_durable_seq_watermark_from_existing_events(tmp_path: Path) -> None:
+    """LIVE-1 upgrade path: an existing DB must adopt its event high-water mark."""
+    created_at = "2026-01-02T03:04:05+00:00"
+    conn = _database_at_version(tmp_path / "agentharness.db", 12)
+    conn.execute(
+        "INSERT INTO sessions(id, created_at, updated_at) VALUES(?,?,?)",
+        ("session", created_at, created_at),
+    )
+    conn.execute(
+        """INSERT INTO runs(
+               id, session_id, root_run_id, status, created_at, updated_at
+           ) VALUES(?,?,?,?,?,?)""",
+        ("run", "session", "run", "completed", created_at, created_at),
+    )
+    for index in range(3):
+        conn.execute(
+            """INSERT INTO events(
+                   global_seq, event_id, run_seq, session_id, root_run_id, run_id,
+                   type, timestamp, payload_json, schema_version
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                10 + index,
+                f"event-{index}",
+                index + 1,
+                "session",
+                "run",
+                "run",
+                "run_status",
+                created_at,
+                "{}",
+                1,
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+    storage = Storage(tmp_path)
+    try:
+        assert storage.schema_version() == SCHEMA_VERSION
+        assert storage.max_event_seq() == 12
+        assert storage.global_seq_watermark() == 12  # 迁移即播种
+        assert storage.max_global_seq() == 12
+        # MAX-upsert：心跳推进它，低值回写永远无法把它拉回去
+        assert storage.bump_global_seq(9) == 12
+        assert storage.bump_global_seq(86_565) == 86_565
+        assert storage.max_global_seq() == 86_565
+    finally:
+        storage.close()
+
+
 def test_legacy_checkpoint_invocation_id_is_stable_across_loads(tmp_path: Path) -> None:
     storage = Storage(tmp_path)
     try:

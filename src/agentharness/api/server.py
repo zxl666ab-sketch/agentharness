@@ -77,6 +77,46 @@ def _dev_cors_origins() -> list[str]:
     ]
 
 
+#: Write endpoints that actually execute Agent Runs (run/approval surface).
+#: P-M7: `execution_enabled` used to be a dead parameter — a non-loopback bind
+#: without `--allow-remote-execution` still accepted commands.
+EXECUTION_PATHS = frozenset({"/internal/v1/commands"})
+
+#: Run/approval control surface (kept as a prefix rule so a future endpoint
+#: under it inherits the execution gate instead of silently bypassing it).
+_RUN_PATH_PREFIXES = ("/internal/v1/runs", "/api/runs")
+_RUN_PATH_MARKERS = (
+    "/approve",
+    "/deny",
+    "/resume",
+    "/cancel",
+    "/interrupt",
+    "/recover",
+    "/approval",
+)
+
+
+def _is_run_or_approval_path(path: str) -> bool:
+    return path.startswith(_RUN_PATH_PREFIXES) and any(
+        marker in path for marker in _RUN_PATH_MARKERS
+    )
+
+
+def _resolve_workspace_roots(
+    workspace_roots: list[str | Path] | None,
+) -> list[Path]:
+    """Authorized workspace roots; empty means the runtime stays unrestricted."""
+    roots: list[Path] = []
+    for raw in workspace_roots or []:
+        path = Path(raw).expanduser()
+        if not path.is_dir():
+            raise ValueError(f"workspace root is not an existing directory: {path}")
+        resolved = path.resolve()
+        if resolved not in roots:
+            roots.append(resolved)
+    return roots
+
+
 def _resolve_web_dist(web_dist: Path | str | None) -> Path:
     source = Path(__file__).resolve().parents[3] / "web" / "dist"
     if web_dist:
@@ -104,6 +144,9 @@ def create_app(
 ) -> FastAPI:
     owns_harness = harness is None
     runtime = harness or Harness(data_dir=data_dir)
+    roots = _resolve_workspace_roots(workspace_roots)
+    # P-M7: the launcher's authorized roots now actually bound every Run cwd.
+    runtime.workspace_roots = roots
     internal_mode = (
         os.environ.get("AGENTHARNESS_INTERNAL_ONLY", "").strip().lower()
         in {"1", "true", "yes", "on"}
@@ -180,6 +223,21 @@ def create_app(
                 status_code=405,
                 headers={"Allow": "GET, HEAD, OPTIONS"},
             )
+        if not execution_enabled and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            if path in EXECUTION_PATHS or _is_run_or_approval_path(path):
+                return JSONResponse(
+                    {
+                        "code": "execution_disabled",
+                        "message": (
+                            "Run execution is disabled on this Agent Runtime bind: "
+                            "a non-loopback listener must be started with "
+                            "--allow-remote-execution (behind an authenticating proxy) "
+                            "before run/approval commands are accepted."
+                        ),
+                        "status": 403,
+                    },
+                    status_code=403,
+                )
         return await call_next(request)
 
     app.include_router(internal_agent_router(runtime))
@@ -211,7 +269,10 @@ def create_app(
         return public_redact(
             {
                 "mode": "procurement_control_plane",
-                "execution_enabled": False,
+                # P-M7: report the flags this app was actually built with, so a
+                # remote bind without `--allow-remote-execution` is observable.
+                "execution_enabled": execution_enabled,
+                "workspace_roots": [str(root) for root in roots],
                 "providers": sorted(runtime.providers),
                 "tools": sorted(runtime.tools),
                 "runs": run_count,
@@ -361,8 +422,13 @@ def create_app(
         last_event_id: str | None = Header(None, alias="Last-Event-ID"),
         after: int | None = Query(None),
     ) -> StreamingResponse:
+        # SSE replays *persisted event rows*, so its cursor is the events-table
+        # high-water mark. The durable watermark (`max_global_seq`) also counts
+        # Kafka-only heartbeats and would park the cursor above every row.
         cursor = (
-            after if after is not None else await asyncio.to_thread(runtime.storage.max_global_seq)
+            after
+            if after is not None
+            else await asyncio.to_thread(runtime.storage.max_event_seq)
         )
         if last_event_id:
             with suppress(ValueError):

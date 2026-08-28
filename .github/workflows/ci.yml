@@ -49,6 +49,21 @@ jobs:
       - run: uv build
       - run: uv run python scripts/evaluate_procurement.py run --output output/ci-procurement-evaluation
       - run: uv run python scripts/evaluate_procurement.py verify --input output/ci-procurement-evaluation/raw-results.json
+      - name: Invoice evaluation (P3-1)
+        run: uv run python scripts/evaluate_invoice.py --out output/ci-invoice-evaluation
+      - name: Contract evaluation (P3-2)
+        run: uv run python scripts/evaluate_contract.py --out output/ci-contract-evaluation
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks (personal repo; orgs need GITLEAKS_LICENSE)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   web:
     runs-on: ubuntu-latest
@@ -56,7 +71,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
@@ -64,6 +79,9 @@ jobs:
       - run: npm test
         working-directory: web
       - run: npm run lint
+        working-directory: web
+      - name: Type-check tests (W-H2: vitest/esbuild never type-checks test files)
+        run: npm run typecheck:test
         working-directory: web
       - run: npm run build
         working-directory: web

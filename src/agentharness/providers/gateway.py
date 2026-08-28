@@ -212,9 +212,24 @@ class ProviderGateway:
     # ------------------------------------------------------------------
 
     async def acquire(self) -> None:
-        """Wait for concurrency quota + QPS token; raise GatewayBlockedError on refusal."""
+        """Wait for concurrency quota + QPS token; raise GatewayBlockedError on refusal.
+
+        P-H1: whenever this call refuses the request *before* the stream starts, a
+        half-open probe slot it consumed is released on the way out. Without that,
+        a local QPS refusal (or a cancellation while queueing on the concurrency
+        semaphore) left ``_probe_inflight`` stuck, so every later request was
+        rejected as ``circuit_open`` until the process restarted.
+        """
         state = self._breaker.state()
-        if state == "open" or (state == "half_open" and not self._breaker.try_probe()):
+        probe_held = False
+        if state == "open":
+            blocked = True
+        elif state == "half_open":
+            probe_held = self._breaker.try_probe()
+            blocked = not probe_held
+        else:
+            blocked = False
+        if blocked:
             with self._lock:
                 self._stats["circuit_blocked"] += 1
             detail = {
@@ -227,8 +242,10 @@ class ProviderGateway:
                 provider=self.provider,
                 retry_after_s=detail["retry_after_s"],
             )
-        await self._semaphore.acquire()
+        acquired = False
         try:
+            await self._semaphore.acquire()
+            acquired = True
             wait = self._bucket.take()
             if wait > 0:
                 if wait > self._bucket_wait_s:
@@ -257,7 +274,12 @@ class ProviderGateway:
                     self._notify("rate_limited", detail)
                     raise GatewayBlockedError("rate_limited", provider=self.provider, retry_after_s=0.0)
         except BaseException:
-            self._semaphore.release()
+            if acquired:
+                # Only release the quota slot this call actually took.
+                self._semaphore.release()
+            if probe_held:
+                # The probe never reached the provider: free the single-flight slot.
+                self._breaker.abort_probe()
             raise
 
     def release(self) -> None:

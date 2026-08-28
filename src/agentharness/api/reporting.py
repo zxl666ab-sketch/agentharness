@@ -12,6 +12,10 @@ from agentharness.harness import Harness
 
 _ACTIVE_STATUSES = {"pending", "running", "waiting_approval"}
 _VERSION_PATTERN = re.compile(r"file_version sha256=([0-9a-f]{64})")
+# Event fetch windows for `build_run_report`: page through the log instead of
+# trusting one 10k query, and stop at an explicit cap (never unbounded memory).
+_EVENT_PAGE_SIZE = 10_000
+_EVENT_HARD_CAP = 100_000
 
 
 def _event_type(event: EventEnvelope) -> str:
@@ -187,6 +191,27 @@ def _artifact_ids(value: Any, found: list[str]) -> None:
             _artifact_ids(item, found)
 
 
+def _run_events(runtime: Harness, run_id: str) -> list[EventEnvelope]:
+    """Every persisted event of a run, paged past the single-query window.
+
+    P-L16: one ``limit=10_000`` read silently truncated long runs, and
+    ``evidence_sha256`` was then computed over that truncated set — two
+    callers could not tell a complete evidence chain from a cut-off one.
+    """
+    events: list[EventEnvelope] = []
+    cursor = 0
+    while len(events) < _EVENT_HARD_CAP:
+        page_size = min(_EVENT_PAGE_SIZE, _EVENT_HARD_CAP - len(events))
+        page = runtime.get_events(run_id=run_id, after_global_seq=cursor, limit=page_size)
+        if not page:
+            break
+        events.extend(page)
+        cursor = max(cursor, *(event.global_seq or 0 for event in page))
+        if len(page) < page_size:
+            break
+    return events
+
+
 def _tool_payload(runtime: Harness, invocation: ToolInvocationRecord) -> dict[str, Any]:
     payload = invocation.model_dump(mode="json")
     payload["attempts_audit"] = runtime.list_tool_attempts(invocation.id)
@@ -230,7 +255,7 @@ def build_run_report(runtime: Harness, run_id: str) -> dict[str, Any] | None:
     policy = metadata.get("_agentharness_verification_policy")
     if not isinstance(policy, dict):
         policy = None
-    events = runtime.get_events(run_id=run_id, limit=10_000)
+    events = _run_events(runtime, run_id)
     attempts = _verification_attempts(events)
     configured = bool(policy) or bool(attempts)
     failures = _failure_reasons(attempts, run.get("error"))
@@ -286,6 +311,9 @@ def build_run_report(runtime: Harness, run_id: str) -> dict[str, Any] | None:
             "run_updated_at": run.get("updated_at"),
             "max_global_seq": max((event.global_seq for event in events), default=0),
             "event_count": len(events),
+            # P-L16: the fetch is capped, so say so instead of letting the
+            # evidence hash silently describe a truncated event set.
+            "events_truncated": len(events) >= _EVENT_HARD_CAP,
             "tool_count": len(tools),
             "approval_count": len(approvals),
             "artifact_count": len(artifacts),

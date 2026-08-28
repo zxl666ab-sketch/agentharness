@@ -43,7 +43,6 @@ public final class KafkaRpcServer {
     private final ArtifactStore artifactStore;
     private final RuntimeEventRepository events;
     private final TaskViewMapper views;
-    private final ReferencePriceService referencePrices;
     private final PendingDecisionRepository pendingDecisions;
     private final AgentCommandRepository commands;
     private final HumanInteractionRepository interactions;
@@ -52,7 +51,6 @@ public final class KafkaRpcServer {
             ProcurementTaskRepository tasks, ProcurementQuoteRepository quotes,
             BusinessArtifactRepository artifacts, ArtifactStore artifactStore,
             RuntimeEventRepository events, TaskViewMapper views,
-            ReferencePriceService referencePrices,
             PendingDecisionRepository pendingDecisions,
             AgentCommandRepository commands,
             HumanInteractionRepository interactions) {
@@ -64,7 +62,6 @@ public final class KafkaRpcServer {
         this.artifactStore = artifactStore;
         this.events = events;
         this.views = views;
-        this.referencePrices = referencePrices;
         this.pendingDecisions = pendingDecisions;
         this.commands = commands;
         this.interactions = interactions;
@@ -79,6 +76,9 @@ public final class KafkaRpcServer {
         if (!MessageCodec.verifyEnvelope(hmacKey, envelope)
                 || !requestSha.equals(CanonicalJson.sha256(map(envelope.get("payload"))))) {
             log.warn("RPC 签名校验失败：{}", correlationId);
+            // J-M1: answer with a signed error envelope instead of going silent,
+            // otherwise the caller blocks until its own reply timeout.
+            publishResponse(correlationId, Map.of(), "rpc_signature_invalid", requestSha);
             return;
         }
         Map<String, Object> result = Map.of();
@@ -88,7 +88,6 @@ public final class KafkaRpcServer {
                 case "get_task_context" -> taskContext(envelope);
                 case "get_artifact" -> artifact(envelope);
                 case "list_events" -> listEvents(envelope);
-                case "get_reference_prices" -> referencePrices(envelope);
                 default -> throw new ApiException(HttpStatus.BAD_REQUEST, "unknown_rpc_kind", "未知 RPC 类型");
             };
         } catch (ApiException apiError) {
@@ -97,6 +96,11 @@ public final class KafkaRpcServer {
             error = "rpc_failed: " + other.getMessage();
             log.warn("RPC {} 处理失败", kind, other);
         }
+        publishResponse(correlationId, result, error, requestSha);
+    }
+
+    private void publishResponse(
+            String correlationId, Map<String, Object> result, String error, String requestSha) {
         var response = new LinkedHashMap<String, Object>();
         response.put("correlation_id", correlationId);
         response.put("status", error == null ? "ok" : "error");
@@ -105,7 +109,14 @@ public final class KafkaRpcServer {
         response.put("request_sha256", requestSha);
         response.put("processed_at", Instant.now().toString());
         response.put("signature", MessageCodec.signEnvelope(hmacKey, response));
-        kafka.send(RESPONSES_TOPIC, correlationId, CanonicalJson.bytes(response));
+        // J-H1: a producer-side failure (e.g. oversize artifact response beyond
+        // max.request.size) used to vanish into the unobserved future.
+        kafka.send(RESPONSES_TOPIC, correlationId, CanonicalJson.bytes(response))
+                .whenComplete((sent, sendError) -> {
+                    if (sendError != null) {
+                        log.error("RPC 应答发送失败：correlation_id={}", correlationId, sendError);
+                    }
+                });
     }
 
     private Map<String, Object> taskContext(Map<String, Object> envelope) {
@@ -202,18 +213,14 @@ public final class KafkaRpcServer {
         return value;
     }
 
-    private Map<String, Object> referencePrices(Map<String, Object> envelope) {
-        var payload = map(envelope.get("payload"));
-        return referencePrices.referencePrices(
-                text(payload.get("task_id")),
-                text(payload.get("item_name")),
-                text(payload.get("category")));
-    }
-
     private Map<String, Object> listEvents(Map<String, Object> envelope) {
         var payload = map(envelope.get("payload"));
         long after = longValue(payload.get("after_seq"));
-        var limit = payload.containsKey("limit") ? integer(payload.get("limit")) : 100;
+        // J-M2: clamp caller-supplied limit like OrderService.list does. An unclamped
+        // limit let one list_events RPC pull the whole projection into a single reply.
+        // Other RPC kinds (get_task_context / get_artifact) take no limit parameter.
+        var requestedLimit = payload.containsKey("limit") ? integer(payload.get("limit")) : 100;
+        var limit = Math.min(Math.max(1, requestedLimit), 500);
         var rows = events.findByGlobalSeqGreaterThanOrderByGlobalSeqAsc(after, PageRequest.of(0, limit));
         var items = new ArrayList<Map<String, Object>>();
         for (var row : rows) {

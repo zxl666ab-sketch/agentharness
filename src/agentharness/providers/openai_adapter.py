@@ -263,13 +263,17 @@ def _error_item(exc: BaseException) -> ModelStreamItem:
 
 
 def _is_not_found(exc: BaseException) -> bool:
+    """True only for a real HTTP 404 answer from the provider.
+
+    P-L17: matching the message text flipped ``api_mode`` to ``chat`` forever
+    whenever a *payload* merely contained "404"/"not found" (a model echoing an
+    error string, a tool result quoting a missing file), silently downgrading
+    the endpoint for the lifetime of the adapter.
+    """
     status = getattr(exc, "status_code", None)
     if status is None:
         status = getattr(exc, "status", None)
-    if status == 404:
-        return True
-    low = str(exc).lower()
-    return "404" in low or "not found" in low
+    return status == 404
 
 
 def _stream_options_unsupported(exc: BaseException) -> bool:
@@ -827,9 +831,3 @@ class OpenAIResponsesAdapter:
                 }
             )
         return out
-
-    # Back-compat alias used by older tests / callers
-    def _to_tools(self, request: ModelRequest) -> list[dict[str, Any]]:
-        if self.api_mode == "chat":
-            return self._to_tools_chat(request)
-        return self._to_tools_responses(request)

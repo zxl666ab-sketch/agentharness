@@ -20,6 +20,31 @@ import org.springframework.data.domain.Pageable;
 
 class RuntimeQueryServiceTest {
     @Test
+    void agentAvailabilityOrdersHeartbeatsByOccurredAtNotGlobalSeq() {
+        // LIVE-1: a stale heartbeat kept at the highest global_seq (topic pruning + seq
+        // re-seeding) must not decide availability; the newest-by-time row must.
+        var events = mock(RuntimeEventRepository.class);
+        var service = new RuntimeQueryService(
+                events,
+                mock(ProcurementDecisionRepository.class),
+                mock(RuntimeReportProjectionRepository.class),
+                mock(ProcurementTaskRepository.class),
+                mock(BusinessArtifactRepository.class));
+        var fresh = RuntimeEvent.create(7L, null, null, "heartbeat.ping", Map.of(),
+                Instant.now().minusSeconds(2));
+        when(events.findFirstByTypeOrderByOccurredAtDesc("heartbeat.ping")).thenReturn(Optional.of(fresh));
+        assertThat(service.agentAvailable()).isTrue();
+
+        var staleHighSeq = RuntimeEvent.create(86565L, null, null, "heartbeat.ping", Map.of(),
+                Instant.now().minusSeconds(3600));
+        when(events.findFirstByTypeOrderByOccurredAtDesc("heartbeat.ping")).thenReturn(Optional.of(staleHighSeq));
+        assertThat(service.agentAvailable()).isFalse();
+
+        when(events.findFirstByTypeOrderByOccurredAtDesc("heartbeat.ping")).thenReturn(Optional.empty());
+        assertThat(service.agentAvailable()).isFalse();
+    }
+
+    @Test
     void projectsRunReportFromJavaEventsWithStableFrontendContract() {
         var events = mock(RuntimeEventRepository.class);
         var decisions = mock(ProcurementDecisionRepository.class);

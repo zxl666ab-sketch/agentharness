@@ -5,6 +5,8 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
@@ -13,6 +15,8 @@ import org.springframework.stereotype.Component;
 @ConditionalOnProperty(prefix = "app", name = "agent-mode", havingValue = "kafka")
 public final class KafkaCommandPublisher implements AgentDispatcher {
     public static final String COMMANDS_TOPIC = "caijiatai.commands";
+
+    private static final Logger log = LoggerFactory.getLogger(KafkaCommandPublisher.class);
 
     private final KafkaTemplate<String, byte[]> kafka;
     private final String hmacKey;
@@ -51,7 +55,15 @@ public final class KafkaCommandPublisher implements AgentDispatcher {
         envelope.put("payload", command.getPayload());
         envelope.put("published_at", Instant.now().toString());
         envelope.put("signature", MessageCodec.signEnvelope(hmacKey, envelope));
-        kafka.send(COMMANDS_TOPIC, command.getAggregateId(), CanonicalJson.bytes(envelope));
+        // J-H1: fire-and-forget used to swallow producer failures (oversize payload,
+        // broker down) until the outbox republish timeout misclassified them.
+        kafka.send(COMMANDS_TOPIC, command.getAggregateId(), CanonicalJson.bytes(envelope))
+                .whenComplete((sent, sendError) -> {
+                    if (sendError != null) {
+                        log.error("命令发送失败：operation_id={} aggregate_id={}",
+                                command.getOperationId(), command.getAggregateId(), sendError);
+                    }
+                });
         return null;
     }
 

@@ -2,6 +2,7 @@ package com.caijiatai.procurement.agent;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -20,15 +21,24 @@ import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.data.domain.Pageable;
 import org.springframework.kafka.core.KafkaTemplate;
 
 class KafkaRpcServerTest {
+    @SuppressWarnings("unchecked")
+    private static void stubSend(KafkaTemplate<String, byte[]> kafka) {
+        when(kafka.send(any(String.class), any(String.class), any(byte[].class)))
+                .thenReturn(CompletableFuture.completedFuture(null));
+    }
+
     @Test
     void taskContextIncludesAuthoritativePendingDecisionBinding() {
         var kafka = mock(KafkaTemplate.class);
+        stubSend(kafka);
         var properties = mock(AppProperties.class);
         when(properties.internalHmacKey()).thenReturn("test-hmac-key-with-at-least-32-bytes");
         var tasks = mock(ProcurementTaskRepository.class);
@@ -50,7 +60,7 @@ class KafkaRpcServerTest {
         var server = new KafkaRpcServer(
                 kafka, properties, tasks, quotes, mock(BusinessArtifactRepository.class),
                 mock(ArtifactStore.class), mock(RuntimeEventRepository.class), new TaskViewMapper(),
-                mock(ReferencePriceService.class), pendingDecisions,
+                pendingDecisions,
                 mock(AgentCommandRepository.class),
                 mock(com.caijiatai.procurement.interaction.HumanInteractionRepository.class));
         var payload = Map.<String, Object>of("task_id", task.getId());
@@ -81,5 +91,76 @@ class KafkaRpcServerTest {
                 .isEqualTo(pending.getTaskVersion());
         assertThat(response.get("signature")).isEqualTo(
                 MessageCodec.signEnvelope(properties.internalHmacKey(), response));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void signatureFailureStillAnswersSignedErrorEnvelope() {
+        // J-M1: silent return used to strand the caller on its reply timeout.
+        var kafka = mock(KafkaTemplate.class);
+        stubSend(kafka);
+        var properties = mock(AppProperties.class);
+        when(properties.internalHmacKey()).thenReturn("test-hmac-key-with-at-least-32-bytes");
+        var server = new KafkaRpcServer(
+                kafka, properties, mock(ProcurementTaskRepository.class),
+                mock(ProcurementQuoteRepository.class), mock(BusinessArtifactRepository.class),
+                mock(ArtifactStore.class), mock(RuntimeEventRepository.class), new TaskViewMapper(),
+                mock(PendingDecisionRepository.class), mock(AgentCommandRepository.class),
+                mock(com.caijiatai.procurement.interaction.HumanInteractionRepository.class));
+        var request = new java.util.LinkedHashMap<String, Object>();
+        request.put("correlation_id", "corr-bad");
+        request.put("kind", "list_events");
+        request.put("payload", Map.<String, Object>of("after_seq", 0L));
+        request.put("request_sha256", CanonicalJson.sha256(Map.of("after_seq", 0L)));
+        request.put("signature", "0".repeat(64));
+
+        server.onRequest(new ConsumerRecord<>(
+                KafkaRpcServer.REQUESTS_TOPIC, 0, 0, "corr-bad", CanonicalJson.bytes(request)));
+
+        var responseBytes = ArgumentCaptor.forClass(byte[].class);
+        verify(kafka).send(eq(KafkaRpcServer.RESPONSES_TOPIC), eq("corr-bad"), responseBytes.capture());
+        var response = CanonicalJson.read(responseBytes.getValue());
+        assertThat(response.get("status")).isEqualTo("error");
+        assertThat(response.get("error")).isEqualTo("rpc_signature_invalid");
+        assertThat(response.get("result")).isEqualTo(Map.of());
+        assertThat(response.get("signature")).isEqualTo(
+                MessageCodec.signEnvelope(properties.internalHmacKey(), response));
+    }
+
+    @Test
+    void listEventsClampsLimitToOneToFiveHundred() {
+        // J-M2: caller-provided limit must not fan out into an unbounded projection pull.
+        var kafka = mock(KafkaTemplate.class);
+        stubSend(kafka);
+        var properties = mock(AppProperties.class);
+        when(properties.internalHmacKey()).thenReturn("test-hmac-key-with-at-least-32-bytes");
+        var events = mock(RuntimeEventRepository.class);
+        var pages = ArgumentCaptor.forClass(Pageable.class);
+        when(events.findByGlobalSeqGreaterThanOrderByGlobalSeqAsc(anyLong(), any(Pageable.class)))
+                .thenReturn(List.of());
+        var server = new KafkaRpcServer(
+                kafka, properties, mock(ProcurementTaskRepository.class),
+                mock(ProcurementQuoteRepository.class), mock(BusinessArtifactRepository.class),
+                mock(ArtifactStore.class), events, new TaskViewMapper(),
+                mock(PendingDecisionRepository.class), mock(AgentCommandRepository.class),
+                mock(com.caijiatai.procurement.interaction.HumanInteractionRepository.class));
+
+        for (var limit : List.of(99999, 0, -5)) {
+            var payload = Map.<String, Object>of("after_seq", 0L, "limit", limit);
+            var request = new java.util.LinkedHashMap<String, Object>();
+            request.put("correlation_id", "corr-" + limit);
+            request.put("kind", "list_events");
+            request.put("payload", payload);
+            request.put("request_sha256", CanonicalJson.sha256(payload));
+            request.put("signature", MessageCodec.signEnvelope(properties.internalHmacKey(), request));
+            server.onRequest(new ConsumerRecord<>(
+                    KafkaRpcServer.REQUESTS_TOPIC, 0, 0, "corr", CanonicalJson.bytes(request)));
+        }
+
+        verify(events, org.mockito.Mockito.times(3))
+                .findByGlobalSeqGreaterThanOrderByGlobalSeqAsc(anyLong(), pages.capture());
+        assertThat(pages.getAllValues())
+                .extracting(Pageable::getPageSize)
+                .containsExactly(500, 1, 1);
     }
 }

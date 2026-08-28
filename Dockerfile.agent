@@ -6,11 +6,21 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple/
 
 RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ uv==0.8.22
+
+# Run as non-root: the container holds OPENAI/HMAC/internal-token secrets (I-H3).
+RUN groupadd -g 10001 agentharness \
+    && useradd -m -u 10001 -g agentharness agentharness
+
 WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY contracts ./contracts
-RUN uv sync --no-dev
+RUN uv sync --no-dev --frozen
+
+# /data/runtime is a mounted volume; ownership of pre-existing volumes is
+# fixed by a one-time chown (see deploy notes), new volumes inherit this.
+RUN mkdir -p /data/runtime && chown -R 10001:10001 /data /app
+USER 10001:10001
 
 ENTRYPOINT ["/app/.venv/bin/python", "-m", "agentharness.agent_service"]

@@ -2,51 +2,26 @@ openapi: 3.1.0
 info:
   title: Caijiatai Java Procurement Internal API
   version: 0.5.0
-  description: Narrow callback and artifact API used only by the Python Agent service.
+  description: >-
+    Narrow callback and artifact API used only by the Python Agent service.
+    Production transport is Kafka RPC with HMAC envelopes (KafkaRpcServer.java,
+    active when app.agent-mode=kafka): the Python RpcClient publishes a request to
+    topic caijiatai.rpc.requests and receives the reply on caijiatai.rpc.responses,
+    correlated by correlation_id. The request envelope carries
+    {correlation_id, kind, payload, reply_to, request_sha256, signature}; the response
+    envelope carries {correlation_id, status(ok|error), result, error,
+    request_sha256, processed_at, signature}. "signature" is hex HMAC-SHA256 over the
+    canonical JSON of the envelope minus the signature field (MessageCodec); both ends
+    also verify request_sha256 against the canonical payload. The server dispatches on
+    "kind" to exactly the RPC kinds listed under x-rpc-kinds; any other kind fails with
+    unknown_rpc_kind. The HTTP paths below (X-Agent-Internal-Token) are LEGACY:
+    loopback-only compatibility surface; the current Java build serves no HTTP internal
+    plane, and the Python client maps those paths onto the Kafka RPC kinds.
+x-rpc-topics:
+  requests: caijiatai.rpc.requests
+  responses: caijiatai.rpc.responses
+  consumer_group: java-svc-rpc
 x-rpc-kinds:
-  get_reference_prices:
-    description: "K5 历史报价 RAG 数据真源：聚合历史已批准订单成交价，按物料名归一化匹配 + 品类兜底。"
-    request:
-      type: object
-      required: [task_id, item_name, category]
-      properties:
-        task_id: {type: string, pattern: '^[0-9a-f]{32}$'}
-        item_name: {type: string}
-        category: {type: string}
-    response:
-      type: object
-      required: [task_id, item_name, category, records, interval]
-      properties:
-        task_id: {type: string, pattern: '^[0-9a-f]{32}$'}
-        item_name: {type: string}
-        category: {type: string}
-        records:
-          type: array
-          items:
-            type: object
-            required: [task_id, reference, supplier_name, item_name, category, quantity, landed_total, landed_unit, created_at]
-            properties:
-              task_id: {type: string, pattern: '^[0-9a-f]{32}$'}
-              reference: {type: string}
-              supplier_name: {type: string}
-              item_name: {type: string}
-              category: {type: string}
-              quantity: {type: string}
-              landed_total: {type: string}
-              landed_unit: {type: string}
-              created_at: {type: string, format: date-time}
-        interval:
-          oneOf:
-            - type: object
-              required: [p25, p75, p25_unit, p75_unit, count, basis]
-              properties:
-                p25: {type: string}
-                p75: {type: string}
-                p25_unit: {type: string}
-                p75_unit: {type: string}
-                count: {type: integer, minimum: 3}
-                basis: {type: string, const: landed_total_base}
-            - {type: 'null'}
   get_task_context:
     description: Current authoritative task context for the Python Agent.
     request:
@@ -56,7 +31,10 @@ x-rpc-kinds:
         task_id: {type: string, pattern: '^[0-9a-f]{32}$'}
     response: {$ref: '#/components/schemas/TaskAgentContext'}
   get_artifact:
-    description: Original business artifact bytes (base64, up to 2MB).
+    description: >-
+      Original business artifact bytes, base64-encoded in the JSON result
+      ({artifact_id, task_id, filename, content_type, sha256, size_bytes, base64});
+      up to 2MB, larger files fail with artifact_too_large (chunking is a phase-2 item).
     request:
       type: object
       required: [artifact_id]
@@ -64,7 +42,9 @@ x-rpc-kinds:
         artifact_id: {type: string, pattern: '^jb[0-9a-f]{32}$'}
     response: {type: object}
   list_events:
-    description: Runtime events after a global sequence.
+    description: >-
+      Runtime events after a global sequence; result is
+      {events: [{global_seq, task_id, run_id, type, payload, occurred_at}], next_after_seq}.
     request:
       type: object
       required: [after_seq]
@@ -74,12 +54,22 @@ x-rpc-kinds:
     response: {type: object}
 servers:
   - url: http://procurement:8741
+x-legacy-http-plane:
+  description: >-
+    The paths below document the LEGACY loopback-only HTTP+token plane. Each maps to
+    a Kafka RPC kind on the production plane; the current Java build exposes none of
+    them over HTTP, and operation results are delivered on topic caijiatai.results.
+  path_to_rpc_kind:
+    /internal/v1/tasks/{taskId}/context: get_task_context
+    /internal/v1/artifacts/{artifactId}/raw: get_artifact
+    /internal/v1/operations/{operationId}/result: "caijiatai.results topic (agent.result / ai_task.result message)"
 security:
   - InternalToken: []
 paths:
   /internal/v1/tasks/{taskId}/context:
     get:
       operationId: getTaskAgentContext
+      x-legacy: true
       parameters: [{$ref: '#/components/parameters/TaskId'}]
       responses:
         '200':
@@ -91,6 +81,7 @@ paths:
   /internal/v1/artifacts/{artifactId}/raw:
     get:
       operationId: readBusinessArtifact
+      x-legacy: true
       parameters:
         - name: artifactId
           in: path
@@ -106,6 +97,10 @@ paths:
   /internal/v1/operations/{operationId}/result:
     post:
       operationId: submitAgentOperationResult
+      x-legacy: true
+      description: >-
+        On the production plane results are NOT posted over HTTP; the agent publishes
+        a signed agent.result / ai_task.result envelope to topic caijiatai.results.
       parameters:
         - name: operationId
           in: path
@@ -132,6 +127,10 @@ components:
       type: apiKey
       in: header
       name: X-Agent-Internal-Token
+      description: >-
+        LEGACY only, loopback HTTP mode. The production Java-side plane is Kafka RPC
+        with per-envelope HMAC-SHA256 signatures (shared internal HMAC key); see
+        x-rpc-topics and x-rpc-kinds.
   parameters:
     TaskId:
       name: taskId

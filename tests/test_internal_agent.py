@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -7,6 +8,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
+from agentharness.api import internal_agent as internal_agent_module
 from agentharness.api.internal_agent import (
     AgentCommandBody,
     InternalAgentCommands,
@@ -227,6 +229,35 @@ def test_extracts_dynamic_non_packaging_requirement() -> None:
     assert payload["unit"] == "卷"
     assert payload["specifications"]["length"]["value"] == "100"
     assert payload["specifications"]["material"]["value"] == "BOPP"
+
+
+def test_packaging_quantity_keeps_full_integer_precision() -> None:
+    """P-L14: 数量走 Decimal 校验；`float()` 会把 2**53 以上静默舍入。"""
+    payload = extract_requirement(
+        [
+            Message(
+                role=MessageRole.user,
+                content=(
+                    "请采购白色 PE 快递袋，250×350 mm，60 微米，"
+                    "数量 10000000000000001 个，最长交期 15 天，需要开票。"
+                ),
+            )
+        ]
+    )
+
+    assert payload["quantity"] == 10_000_000_000_000_001
+
+
+def test_packaging_quantity_rejects_fractional_quantity() -> None:
+    with pytest.raises(ValueError, match="采购数量必须是整数"):
+        extract_requirement(
+            [
+                Message(
+                    role=MessageRole.user,
+                    content="请采购白色 PE 快递袋，250×350 mm，60 微米，数量 1000.5 个。",
+                )
+            ]
+        )
 
 
 def test_extracts_lead_time_not_exceeding_limit() -> None:
@@ -938,9 +969,18 @@ async def test_human_answer_repairs_checkpoint_without_duplicate_user_message(
 
 
 @pytest.mark.asyncio
-async def test_approval_only_allows_exact_java_binding(tmp_path) -> None:
+async def test_approval_only_allows_exact_java_binding(tmp_path, monkeypatch) -> None:
     harness = Harness(data_dir=tmp_path / "runtime")
     commands = InternalAgentCommands(harness)
+
+    def report_off_loop(_runtime, _run_id):  # type: ignore[no-untyped-def]
+        # P-M6: `build_run_report` walks the whole event log, so it must not run
+        # inside the async command handler (see api/server.py's own rule).
+        with pytest.raises(RuntimeError):
+            asyncio.get_running_loop()
+        return {"evidence_sha256": "a" * 64}
+
+    monkeypatch.setattr(internal_agent_module, "build_run_report", report_off_loop)
     session_id = harness.storage.create_session(title="采购测试")
     run_id = new_id()
     harness.storage.create_run(
@@ -1030,6 +1070,203 @@ async def test_approval_only_allows_exact_java_binding(tmp_path) -> None:
     with pytest.raises(ValueError, match="stale_approval"):
         await commands._approve(body)
     await harness.aclose()
+
+
+INTERNAL_TOKEN = "test-token-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+
+def _command_body(
+    operation_id: str = "55555555-5555-5555-5555-555555555555",
+    operation_type: str = "create_structured",
+    payload: dict | None = None,
+) -> AgentCommandBody:
+    payload = payload or {"task_id": "b" * 32}
+    return AgentCommandBody(
+        operation_id=operation_id,
+        operation_type=operation_type,  # type: ignore[arg-type]
+        aggregate_id="b" * 32,
+        generation=1,
+        expected_task_version=0,
+        payload_sha256=_canonical_sha256(payload),
+        payload=payload,
+    )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_in_flight_command_is_never_dispatched_twice(tmp_path) -> None:
+    """P-M4: terminal-state short-circuiting let an in-flight replay run twice."""
+    harness = Harness(data_dir=tmp_path / "runtime")
+    commands = InternalAgentCommands(harness)
+    body = _command_body()
+    dispatches: list[str] = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_dispatch(command: AgentCommandBody) -> dict:
+        dispatches.append(command.operation_id)
+        started.set()
+        await release.wait()
+        return {"run_id": "a" * 32}
+
+    commands._dispatch = slow_dispatch  # type: ignore[method-assign]
+    first = asyncio.create_task(commands.execute(body))
+    await started.wait()
+
+    replay = await commands.execute(body)
+    assert replay["status"] == "failed"
+    assert "duplicate_command" in (replay["error"] or "")
+    assert dispatches == [body.operation_id], "同一 operation_id 被跑了两次"
+    operations = harness.storage.internal_operations
+    assert operations.get(body.operation_id)["status"] == "executing"
+
+    release.set()
+    done = await first
+    assert done["status"] == "completed"
+    assert operations.get(body.operation_id)["status"] == "completed"
+    await harness.aclose()
+
+
+def test_internal_operation_state_machine_requires_executing(tmp_path) -> None:
+    from agentharness.storage.sqlite import Storage
+
+    store = Storage(tmp_path)
+    try:
+        operations = store.internal_operations
+        operations.accept(
+            operation_id="op",
+            payload_sha256="s" * 64,
+            operation_type="analyze",
+            aggregate_id="agg",
+        )
+        assert not operations.complete("op", {"x": 1})  # 未 claim 不得进终态
+        assert not operations.fail("op", "boom")
+        assert operations.get("op")["status"] == "accepted"
+
+        assert operations.claim("op") is not None
+        assert operations.claim("op") is None  # CAS：第二次认领必须失败
+        assert operations.fail("op", "boom")
+        assert not operations.complete("op", {"x": 1})  # 终态之后不可再迁移
+        assert operations.get("op")["status"] == "failed"
+
+        assert operations.reopen_failed("op", "s" * 64)
+        assert operations.claim("op") is not None
+        # 崩溃遗留的 executing 由进程启动清扫释放，Java 重投才能重新认领
+        assert operations.recover_abandoned_claims() == 1
+        assert operations.get("op")["status"] == "accepted"
+    finally:
+        store.close()
+
+
+def test_run_for_operation_backfills_from_metadata_json(tmp_path) -> None:
+    """P-M5: the crash-recovery scan must read the real `metadata_json` column."""
+    harness = Harness(data_dir=tmp_path / "runtime")
+    try:
+        commands = InternalAgentCommands(harness)
+        body = _command_body()
+        operations = harness.storage.internal_operations
+        operations.accept(
+            operation_id=body.operation_id,
+            payload_sha256=body.payload_sha256,
+            operation_type=body.operation_type,
+            aggregate_id=body.aggregate_id,
+        )
+        session_id = harness.storage.create_session(title="legacy")
+        run_id = new_id()
+        harness.storage.create_run(
+            run_id=run_id,
+            session_id=session_id,
+            root_run_id=run_id,
+            status=RunStatus.require_human,
+            metadata={"operation_id": body.operation_id},
+        )
+
+        found = commands._run_for_operation(body.operation_id)
+
+        assert found is not None
+        assert found["id"] == run_id
+        assert operations.get(body.operation_id)["run_id"] == run_id
+    finally:
+        harness.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_operation_error_text_is_redacted(tmp_path) -> None:
+    """P-M9: 异常文本进 durable operation 之前必须过 redactor。"""
+    harness = Harness(data_dir=tmp_path / "runtime")
+    commands = InternalAgentCommands(harness)
+    secret = "sk-proj-abcdefghij0123456789ABCDEFGHIJ"
+    body = _command_body(operation_id="66666666-6666-6666-6666-666666666666")
+
+    async def boom(_command: AgentCommandBody) -> dict:
+        raise RuntimeError(f"provider rejected {secret}")
+
+    commands._dispatch = boom  # type: ignore[method-assign]
+
+    result = await commands.execute(body)
+
+    assert result["status"] == "failed"
+    assert secret not in result["error"]
+    stored = harness.storage.internal_operations.get(body.operation_id)
+    assert stored is not None
+    assert secret not in str(stored["error"])
+    await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_commands_are_refused_when_execution_is_disabled(tmp_path, monkeypatch) -> None:
+    """P-M7: `execution_enabled` used to be a dead parameter on this surface."""
+    monkeypatch.setenv("AGENT_INTERNAL_TOKEN", INTERNAL_TOKEN)
+    app = create_app(
+        data_dir=tmp_path / "runtime",
+        internal_only=True,
+        execution_enabled=False,
+    )
+    headers = {"X-Agent-Internal-Token": INTERNAL_TOKEN}
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://agent") as client:
+        refused = await client.post(
+            "/internal/v1/commands", headers=headers, json={"operation_id": "x"}
+        )
+        assert refused.status_code == 403
+        assert refused.json()["code"] == "execution_disabled"
+        assert "execution" in refused.json()["message"].lower()
+        runtime = await client.get("/api/runtime", headers=headers)
+        assert runtime.status_code == 200
+        assert runtime.json()["execution_enabled"] is False
+        # 读面与配置面不受执行开关影响
+        assert (await client.get("/api/sessions", headers=headers)).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_loopback_default_still_accepts_commands(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_INTERNAL_TOKEN", INTERNAL_TOKEN)
+    app = create_app(data_dir=tmp_path / "runtime", internal_only=True)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://agent") as client:
+        response = await client.post(
+            "/internal/v1/commands",
+            headers={"X-Agent-Internal-Token": INTERNAL_TOKEN},
+            json={"operation_id": "x"},
+        )
+        runtime = await client.get(
+            "/api/runtime", headers={"X-Agent-Internal-Token": INTERNAL_TOKEN}
+        )
+    assert response.status_code != 403
+    assert runtime.json()["execution_enabled"] is True
+
+
+def test_create_app_rejects_unknown_workspace_root(tmp_path) -> None:
+    with pytest.raises(ValueError, match="not an existing directory"):
+        create_app(data_dir=tmp_path / "runtime", workspace_roots=[tmp_path / "nope"])
+
+
+def test_create_app_wires_workspace_roots_into_the_runtime(tmp_path, workspace) -> None:
+    app = create_app(
+        data_dir=tmp_path / "runtime",
+        workspace_roots=[workspace],
+        internal_only=True,
+    )
+    assert app.state.harness.workspace_roots == [workspace.resolve()]
 
 
 @pytest.mark.asyncio

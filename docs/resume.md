@@ -16,8 +16,7 @@
 4. **正式决定与履约幂等**：Java 在正式决定事务内生成唯一订单，失败整体回滚；`UNIQUE(task_id)` 最终防重。分批收货、对账、付款均以规范化载荷绑定 `Idempotency-Key`，同键重放返回原结果、不同载荷 409。
 5. **业务域建模**：供应商档案（报价/中标按名称关联、删除保护、绩效分实时派生：中标率 0–60 且 <3 次报价折减 0.5、活跃度 min(20, 次数×2)、黑名单封顶 30）；订单/对账状态机 + 分批累计收货与超收校验 + 累计收满自动派生对账单（缺成本拒绝）+ 发货/付款双超时调度（clock 注入可测，审计幂等）。
 6. **统计与可观测**：报表聚合（状态漏斗/月度趋势/中标排行/品类分布 + 成本节约率 `(Σ预算−Σ到货)/Σ预算`，BigDecimal 4 位，无预算任务不计入）；全局审计（V11 迁移：`task_id` 可空 + `business_type/business_id` 通用定位，AuditEvent 工厂重载保持兼容）；看板缓存 TTL 60s + 写操作主动失效。
-7. **历史报价 RAG（软提示）**：Java RPC `get_reference_prices` 聚合历史成交价（p25/p75，不足 3 条返回 null），Python 侧注入参考区间与异常价格风险 flag——只进解释文本与风险标记，不参与比价排序、不排除报价、不影响冻结评测。
-8. **前端与演示**：React 工作台 9 视图（供应商/订单/对账/报表/审计/系统信息/管理驾驶舱待办中心），角色选择器（采购员/审批人/管理员）纯前端演示视角；Playwright headless 全流程实测 45+ 项全绿；演示数据全部标记 synthetic 且用 demo-seed actor 写审计，不混入冻结评测。
+7. **前端与演示**：React 工作台 9 视图（供应商/订单/对账/报表/审计/系统信息/管理驾驶舱待办中心），角色选择器（采购员/审批人/管理员）纯前端演示视角；Playwright headless 全流程实测 45+ 项全绿；演示数据全部标记 synthetic 且用 demo-seed actor 写审计，不混入冻结评测。
 
 **技术栈**：Java 21 · Spring Boot 4.1 · Spring Data JPA · Flyway（V1–V16）· MySQL 8 · Redis（分布式锁/缓存）· Kafka（KRaft + SASL 可选）· Python 3.11（解析/评测）· React 18 + TypeScript · Docker Compose · Playwright
 
@@ -35,8 +34,7 @@ End-to-end procurement loop: sourcing → quote parsing → deterministic compar
 4. **Transactional decision and fulfillment idempotency**: Java creates the unique order in the formal-decision transaction and rolls back atomically on failure; `UNIQUE(task_id)` is the final guard. Receipt, settlement, and payment retries bind canonical payloads to `Idempotency-Key`.
 5. **Domain modeling**: supplier profiles (name-based quote/win association, delete protection, real-time performance score: win-rate 0–60 halved under 3 samples, activity min(20, 2×count), blacklist capped at 30); order/settlement state machines with over-receipt rejection, automatic settlement derivation on receiving (rejected when landed cost missing), dual overdue schedulers (clock-injectable, idempotent audit).
 6. **Insights & observability**: reports (status funnel / monthly trend / supplier ranking / category distribution + cost-saving rate `(Σbudget−Σlanded)/Σbudget`, BigDecimal 4 decimals, budget-less tasks excluded); global audit (V11 migration: nullable `task_id` + `business_type/business_id`, backward-compatible factory overloads); dashboard cache TTL 60s with active eviction.
-7. **Historical-quote RAG (soft hint)**: Java RPC `get_reference_prices` aggregates approved transaction prices (p25/p75, null under 3 samples); Python injects the interval and abnormal-price risk flags — explanation text and risk flags only, never affecting ranking, exclusion, or frozen evaluation metrics.
-8. **Frontend & demo**: React workbench with 11 views (tasks/AI reviews/suppliers/orders/invoices/contracts/reports/audit/system/cockpit), demo role switcher (buyer/approver/admin); isolated headless Playwright checks cover desktop/mobile navigation; all demo data is marked synthetic with demo-seed actor audit and never mixed into frozen evaluation.
+7. **Frontend & demo**: React workbench with 11 views (tasks/AI reviews/suppliers/orders/invoices/contracts/reports/audit/system/cockpit), demo role switcher (buyer/approver/admin); isolated headless Playwright checks cover desktop/mobile navigation; all demo data is marked synthetic with demo-seed actor audit and never mixed into frozen evaluation.
 
 **Stack**: Java 21 · Spring Boot 4.1 · Spring Data JPA · Flyway V1–V16 · MySQL 8 · Redis (lock/cache) · Kafka (KRaft, optional SASL) · Python 3.11 · React 18 + TypeScript · Docker Compose · Playwright
 
@@ -49,5 +47,4 @@ End-to-end procurement loop: sourcing → quote parsing → deterministic compar
 | 状态机引擎解决了什么？ | 手写 if-else 不可扩展；注册式引擎让新业务只声明"从哪+事件→到哪"即可复用校验与审计；任务状态机是历史实现不迁移（如实说明）。 |
 | 绩效分为什么 <3 次报价要折减？ | 最小样本量：1/1 与 9/10 不应同分；黑名单封顶 30 防止"劣币驱逐良币"；实时派生不落表避免口径漂移。 |
 | 成本节约率为什么用预算上限做分母？ | 保守口径（实际节约率不低于此值）；无预算任务不计入保持口径一致；BigDecimal 4 位防浮点误差。 |
-| RAG 怎么保证不污染评测？ | 参考区间是软提示：只进解释文本与风险 flag；冻结评测资源一个字节不动，扩展用例放独立文件；硬规则化与向量库留作后续。 |
 | 超时调度怎么做？ | @Scheduled 60s 扫描 + 7 天阈值 + clock 注入可测 + 审计事件幂等去重（一任务一订单，task_id+event_type 去重）。 |

@@ -90,7 +90,10 @@ public class AgentOutboxWorker {
                         false);
             }
         }
-        for (var command : commands.lockPublishedStale(Instant.now().minusSeconds(120), PageRequest.of(0, 10))) {
+        // J-L2: 120s mis-killed real LLM analyses that legitimately run longer than
+        // two minutes (×4 republish attempts ≈ 8 min total). A 10-minute stale window
+        // keeps result-loss self-healing without failing healthy long runs.
+        for (var command : commands.lockPublishedStale(Instant.now().minusSeconds(600), PageRequest.of(0, 10))) {
             try {
                 if (command.getAttemptCount() >= MAX_DELIVERY_ATTEMPTS) {
                     terminalFailure(command, "Agent 结果等待超时", AiErrorCategory.TRANSPORT, true);

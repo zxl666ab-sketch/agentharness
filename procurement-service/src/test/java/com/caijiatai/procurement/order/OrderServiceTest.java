@@ -34,6 +34,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.Pageable;
 
 class OrderServiceTest {
     private final OrderRepository orders = mock(OrderRepository.class);
@@ -334,5 +336,51 @@ class OrderServiceTest {
                 .satisfies(error -> assertThat(((ApiException) error).code())
                         .isEqualTo("order_requires_landed_cost"));
         verify(orders, never()).saveAndFlush(any());
+    }
+
+    @Test
+    void listNarrowsToTaskScopedFinderWhenTaskIdProvided() {
+        var order = pendingOrder();
+        when(orders.findAllByTaskIdOrderByCreatedAtDesc(eq(task.getId()), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(order)));
+
+        var result = service.list(null, task.getId(), 0, 20);
+
+        assertThat(result).containsKeys("items", "page", "size", "total");
+        assertThat((List<?>) result.get("items")).singleElement().satisfies(raw -> {
+            @SuppressWarnings("unchecked")
+            var item = (Map<String, Object>) raw;
+            assertThat(item).containsEntry("id", order.getId());
+            assertThat(item).containsEntry("task_id", task.getId());
+        });
+        assertThat(result.get("total")).isEqualTo(1L);
+        verify(orders).findAllByTaskIdOrderByCreatedAtDesc(eq(task.getId()), any(Pageable.class));
+        verify(orders, never()).findAllByOrderByCreatedAtDesc(any());
+        verify(orders, never()).findByStatusOrderByCreatedAtDesc(any(), any());
+    }
+
+    @Test
+    void listCombinesTaskIdAndStatusFilters() {
+        when(orders.findByTaskIdAndStatusOrderByCreatedAtDesc(
+                eq(task.getId()), eq("SHIPPED"), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of()));
+
+        var result = service.list("shipped", task.getId(), 0, 20);
+
+        assertThat((List<?>) result.get("items")).isEmpty();
+        verify(orders).findByTaskIdAndStatusOrderByCreatedAtDesc(
+                eq(task.getId()), eq("SHIPPED"), any(Pageable.class));
+        verify(orders, never()).findAllByTaskIdOrderByCreatedAtDesc(any(), any());
+    }
+
+    @Test
+    void listWithoutTaskIdKeepsTheGlobalPagingPath() {
+        when(orders.findAllByOrderByCreatedAtDesc(any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of()));
+
+        service.list(null, null, 0, 20);
+
+        verify(orders).findAllByOrderByCreatedAtDesc(any(Pageable.class));
+        verify(orders, never()).findAllByTaskIdOrderByCreatedAtDesc(any(), any());
     }
 }

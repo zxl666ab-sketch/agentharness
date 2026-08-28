@@ -129,10 +129,11 @@ class EventType(StrEnum):
     span_end = "span_end"
     child_run_started = "child_run_started"
     child_run_ended = "child_run_ended"
+    # `budget_warning` has no emitter yet, but the Web SSE surface
+    # (`web/src/useAgentStream.ts`, `viewModel.ts`) treats it as part of the
+    # event-name contract, so the member stays.
     budget_warning = "budget_warning"
     provider_retry = "provider_retry"
-    redaction = "redaction"
-    heartbeat = "heartbeat"
     error = "error"
 
 

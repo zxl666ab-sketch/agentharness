@@ -189,6 +189,8 @@ class RpcClient:
     def call(
         self, kind: str, payload: dict[str, Any], timeout: float = 10.0
     ) -> dict[str, Any]:
+        # Exactly two attempts: the second one re-raises, so the loop can never
+        # fall through (an exhausted retry loop is the `raise` on attempt 2).
         for attempt in range(2):
             correlation_id = uuid.uuid4().hex
             request_sha = _sha256(payload)
@@ -217,7 +219,6 @@ class RpcClient:
                     logger.warning("RPC %s 超时/失败，重试一次", kind)
                     continue
                 raise
-        raise RuntimeError("RPC retry loop exhausted")
 
     def close(self) -> None:
         self._closed = True
@@ -263,6 +264,13 @@ class AgentService:
             fetch_context=self._fetch_context_rpc,
             fetch_artifact=self._fetch_artifact_rpc,
         )
+        # P-M4: only this process dispatches internal commands, so an
+        # `executing` claim surviving construction belongs to a dead process.
+        # Releasing it here keeps a crash mid-dispatch re-claimable instead of
+        # permanently "duplicate" for every Java redelivery.
+        abandoned = self.harness.storage.internal_operations.recover_abandoned_claims()
+        if abandoned:
+            logger.warning("释放 %d 条崩溃遗留的 executing 命令", abandoned)
         self._unsubscribe_events = self.harness.subscribe_events(
             self._publish_harness_event
         )
@@ -308,6 +316,12 @@ class AgentService:
         }
 
     def _topic_max_global_seq(self) -> int:
+        """Restart seed: durable SQLite watermark or whatever survived in the topic.
+
+        The SQLite watermark already contains every *emitted* seq — heartbeats
+        included (LIVE-1) — so a topic trimmed by ``retention.ms`` can no longer
+        pull the counter below the Java projection's high-water mark.
+        """
         if KafkaConsumer is None:
             return self.harness.storage.max_global_seq()
         consumer = KafkaConsumer(
@@ -333,8 +347,23 @@ class AgentService:
         return maximum
 
     def _next_global_seq(self) -> int:
+        """Take the next durable event seq and persist it (LIVE-1).
+
+        Kafka is the only transport for heartbeats and gateway events, so an
+        in-memory counter alone regresses across restarts once the topic's
+        retention trims them. The persist is a single-row MAX upsert: cheap
+        enough for heartbeat bursts, and idempotent for concurrent writers.
+        """
         with self._seq_lock:
             self._global_seq += 1
+            try:
+                stored = self.harness.storage.bump_global_seq(self._global_seq)
+            except Exception:  # noqa: BLE001 - publishing must not die on a local write
+                logger.exception("global_seq 持久化失败，重启播种可能回退（本次仍继续发布）")
+            else:
+                if stored > self._global_seq:
+                    # Another writer already emitted higher; adopt it, never regress.
+                    self._global_seq = stored
             return self._global_seq
 
     def handle_command(self, envelope: dict[str, Any]) -> None:
@@ -371,6 +400,10 @@ class AgentService:
         except Exception as exc:  # noqa: BLE001 - failure must reach Java
             logger.exception("命令处理失败：%s", operation_id)
             result = _failure_details(exc)
+            # 错误文本会进 Java 投影表并回显到 UI：先过脱敏（P-M9 同源）
+            result["error_message"] = self.harness.redactor.redact_text(
+                str(result["error_message"])
+            )
             status = "failed"
             error = f"{result['error_code']}: {result['error_message']}"
         self._publish_result(operation_id, envelope, status, result, error)

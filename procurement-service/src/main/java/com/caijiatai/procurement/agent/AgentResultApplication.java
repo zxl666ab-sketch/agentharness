@@ -219,7 +219,15 @@ public final class AgentResultApplication {
             parsedQuotes = List.of(result.getOrDefault("quote", result));
         }
         for (var raw : parsedQuotes) {
-            persistQuote(task, map(raw));
+            var quote = map(raw);
+            // J-M4: at-least-once result delivery can replay an import; skip quotes
+            // whose source artifact was already imported for this task (same guard as
+            // applyInteractionAnswer) so retries cannot create duplicate quote rows.
+            var artifactId = text(quote.get("artifact_id"));
+            if (!artifactId.isBlank() && quotes.existsByTaskIdAndSourceArtifactId(task.getId(), artifactId)) {
+                continue;
+            }
+            persistQuote(task, quote);
         }
         var unresolved = quotes.findByTaskIdOrderByCreatedAtAsc(task.getId()).stream()
                 .mapToInt(item -> item.reviewFields().size()).sum();

@@ -38,9 +38,10 @@ public final class OrderController {
     @GetMapping("/orders")
     public Map<String, Object> listOrders(
             @RequestParam(required = false) String status,
+            @RequestParam(name = "task_id", required = false) String taskId,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size) {
-        return orders.list(status, page, size);
+        return orders.list(status, taskId, page, size);
     }
 
     @GetMapping("/orders/{id}")

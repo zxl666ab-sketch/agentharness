@@ -275,9 +275,25 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
   useModalFocus(!!closeTarget, closeDialogRef, closeCancelRef);
   useModalFocus(!!payTarget, payDialogRef, paidAtInputRef);
 
+  // W-M3：聚焦某采购任务时优先用 task_id 让后端精确过滤订单；一旦探测到
+  // 旧后端忽略该参数（返回项里出现别的 task_id），自动回退“取 100 条前端
+  // find”的旧行为。前端 filter 仍作为兜底，保证列表始终只含目标任务。
+  const ordersTaskFilterSupported = useRef(true);
   const ordersQuery = useQuery({
-    queryKey: ["procurement-orders", status],
-    queryFn: () => procurementApi.orders(status || undefined, 0, 100),
+    queryKey: highlightTaskId
+      ? ["procurement-orders", status, "task", highlightTaskId]
+      : ["procurement-orders", status],
+    queryFn: async () => {
+      if (!highlightTaskId || !ordersTaskFilterSupported.current) {
+        return procurementApi.orders(status || undefined, 0, 100);
+      }
+      const filtered = await procurementApi.orders(status || undefined, 0, 100, highlightTaskId);
+      if (!filtered.items.some((item) => item.task_id !== highlightTaskId)) {
+        return filtered;
+      }
+      ordersTaskFilterSupported.current = false;
+      return procurementApi.orders(status || undefined, 0, 100);
+    },
     // 全部终态（CLOSED，付款后才能关闭）后停止轮询
     refetchInterval: (query) =>
       query.state.data?.items?.some((item) => item.status !== "CLOSED") ? 10_000 : false,

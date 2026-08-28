@@ -52,7 +52,7 @@
 | # | 缺口 | 面试杀伤 |
 |---|---|---|
 | A1 | **Agent 含金量没变现**：简历写"解析 + 结构化"，实际持有完整受治理运行时 | 最大浪费，零成本修复 |
-| A2 | RAG 只有确定性检索，无向量检索/混合检索/引用溯源（取舍是对的，但要能讲"什么时候该上向量"） | AI 应用岗必问 |
+| A2 | RAG 已下线；若重启需先恢复确定性检索基础，再谈向量/混合/引用溯源 | 中（可选） |
 | A3 | **无 MCP** | 2026 秋招 AI 应用岗必聊 |
 | A4 | 评测只有字段抽取类，无 LLM-as-Judge / 解释质量评测 | 高频 |
 | A5 | 无 token 成本/延迟/失败率看板（已有 429 退避素材） | 高频 |
@@ -87,7 +87,7 @@
 | 上下文管理 | ContextPlanner token 预算、compaction 压缩 | 无 | 已超标，写进简历 |
 | 安全治理 | sandbox/redaction/allow-once 审批/SSRF | 无 | 已超标 |
 | 评测 | 冻结抽取评测 + 双侧回归 | 无 LLM-as-Judge | P0-4 |
-| RAG | 确定性检索 + 软提示边界（p25/p75、<3 样本 null） | 无向量/混合/引用溯源 | P1-2 |
+| RAG | 已下线（历史报价 RAG 不再提供） | 无；重启需先恢复基础接线 | P1-2（可选重启） |
 | MCP | 无 | **最高** | P1-1 |
 | 多智能体 | 两阶段编排（start_conversation → analyze）已有雏形 | 无显式多 Agent | P2 叙事化即可，不写代码 |
 | 成本/延迟 | 429 Retry-After + 有界退避 | 无成本看板 | P0-2 附带（LLM 成本指标） |
@@ -130,21 +130,20 @@
 
 #### P0-4 评测 CI 化 + LLM-as-Judge（2 天）
 - 冻结评测接进 `.github/workflows/ci.yml`（Java/Python 双侧回归已存在，补评测步骤）。
-- LLM-as-Judge：对"比价解释"质量评分——数字引用一致性（与快照自动比对，硬校验）、风险覆盖完整性、无幻觉；评测集放 `frozen-evaluation-ext.json` 之外的新扩展文件（冻结资源不动）。
+- LLM-as-Judge：对"比价解释"质量评分——数字引用一致性（与快照自动比对，硬校验）、风险覆盖完整性、无幻觉；评测集放现有冻结资源之外的新扩展文件（冻结资源不动）。
 - 交付：评测截图 + judge 评分表 + 与人工评分相关性说明。
 
 ### P1（第 3-4 周）——前沿标签
 
 #### P1-1 MCP 化（5 天，**硬超时：2 天预研，跑不通降级为预研笔记**）
-- 推荐路线：Java 侧暴露 **MCP Server**（Spring AI MCP Server 或手写 JSON-RPC 2.0），把领域能力标准化为 MCP tools（`get_reference_prices`、`query_supplier_profile`、`create_order` 等），任何 MCP 客户端（Claude Desktop / Cursor / 自研 Agent）可接入。
+- 推荐路线：Java 侧暴露 **MCP Server**（Spring AI MCP Server 或手写 JSON-RPC 2.0），把领域能力标准化为 MCP tools（`query_supplier_profile`、`create_order`、`list_events` 等），任何 MCP 客户端（Claude Desktop / Cursor / 自研 Agent）可接入。
 - 叙事："现网 Agent 走 Kafka 保吞吐与治理，MCP 是开放边界——领域能力一次实现，多端复用"；或反向：把 Python Agent 工具层按 MCP 协议暴露。
 - 验收：一个外部 MCP 客户端实测调用 Java 工具成功 + 契约文档 + 截图。
 
-#### P1-2 向量 RAG 升级（5 天）
-- 在现有确定性检索（物料名归一化 + 品类兜底）之上加：本地 embedding（BGE 系）+ 轻量向量检索（FAISS）+ **混合检索 + RRF 融合** + **引用溯源**（每条参考区间带历史记录 ID，前端可点击核对）。
-- 边界冻结：仍是**软提示**，不参与排序、不排除报价、冻结评测不动；确定性检索为兜底，向量检索为召回增强。
-- 评测：检索命中率 + 引用正确率（新扩展评测集）。
-- 面试点："什么时候确定性检索够用、什么时候必须上向量"——这是 RAG 深度题的标准答法。
+#### P1-2 历史报价 RAG（已下线，暂缓）
+- 现状：历史报价 RAG（K5）已随 814a90e 清理 Python 死代码整体下线；Java RPC、扩展评测与相关文档均已移除。
+- 若重启：先恢复 Python `reference_prices.py` 接线与 Java `get_reference_prices` 服务，再评估向量/混合检索与引用溯源（原 P1-2 方案）。
+- 面试点：如需重启，"什么时候确定性检索够用、什么时候必须上向量"仍可作深度题准备。
 
 #### P1-3 深度文档（2 天）
 - `docs/interview-deep-dive.md`：缓存三兄弟治理方案（穿透/击穿/雪崩）、分布式锁续期讨论（看门狗）与"锁过期由乐观锁兜底"的合理简化、Redis 双写一致性取舍、MySQL EXPLAIN 案例（P0-1 的真实优化）、事务消息（outbox）叙事。**文档即面试题库**，不一定要写代码。
@@ -195,7 +194,7 @@
 3. P0-3 虚拟线程实验（Java 21 完整性）
 4. P0-4 评测 CI 化 + LLM-as-Judge（AI 评测完整性）
 5. P1-1 MCP 化（Agent 互操作完整性，硬超时 2 天预研）
-6. P1-2 向量 RAG + 引用溯源（RAG 深度完整性）
+6. P1-2 历史报价 RAG（已下线，暂缓；若重启先恢复基础接线）
 7. P1-3 深度文档（考点完整性：缓存三兄弟/锁续期/EXPLAIN 案例/事务消息）
 8. （可选）多阶段编排显式化——把现有 two-phase 流水线做成显式编排元数据，仅当 P1 有余量
 

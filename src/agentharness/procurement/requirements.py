@@ -560,8 +560,15 @@ def extract_requirement(messages: list[Message]) -> dict[str, Any]:
         missing.append("厚度")
     if missing:
         raise ValueError("、".join(missing) + "无法从采购描述中识别")
-    quantity_decimal = float(quantity_text)
-    if not quantity_decimal.is_integer():
+    # 整数校验走 Decimal（与全文件其余数值路径一致）：`float()` 会把 1e16+1 这类
+    # 大整数舍入成偶数、把 "1e400" 溢出成 inf，从而放过本该拒绝的数量。
+    try:
+        quantity_decimal = Decimal(quantity_text)
+    except InvalidOperation as exc:
+        raise ValueError("采购数量必须是整数") from exc
+    if not quantity_decimal.is_finite() or quantity_decimal < 0:
+        raise ValueError("采购数量必须是整数")
+    if quantity_decimal != quantity_decimal.to_integral_value():
         raise ValueError("采购数量必须是整数")
     quantity = int(quantity_decimal)
     width = size.group(1) if size else "0"

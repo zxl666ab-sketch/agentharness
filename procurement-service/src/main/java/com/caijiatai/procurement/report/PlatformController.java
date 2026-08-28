@@ -74,12 +74,12 @@ public final class PlatformController {
 
     /** P2-1：LLM 网关脱敏状态（来自 Python 心跳快照，回退到 provider_gateway.* 事件）。 */
     private Map<String, Object> gatewayStatus() {
-        var heartbeat = runtimeEvents.findFirstByTypeOrderByGlobalSeqDesc("heartbeat.ping");
-        var gatewayEvents = runtimeEvents.findTop10ByTypeStartingWithOrderByGlobalSeqDesc(
+        // LIVE-1: newest-by-occurredAt, not newest-by-globalSeq (seq counter can regress
+        // after Kafka topic retention pruning; see RuntimeEventRepository).
+        var heartbeat = runtimeEvents.findFirstByTypeOrderByOccurredAtDesc("heartbeat.ping");
+        var gatewayEvents = runtimeEvents.findTop10ByTypeStartingWithOrderByOccurredAtDesc(
                 "provider_gateway.");
-        return GatewayStatusView.from(
-                heartbeat == null ? java.util.Optional.empty() : java.util.Optional.of(heartbeat),
-                gatewayEvents);
+        return GatewayStatusView.from(heartbeat, gatewayEvents);
     }
 
     private Map<String, Object> components() {
@@ -124,8 +124,7 @@ public final class PlatformController {
         value.put("model", provider.equals("openai")
                 ? env.getOrDefault("OPENAI_MODEL", "gpt-4o-mini") : "procurement-fake-v1");
         value.put("api_key_configured", provider.equals("openai") && !apiKey.isBlank());
-        value.put("api_key_preview", apiKey.isBlank() ? null
-                : apiKey.substring(0, Math.min(4, apiKey.length())) + "…");
+        // J-M6: never echo any key material (even a prefix) in GET responses.
         value.put("reasoning_effort", env.getOrDefault(
                 "AGENTHARNESS_PROCUREMENT_REASONING_EFFORT", "none"));
         return value;

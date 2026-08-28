@@ -54,6 +54,19 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
 
 
+def _json_object(value: Any) -> dict[str, Any]:
+    """Decode a persisted `*_json` column into a dict (never raises)."""
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return {}
+    try:
+        decoded = json.loads(value or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
 def _optional_float(value: Any) -> float | None:
     if value is None or value == "":
         return None
@@ -191,8 +204,9 @@ class InternalAgentCommands:
     async def execute(self, body: AgentCommandBody) -> dict[str, Any]:
         if _canonical_sha256(body.payload) != body.payload_sha256:
             raise HTTPException(409, "payload SHA-256 does not match canonical payload")
+        operations = self.harness.storage.internal_operations
         try:
-            existing = self.harness.storage.internal_operations.accept(
+            existing = operations.accept(
                 operation_id=body.operation_id,
                 payload_sha256=body.payload_sha256,
                 operation_type=body.operation_type,
@@ -203,26 +217,44 @@ class InternalAgentCommands:
         if existing["status"] == "completed":
             return self._envelope(body.operation_id, "completed", existing["result"])
         if existing["status"] == "failed":
-            if body.operation_type != "human_interaction_answer" or not self.harness.storage.internal_operations.reopen_failed(
+            if body.operation_type != "human_interaction_answer" or not operations.reopen_failed(
                 body.operation_id, body.payload_sha256
             ):
                 return self._envelope(
                     body.operation_id, "failed", None, str(existing.get("error") or "failed")
                 )
+        # P-M4: claim by compare-and-set, so two deliveries of one operation can
+        # never run their side effects twice (the old check only short-circuited
+        # terminal states and let in-flight replays through).
+        if operations.claim(body.operation_id) is None:
+            current = operations.get(body.operation_id) or {}
+            status = str(current.get("status") or "")
+            if status == "completed":
+                return self._envelope(body.operation_id, "completed", current.get("result"))
+            if status == "failed":
+                return self._envelope(
+                    body.operation_id, "failed", None, str(current.get("error") or "failed")
+                )
+            return self._envelope(
+                body.operation_id,
+                "failed",
+                None,
+                "duplicate_command: this operation is already being executed",
+            )
         try:
             result = await self._dispatch(body)
         except Exception as exc:  # noqa: BLE001 - failure must be durable for idempotency
-            self.harness.storage.internal_operations.fail(body.operation_id, str(exc))
-            return self._envelope(body.operation_id, "failed", None, str(exc))
+            # 异常文本可能带凭据：落库/回传前统一过 redactor（P-M9）。
+            error = self.harness.redactor.redact_text(str(exc)) or exc.__class__.__name__
+            operations.fail(body.operation_id, error)
+            return self._envelope(body.operation_id, "failed", None, error)
         # 统一回写点：把本次 run 绑定到 operation（幂等重放走索引直达）
         dispatch_run_id = (
             str(result.get("run_id") or "") if isinstance(result, dict) else ""
         )
         if dispatch_run_id:
-            self.harness.storage.internal_operations.set_run_id(
-                body.operation_id, dispatch_run_id
-            )
-        self.harness.storage.internal_operations.complete(body.operation_id, result)
+            operations.set_run_id(body.operation_id, dispatch_run_id)
+        operations.complete(body.operation_id, result)
         return self._envelope(body.operation_id, "completed", result)
 
     async def _dispatch(self, body: AgentCommandBody) -> dict[str, Any]:
@@ -660,7 +692,10 @@ class InternalAgentCommands:
                 "status": "resolved",
             }
         )
-        report = build_run_report(self.harness, run_id) or {}
+        # P-M6: build_run_report pulls the whole event log and per-artifact rows
+        # (seconds on a long run) — keep it off the event loop, same as
+        # `api/server.py` does for the report endpoint.
+        report = await asyncio.to_thread(build_run_report, self.harness, run_id) or {}
         return {
             "run_id": run_id,
             "approval": approval,
@@ -891,7 +926,11 @@ class InternalAgentCommands:
             if run is not None:
                 return run
         for run in self.harness.storage.list_runs(limit=500):
-            if (run.get("metadata") or {}).get("operation_id") == operation_id:
+            # P-M5: 行里只有 `metadata_json`（`_decorate_run_observability` 只补
+            # actor/depth/child_count/user_summary），读不存在的 `metadata` 键
+            # 会让这条崩溃恢复回退永远匹配不上。
+            metadata = _json_object(run.get("metadata_json"))
+            if metadata.get("operation_id") == operation_id:
                 self.harness.storage.internal_operations.set_run_id(
                     operation_id, str(run["id"])
                 )
@@ -977,9 +1016,15 @@ def internal_agent_router(harness: Harness) -> APIRouter:
         value = harness.storage.internal_operations.get(operation_id)
         if value is None:
             raise HTTPException(404, "operation not found")
+        status = str(value["status"])
+        if status == "executing":
+            # `executing` is the internal claim state (P-M4); the documented
+            # wire vocabulary is [accepted, completed, failed], and callers poll
+            # until it leaves the non-terminal bucket.
+            status = "accepted"
         return InternalAgentCommands._envelope(
             operation_id,
-            str(value["status"]),
+            status,
             value.get("result"),
             value.get("error"),
         )
@@ -1007,14 +1052,27 @@ def _env_api_key() -> str:
     return (os.environ.get("OPENAI_API_KEY") or "").strip()
 
 
-def _sanitize_for_disk(config: dict[str, Any]) -> dict[str, Any]:
-    """落盘前脱敏：与 env 相同的 api_key 不写明文，只存引用标记。
+def _looks_like_api_key(value: str) -> bool:
+    """Key-shaped: long enough to be a real credential, or an `sk-` prefixed one.
 
-    旧格式（文件里直接存 key 字符串）仍可读取；下次写入时自动归一化为引用形态。
+    P-M9: 只有「与 env 完全相同」才脱敏是不够的——用户手输的自定义 key、旧格式
+    残留的明文 key 同样会落盘（Windows 上 chmod 600 还是不生效）。任何看起来像
+    密钥的值都按 env 引用形态存储。
+    """
+    if not value:
+        return False
+    return value.startswith("sk-") or len(value) >= 20
+
+
+def _sanitize_for_disk(config: dict[str, Any]) -> dict[str, Any]:
+    """落盘前脱敏：密钥形状的 api_key 一律只存 env 引用标记，绝不写明文。
+
+    旧格式（文件里直接存 key 字符串）仍可读取；下次写入时自动归一化为引用形态，
+    真实 key 需要回到 `.env`（`OPENAI_API_KEY`）里配置。
     """
     stored = dict(config)
     api_key = str(stored.get("api_key") or "").strip()
-    if api_key and api_key == _env_api_key():
+    if api_key and (api_key == _env_api_key() or _looks_like_api_key(api_key)):
         stored["api_key"] = None
         stored["api_key_from_env"] = True
     else:

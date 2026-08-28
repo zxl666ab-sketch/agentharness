@@ -72,29 +72,34 @@ class MaintenanceOps:
             if str(row["id"]) not in corpus and str(row["sha256"]) not in corpus
         ]
 
+    def _gc_candidates_unlocked(self, cutoff: str) -> list[str]:
+        """Runs that are currently eligible for collection (writer connection)."""
+        rows = self._conn.execute(
+            """SELECT id FROM runs
+               WHERE status IN ('completed', 'failed', 'cancelled', 'interrupted')
+                 AND COALESCE(finished_at, updated_at, created_at) < ?
+                 AND id NOT IN (SELECT run_id FROM run_pins)
+                 AND id NOT IN (
+                     SELECT run_id FROM run_leases WHERE expires_at > ?
+                 )
+               ORDER BY created_at ASC""",
+            (cutoff, _utcnow()),
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
     def plan_gc(self, *, older_than_days: int = 30) -> dict[str, Any]:
         if older_than_days < 0:
             raise ValueError("older_than_days must be non-negative")
         cutoff = (datetime.now(UTC) - timedelta(days=older_than_days)).isoformat()
         with self._lock:
-            run_rows = self._conn.execute(
-                """SELECT id FROM runs
-                   WHERE status IN ('completed', 'failed', 'cancelled', 'interrupted')
-                     AND COALESCE(finished_at, updated_at, created_at) < ?
-                     AND id NOT IN (SELECT run_id FROM run_pins)
-                     AND id NOT IN (
-                         SELECT run_id FROM run_leases WHERE expires_at > ?
-                     )
-                   ORDER BY created_at ASC""",
-                (cutoff, _utcnow()),
-            ).fetchall()
+            run_ids = self._gc_candidates_unlocked(cutoff)
             orphan_artifacts = self._orphan_artifacts_unlocked()
         return {
             "dry_run": True,
             "older_than_days": older_than_days,
             "cutoff": cutoff,
-            "run_ids": [str(row[0]) for row in run_rows],
-            "run_count": len(run_rows),
+            "run_ids": run_ids,
+            "run_count": len(run_ids),
             "orphan_artifact_ids": [str(row["id"]) for row in orphan_artifacts],
             "orphan_artifact_count": len(orphan_artifacts),
             "orphan_artifact_bytes": sum(
@@ -104,11 +109,22 @@ class MaintenanceOps:
 
     def apply_gc(self, *, older_than_days: int = 30) -> dict[str, Any]:
         plan = self.plan_gc(older_than_days=older_than_days)
-        run_ids = list(plan["run_ids"])
+        planned = list(plan["run_ids"])
         artifact_paths: list[str] = []
+        run_ids: list[str] = []
+        skipped: list[str] = []
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                if planned:
+                    # P-L15: the plan was computed outside this transaction, so a
+                    # run that got pinned (or leased by a live worker) in the
+                    # meantime must survive. Re-evaluate the eligibility
+                    # predicate under the write lock — the plan is a candidate
+                    # list, never an authorization to delete.
+                    still_eligible = set(self._gc_candidates_unlocked(plan["cutoff"]))
+                    run_ids = [run_id for run_id in planned if run_id in still_eligible]
+                    skipped = [run_id for run_id in planned if run_id not in still_eligible]
                 if run_ids:
                     placeholders = ",".join("?" for _ in run_ids)
                     self._conn.execute(
@@ -172,11 +188,23 @@ class MaintenanceOps:
             **plan,
             "dry_run": False,
             "deleted_runs": len(run_ids),
+            # P-L15: candidates that became pinned/leased after planning.
+            "skipped_run_ids": skipped,
+            "skipped_run_count": len(skipped),
             "deleted_artifacts": len(artifact_paths),
             "deleted_artifact_files": removed_files,
         }
 
     def compact(self) -> dict[str, int]:
+        """VACUUM the database. Explicit operator action only.
+
+        Caveat (P-L15): ``reset_readers()`` closes *every* per-thread read-only
+        connection in this process, including one another thread is mid-query
+        on — the holder then sees a "cannot use a closed database" error. This
+        is acceptable today because no HTTP entrypoint calls ``compact()`` (it
+        is reachable only from explicit maintenance code); wiring it to an
+        endpoint would first require quiescing readers, not just closing them.
+        """
         now = _utcnow()
         with self._lock:
             active = int(

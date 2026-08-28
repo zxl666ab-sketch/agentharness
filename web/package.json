@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "tsc -p tsconfig.app.json --noEmit && vite build",
     "lint": "eslint . --ext ts,tsx --max-warnings 0",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
     "test": "vitest run",
     "preview": "vite preview"
   },

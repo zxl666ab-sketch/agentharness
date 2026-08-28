@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 import { procurementApi } from "./api";
+import { AgentOfflineNotice } from "./AgentOfflineNotice";
 import { isViewVisible, type DemoRole } from "./roles";
 import type { AiTaskView, ProcurementRequestSummary, ReviewView } from "./types";
 import type { TaskFilter, WorkbenchView } from "./workbenchUrl";
@@ -26,6 +27,8 @@ type Props = {
   aiTasks: AiTaskView[];
   reviews: ReviewView[];
   loading: boolean;
+  /** LIVE-1：Agent 不可用时在驾驶舱顶部显示可关闭的降级提示条。 */
+  agentDown?: boolean;
   onOpenTask: (id: string) => void;
   onOpenTasks: (filter: TaskFilter) => void;
   onOpenCreate?: () => void;
@@ -44,6 +47,7 @@ export function WorkbenchHome({
   aiTasks,
   reviews,
   loading,
+  agentDown = false,
   onOpenTask,
   onOpenTasks,
   onOpenCreate,
@@ -90,6 +94,8 @@ export function WorkbenchHome({
 
   return (
     <div className="proc-home flex flex-col gap-6 p-6 max-w-7xl mx-auto w-full">
+      {/* LIVE-1：Agent 离线降级提示（可关闭），避免用户只看到"处理中"。 */}
+      {agentDown ? <AgentOfflineNotice /> : null}
       {/* 顶部驾驶舱 KPI 指标看板 */}
       <section className="proc-cockpit-stats grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" aria-label="核心指标看板">
         <button

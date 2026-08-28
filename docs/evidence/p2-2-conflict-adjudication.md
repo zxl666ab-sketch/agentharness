@@ -18,7 +18,7 @@
 - ✅ 导出脚本可重跑（单测：两次 `build_export` 的 items 内容一致；稳定排序验证；`exported_at` 元数据除外）
 - ✅ `frozen-evaluation-corrections.json` 已按当前演示数据生成并提交（当前 0 条修正记录；有新修正后重跑脚本更新）
 - ✅ README「冲突裁决与修正回灌（P2-2）」说明回灌流程
-- ✅ 冻结资源（`frozen-evaluation.json` / `frozen-evaluation-ext.json` / 黄金契约）零改动
+- ✅ 冻结资源（`frozen-evaluation.json` / 黄金契约）零改动
 
 ## 数字变化
 

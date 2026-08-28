@@ -501,12 +501,14 @@ describe("Adversarial Stress Verification: 8 Business Centers", () => {
         notes: "战略供应商",
         quote_count: 12,
         win_count: 8,
+        win_rate: "0.667",
         performance: {
           score: "88.5",
           level: "优质供应商",
           win_rate_score: "50",
           activity_score: "20",
           status_score: "18.5",
+          base_score: "0",
         },
         created_at: "2026-08-01T00:00:00Z",
         updated_at: "2026-08-20T00:00:00Z",
@@ -514,6 +516,9 @@ describe("Adversarial Stress Verification: 8 Business Centers", () => {
 
       const profile: SupplierProfile = {
         ...supplier,
+        // 后端 profile 视图把计数序列化为字符串（与列表视图不同口径）。
+        quote_count: String(supplier.quote_count),
+        win_count: String(supplier.win_count),
         win_rate: "0.667",
         items: ["瓦楞纸箱", "封箱胶带"],
         recent_quotes: [

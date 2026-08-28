@@ -8,12 +8,6 @@ import type { ProcurementRequest } from "./types";
 
 type Props = { request: ProcurementRequest };
 
-async function checkpoint(runId: string): Promise<Record<string, unknown> | null> {
-  const response = await fetch(`/api/runs/${runId}/checkpoint`);
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-  return response.json() as Promise<Record<string, unknown> | null>;
-}
-
 function percent(value: number) {
   return `${(value * 100).toFixed(value === 1 ? 0 : 1)}%`;
 }
@@ -27,7 +21,8 @@ export function AuditView({ request }: Props) {
   });
   const checkpointQuery = useQuery({
     queryKey: ["run-checkpoint", runId],
-    queryFn: () => checkpoint(runId!),
+    // L1：走共享 client（统一网络错误处理），不再裸 fetch。
+    queryFn: () => api.checkpoint(runId!),
     enabled: !!runId,
   });
   const evaluation = useQuery({

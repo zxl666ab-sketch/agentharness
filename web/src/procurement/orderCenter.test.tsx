@@ -150,6 +150,13 @@ function pressEscape() {
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
 }
 
+/** 等 fetch 链路与 react-query 通知调度（含宏任务）真正落定。 */
+async function settleFetch(times = 6) {
+  for (let i = 0; i < times; i += 1) {
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 0)); });
+  }
+}
+
 afterEach(() => {
   document.body.innerHTML = "";
   vi.unstubAllGlobals();
@@ -439,5 +446,80 @@ describe("OrderCenter operations", () => {
     expect((dialog.querySelector('input[type="number"]') as HTMLInputElement).value).toBe("0.2");
     expect(dialog.textContent).toContain("剩余数量 0.2");
     await act(async () => root.unmount());
+  });
+});
+
+describe("OrderCenter task focus via task_id filter (W-M3)", () => {
+  const foreignOrder = order({ id: "order-foreign", task_id: "task-9", order_no: "PO-FOREIGN" });
+
+  it("asks the backend for exactly the focused task when task_id is honored", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.includes("task_id=task-1")) {
+        return jsonResponse({ items: [shippedOrder, receivedOrder], page: 0, size: 100, total: 2 });
+      }
+      if (url.includes("/orders?")) {
+        return jsonResponse({ items: [shippedOrder, receivedOrder, foreignOrder], page: 0, size: 100, total: 3 });
+      }
+      return jsonResponse({ items: [], page: 0, size: 100, total: 0 });
+    }));
+    const host = document.createElement("div");
+    document.body.append(host);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <OrderCenter highlightTaskId="task-1" onBackToTask={() => undefined} />
+        </QueryClientProvider>,
+      );
+    });
+    await settleFetch();
+
+    const orderUrls = urls.filter((url) => url.includes("/orders?"));
+    expect(orderUrls[0]).toContain("task_id=task-1");
+    // 服务端已正确过滤：不需要再取全量 100 条
+    expect(orderUrls.filter((url) => !url.includes("task_id="))).toHaveLength(0);
+    expect(host.textContent).toContain("PO-TEST-SHIP");
+    expect(host.textContent).not.toContain("PO-FOREIGN");
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
+  it("falls back to the paged fetch when the backend ignores task_id", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      // 旧后端：忽略 task_id，原样返回混合任务的全部订单
+      if (url.includes("/orders?")) {
+        return jsonResponse({ items: [shippedOrder, receivedOrder, foreignOrder], page: 0, size: 100, total: 3 });
+      }
+      return jsonResponse({ items: [], page: 0, size: 100, total: 0 });
+    }));
+    const host = document.createElement("div");
+    document.body.append(host);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <OrderCenter highlightTaskId="task-1" onBackToTask={() => undefined} />
+        </QueryClientProvider>,
+      );
+    });
+    await settleFetch();
+
+    // 先带 task_id 探测；发现返回项含其他 task_id 后回退取 100 条。
+    const orderUrls = urls.filter((url) => url.includes("/orders?"));
+    expect(orderUrls[0]).toContain("task_id=task-1");
+    expect(orderUrls.some((url) => !url.includes("task_id="))).toBe(true);
+    // 前端过滤兜底仍生效：只展示目标任务订单。
+    expect(host.textContent).toContain("PO-TEST-SHIP");
+    expect(host.textContent).not.toContain("PO-FOREIGN");
+    await act(async () => root.unmount());
+    host.remove();
   });
 });

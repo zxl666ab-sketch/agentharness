@@ -177,18 +177,39 @@ def test_model_config_legacy_raw_key_still_loads(tmp_path, monkeypatch) -> None:
     )
     loaded = _load_model_config(tmp_path)
     assert loaded["api_key"] == "sk-legacy-key-1234567890"
-    # 再次写入时归一化：非 env key 保留原值但标记关闭
+    # 再次写入时归一化（P-M9）：旧格式里的明文 key 不再保留，只留 env 引用标记
     _write_model_config(tmp_path, {"provider": "openai", "model": "legacy"})
     raw = path.read_text(encoding="utf-8")
     assert "api_key_from_env" in raw
+    assert "sk-legacy-key-1234567890" not in raw
+    assert '"api_key_from_env": true' in raw
 
 
-def test_write_model_config_explicit_custom_key_kept_with_warning_free_behavior(
+def test_write_model_config_key_shaped_custom_key_never_reaches_disk(
     tmp_path, monkeypatch
 ) -> None:
+    """P-M9：任何「看起来像密钥」的 api_key 都只落 env 引用标记，明文绝不写盘。
+
+    旧断言（自定义 key 明文落盘 + 0600 兜底）已被推翻：Windows 上 chmod 600
+    不生效，而注释承诺的是「明文密钥绝不落盘」。
+    """
     monkeypatch.setenv("OPENAI_API_KEY", ENV_KEY)
     custom = "sk-custom-explicit-key-1234567890abcdef"
     _write_model_config(tmp_path, {"provider": "openai", "model": "m", "api_key": custom})
     raw = _model_config_path(tmp_path).read_text(encoding="utf-8")
-    assert custom in raw  # 用户显式输入的自定义 key 仍落盘（权限已收紧 0600）
+    assert custom not in raw
+    assert ENV_KEY not in raw
+    assert '"api_key_from_env": true' in raw
+    # 归一化后运行期回落到 env key（安全优先于便利：真实 key 需要配在 .env）
+    assert _load_model_config(tmp_path)["api_key"] == ENV_KEY
+
+
+def test_write_model_config_non_secret_placeholder_still_persists(
+    tmp_path, monkeypatch
+) -> None:
+    """只有密钥形状的值才被改写；短占位串保持原样（引用标记关闭）。"""
+    monkeypatch.setenv("OPENAI_API_KEY", ENV_KEY)
+    _write_model_config(tmp_path, {"provider": "openai", "model": "m", "api_key": "inline"})
+    raw = _model_config_path(tmp_path).read_text(encoding="utf-8")
+    assert '"api_key": "inline"' in raw
     assert '"api_key_from_env": false' in raw

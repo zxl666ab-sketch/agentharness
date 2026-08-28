@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -43,6 +44,9 @@ class SemanticCache:
         )
         self._clock = clock
         self._stats = {"hits": 0, "misses": 0, "puts": 0, "errors": 0}
+        # M3（2026-08-28 旧账）：quote 解析走 `asyncio.to_thread` 并发，心跳/评测
+        # 线程读快照——`dict[k] += 1` 不是原子操作，无锁会丢计数。
+        self._stats_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 构造
@@ -99,11 +103,18 @@ class SemanticCache:
     # 可观测
     # ------------------------------------------------------------------
 
-    def stats(self) -> dict[str, int]:
-        return dict(self._stats)
-
     def enabled(self) -> bool:
         return self._store is not None
+
+    def stats(self) -> dict[str, int]:
+        """Consistent snapshot of the counters (M3: lock-guarded read)."""
+        with self._stats_lock:
+            return dict(self._stats)
+
+    def _count(self, *keys: str) -> None:
+        with self._stats_lock:
+            for key in keys:
+                self._stats[key] += 1
 
     # ------------------------------------------------------------------
     # 内部
@@ -111,19 +122,19 @@ class SemanticCache:
 
     def _get(self, scope: str, sha256: str, version: str) -> Any:
         if self._store is None:
-            self._stats["misses"] += 1
+            self._count("misses")
             return None
         try:
             raw = self._store.get(self._key(scope, sha256, version))
             if raw is None:
-                self._stats["misses"] += 1
+                self._count("misses")
                 return None
-            self._stats["hits"] += 1
-            return json.loads(raw)
+            value = json.loads(raw)
         except Exception:  # noqa: BLE001 - 缓存故障按 miss 处理
-            self._stats["errors"] += 1
-            self._stats["misses"] += 1
+            self._count("errors", "misses")
             return None
+        self._count("hits")
+        return value
 
     def _put(self, scope: str, sha256: str, version: str, value: Any) -> None:
         if self._store is None:
@@ -134,9 +145,10 @@ class SemanticCache:
                 json.dumps(value, ensure_ascii=False, default=str),
                 ex=self._ttl_s,
             )
-            self._stats["puts"] += 1
         except Exception:  # noqa: BLE001 - 缓存故障不阻断业务
-            self._stats["errors"] += 1
+            self._count("errors")
+            return
+        self._count("puts")
 
     def _key(self, scope: str, sha256: str, version: str) -> str:
         return f"{self.KEY_PREFIX}:{scope}:{sha256}:{version}"

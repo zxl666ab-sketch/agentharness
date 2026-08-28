@@ -18,7 +18,9 @@ case "$PROCUREMENT_DATABASE_USER" in
 esac
 valid_secret "$PROCUREMENT_DATABASE_PASSWORD" || { echo "PROCUREMENT_DATABASE_PASSWORD must be a 32+ character safe secret" >&2; exit 1; }
 
-mysql --protocol=socket -uroot "-p$MYSQL_ROOT_PASSWORD" <<SQL
+# MYSQL_PWD avoids putting the root password in the process argv (visible via
+# ps inside the container).
+MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --protocol=socket -uroot <<SQL
 CREATE USER IF NOT EXISTS '$PROCUREMENT_DATABASE_USER'@'%' IDENTIFIED BY '$PROCUREMENT_DATABASE_PASSWORD';
 ALTER USER '$PROCUREMENT_DATABASE_USER'@'%' IDENTIFIED BY '$PROCUREMENT_DATABASE_PASSWORD';
 GRANT ALL PRIVILEGES ON caijiatai_business.* TO '$PROCUREMENT_DATABASE_USER'@'%';

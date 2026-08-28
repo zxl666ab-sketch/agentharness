@@ -38,28 +38,38 @@ public class KafkaEventConsumer {
         var taskId = text(envelope.get("task_id"));
         var runId = text(envelope.get("run_id"));
         var payload = envelope.get("payload");
-        if (payload instanceof java.util.Map<?, ?> raw) {
-            @SuppressWarnings("unchecked")
-            var payloadMap = (java.util.Map<String, Object>) raw;
-            var payloadSha = text(envelope.get("payload_sha256"));
-            if (!MessageCodec.verifyEnvelope(hmacKey, envelope)
-                    || !payloadSha.equals(CanonicalJson.sha256(payloadMap))) {
-                log.warn("事件签名校验失败：{}", eventType);
-                return;
-            }
-            if (events.existsByGlobalSeq(globalSeq)) {
-                return;
-            }
-            events.save(RuntimeEvent.create(
-                    globalSeq,
-                    taskId.isBlank() ? null : taskId,
-                    runId.isBlank() ? null : runId,
-                    eventType,
-                    payloadMap,
-                    Instant.parse(text(envelope.getOrDefault("occurred_at", Instant.now().toString())))));
-            if ("ai_task.step".equals(eventType)) {
-                aiTasks.applyStepEvent(envelope);
-            }
+        if (!(payload instanceof java.util.Map<?, ?> raw)) {
+            // J-M7: previously dropped without a trace (e.g. heartbeat.ping with null
+            // payload left /api/runtime permanently 503 with no diagnostic).
+            log.warn("事件 payload 非对象，已丢弃：type={}", eventType);
+            return;
+        }
+        @SuppressWarnings("unchecked")
+        var payloadMap = (java.util.Map<String, Object>) raw;
+        var payloadSha = text(envelope.get("payload_sha256"));
+        if (!MessageCodec.verifyEnvelope(hmacKey, envelope)
+                || !payloadSha.equals(CanonicalJson.sha256(payloadMap))) {
+            log.warn("事件签名校验失败：{}", eventType);
+            return;
+        }
+        // LIVE-1: parse occurred_at first and make it part of the dedup key, so a
+        // regressed global_seq (topic pruning + counter re-seeding) cannot silently
+        // discard genuinely new events that collide with stale sequence numbers.
+        var occurredAt = Instant.parse(
+                text(envelope.getOrDefault("occurred_at", Instant.now().toString())));
+        if (events.existsByGlobalSeqAndOccurredAt(globalSeq, occurredAt)) {
+            log.warn("重复事件已跳过：global_seq={} type={}", globalSeq, eventType);
+            return;
+        }
+        events.save(RuntimeEvent.create(
+                globalSeq,
+                taskId.isBlank() ? null : taskId,
+                runId.isBlank() ? null : runId,
+                eventType,
+                payloadMap,
+                occurredAt));
+        if ("ai_task.step".equals(eventType)) {
+            aiTasks.applyStepEvent(envelope);
         }
     }
 

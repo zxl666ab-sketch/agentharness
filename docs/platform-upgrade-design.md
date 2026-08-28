@@ -60,13 +60,12 @@
 | K2 | 采购订单状态机（待发货→已发货→已收货→已关闭）+ 乐观锁防并发 + 超时调度（未发货逾期提醒） | 状态机设计、并发控制、定时任务 | 1 周 |
 | K3 | 统计报表：状态漏斗/月度趋势/供应商中标排行/品类分布/AI 评测指标 + **成本节约率** | 聚合查询、指标口径、BigDecimal 精度 | 3 天 |
 | K4 | Redis 分布式锁（审批防并发重复提交）+ 比价快照/看板缓存 | 分布式锁、缓存一致性、缓存三兄弟 | 2 天 |
-| K5 | 历史报价 RAG 知识库：Python 比价时参考历史成交价区间（Java 侧 RPC 聚合历史中标价，Python 侧注入参考区间与异常检测） | RAG、检索增强、跨语言 RPC | 1 周 |
 | K6 | 审计日志全局页 + 系统信息页（版本/组件/解析器/规则集/模型脱敏状态） | 可观测性、运维 | 2 天 |
 | K7 | 简历 + README + GitHub 叙事重构（面试官视角架构图） | 表达 | 1 天 |
 | K8 | **对账与付款**：收货后生成对账单（未对账→已对账→已付款），付款记录与审计 | 业务全链路、状态机复用、金额精度 | 3 天 |
 | K9 | **多角色视角 + 待办中心**：采购员/审批人/管理员三种演示角色切换，待办中心按角色聚合（待我审批/待收货/逾期订单/AI 异常）；工作台升级为**管理驾驶舱**（成本节约率/待办/风险一屏概览） | 角色与视图设计、需求分析 | 3 天 |
 
-**明确不做**（防止范围蔓延）：不做登录/权限体系（本地单机工具，角色为演示视角，README 如实说明）；不改 Python 解析核心算法；不引入向量数据库（Milvus 可作为 K5 的后续扩展，先做确定性检索）；不做多业务 OA 平台（报销/合同等业务线本期不做，仅保留"平台可扩展"叙事）。
+**明确不做**（防止范围蔓延）：不做登录/权限体系（本地单机工具，角色为演示视角，README 如实说明）；不改 Python 解析核心算法；不引入向量数据库；不做多业务 OA 平台（报销/合同等业务线本期不做，仅保留"平台可扩展"叙事）。
 
 ## 4. 关键设计冻结（Agent 施工时不得偏离）
 
@@ -240,14 +239,9 @@ else:
 - 不新增依赖，用现有 Spring Data Redis 客户端 + `StringRedisTemplate`；**禁用**则回退无锁路径（与 NoopTaskContextCache 同思路）
 - **面试叙事（三层防护各司其职）**：幂等表防**重放**（同一请求重复提交返回原结果）；乐观锁防**版本覆盖**（任务被修正后旧审批失效）；分布式锁防**并发双写**（两个不同请求同时为同一任务发起 pending_decision）。面试被问"已有幂等为什么还要锁"时按此三层回答
 
-### 4.10 历史报价 RAG（K5，冻结设计）
+### 4.10 历史报价 RAG（K5，已下线）
 
-- **Java 侧**（数据真源）：新增 RPC 请求类型 `get_reference_prices`，入参 task_id/物料名/品类；聚合历史已批准报价（decision=approved 且 quote 关联），按物料名/品类相似度匹配，输出：最近 N 条历史成交记录 + 参考区间（p25/p75，BigDecimal）；**历史记录不足 3 条时返回 null 区间**（样本不足不下结论）
-- **Python 侧**：在比价分析步骤通过现有 RPC 通道调用，把参考区间注入比价解释（如"该报价低于历史成交价中位数 40%，标记异常低价"）；结果以**新增可选字段**下发（`reference_price_interval`），Java 侧向后兼容（未知字段忽略）
-- **影响等级冻结（对抗审查新增 D3）**：参考区间是**软提示**——只进入比价解释文本与风险 flag，**不参与确定性比价排序、不排除报价、不影响冻结评测指标**；硬规则化留给后续版本（README 注明）
-- 契约：contracts/ 双语言 OpenAPI 同步更新 + 黄金测试回归（沿用现有契约机制，**禁止**破坏既有字段）
-- **评测（D3 修订）**：**冻结评测资源（frozen-evaluation.json 等）一个字节不动**；新增用例放独立扩展文件 `frozen-evaluation-ext.json`（标注 v1 扩展，仅覆盖参考区间提示格式），避免"冻结"名存实亡
-- 检索先用确定性规则（物料名归一化匹配 + 品类兜底），不引入向量库；Milvus/BGE 作为 README 中"后续扩展"一句话提及
+> 历史报价 RAG 已随 814a90e 清理 Python 死代码而整体下线：`get_reference_prices` RPC、`ReferencePriceService`、`frozen-evaluation-ext.json` 与相关文档均已移除；当前项目不再提供历史成交参考区间软提示。
 
 ### 4.10 前端导航与页面（K1/K2/K3/K6/K8/K9，冻结设计）
 
@@ -292,7 +286,7 @@ GET  /api/procurement/platform                              # K6 系统信息
 > 施工纪律：每个阶段结束跑全套测试 + 提交 commit；任何阶段未验收不得进入下一阶段。
 > 全局纪律（每个阶段都适用）：① 新接口必须同步 `contracts/procurement-workbench-openapi.yaml` + `procurement-workbench.schema.json` + 黄金契约，跑 `npm test`（contracts.test.ts）与 `FrozenComparisonContractTest`；② 前端改动后必须 `npm run build` 并同步 Java static bundle，跑 `scripts/check_web_build_determinism.py`；③ Java 集成测试依赖 Testcontainers（Docker Desktop 需可用）；④ 演示数据一律标记 synthetic，不得混入冻结评测。
 
-**阶段总览（估算总工作量 4~5 周，按每天 3~4 小时折算约 6~8 周；K1/K2/K8/K9 先行的理由：业务闭环完整度是"管理系统感"的核心，传统 Java 项目含金量考点优先；K5 RAG 契约风险最高放后面）**
+**阶段总览（估算总工作量 4~5 周，按每天 3~4 小时折算约 6~8 周；K1/K2/K8/K9 先行的理由：业务闭环完整度是"管理系统感"的核心，传统 Java 项目含金量考点优先）**
 
 | 阶段 | 内容 | 工作量 |
 |---|---|---|
@@ -301,15 +295,14 @@ GET  /api/procurement/platform                              # K6 系统信息
 | 2 | 订单状态机 + 对账付款 + 超时调度（K2+K8） | 1 周 |
 | 3 | 报表 + 成本节约率 + 审计页 + 系统信息 + 驾驶舱待办中心（K3+K6+K9 后半） | 3 天 |
 | 4 | Redis 分布式锁 + 缓存治理（K4） | 2 天 |
-| 5 | 历史报价 RAG（K5） | 1 周 |
-| 6 | 简历 + README + GitHub 叙事重构（K7） | 1 天 |
+| 5 | 简历 + README + GitHub 叙事重构（K7） | 1 天 |
 
 ### 阶段 0：基线修复（对抗式审查新增，必须先做）
 
 **问题背景**：审查发现当前 master 存在三项阻断性隐患，任何后续阶段都会踩到：
 1. **Java 编译失败**：遗留 `management/ProcurementInsightsController.java` 与 `ProcurementInsightsService.java` 带 UTF-8 BOM（`\ufeff`），`mvnw test-compile` 直接报错
 2. **路由冲突**：遗留 `ProcurementInsightsController` 已映射 `GET /api/procurement/suppliers`、`/orders`、`/audit-events`，与 K1/K2 新控制器路径冲突（Spring 启动 ambiguous mapping）
-3. **演示数据缺失**：`DemoSeedRunner` 只把任务 seed 到 READY 状态，**不生成 approved 决策**——导致 K2 订单派生、K3 成本节约率、K5 历史成交价在 demo 模式下全部无数据，验收截图会是空的
+3. **演示数据缺失**：`DemoSeedRunner` 只把任务 seed 到 READY 状态，**不生成 approved 决策**——导致 K2 订单派生、K3 成本节约率在 demo 模式下全部无数据，验收截图会是空的
 
 **交付**：
 - 处置遗留 management 包：删除 `ProcurementInsightsController/Service`（其能力由 K1/K2/K3 新控制器按冻结接口重建；`audit-events` 查询能力并入 K6 审计页，接口保持 `GET /api/procurement/audit-events` 兼容）
@@ -333,11 +326,7 @@ GET  /api/procurement/platform                              # K6 系统信息
 - 交付：审批分布式锁、insights 缓存与失效、Noop 回退
 - 验收：锁竞争测试（并发审批请求只有一个成功）、缓存失效测试；无 Redis 时回退测试
 
-### 阶段 5：历史报价 RAG（K5）
-- 交付：Java RPC `get_reference_prices`、Python 侧调用与注入、契约同步、评测补充
-- 验收：契约黄金测试回归（Java+Python 双侧）、Python pytest 全绿、端到端演示（报价解释含参考区间）、`ruff check` 全绿
-
-### 阶段 6：简历 + README + GitHub 叙事重构（K7）
+### 阶段 5：简历 + README + GitHub 叙事重构（K7）
 - 交付：README 新增"面试官视角架构图"小节、简历项目描述替换（双语言架构版）、GitHub 截图更新
 - 验收：README 通读 3 分钟可理解架构与差异化；简历与 README 技术栈一致
 
@@ -348,14 +337,12 @@ GET  /api/procurement/platform                              # K6 系统信息
 | 审批证据链被破坏 | 高 | 冻结 ApprovalService/ComparisonEngine 核心逻辑；订单派生走独立 reconcile，不注入审批流程；分布式锁加在 Controller 层（DecisionLockGuard），不碰 Service |
 | 平台叙事与设计脱节 | 高（已处置） | 新增通用状态机引擎（4.2），订单/对账注册式实现；任务状态机不迁移并在 README 如实说明 |
 | 绩效公式小样本失真 | 中（已处置） | 最小样本量 ≥3 + 黑名单封顶 30（4.6） |
-| RAG 污染冻结评测 | 高（已处置） | 参考区间为软提示不参与排序；冻结资源不动，扩展用例独立文件 |
 | Flyway 迁移破坏现有库 | 中 | V8–V11：V8/V9/V10 只新增表；**V11 是唯一的 ALTER（audit_event 改可空+加列），先在 demo 库验证后在生产库执行**；失败回退=删迁移文件+重建数据卷 |
 | 遗留 management 包与 BOM | 高（已处置） | 阶段 0 删除遗留控制器/服务（BOM 文件 + 路径冲突一并解决），能力由新控制器按冻结接口重建 |
-| 演示数据为空（订单/报表/RAG 无数据） | 高（已处置） | 阶段 0 扩展 DemoSeedRunner 生成 synthetic 已审批历史业务（决策+订单+对账+付款），全部标记 synthetic |
+| 演示数据为空（订单/报表无数据） | 高（已处置） | 阶段 0 扩展 DemoSeedRunner 生成 synthetic 已审批历史业务（决策+订单+对账+付款），全部标记 synthetic |
 | 审计表 task_id 约束与业务事件矛盾 | 高（已处置） | V11 迁移改可空 + business_type/business_id 列，AuditEvent.create 新增重载保持兼容 |
 | 正式决定并发双写 | 高（已处置） | 任务悲观锁 + 决定/订单同事务 + purchase_order UNIQUE(task_id) |
 | 财务数据级联删除 | 中（已处置） | purchase_settlement 外键 RESTRICT，禁止随订单级联消失 |
-| Python 契约破坏 | 中 | 参考区间作为新增可选字段下发；契约文件同步更新；黄金测试拦截 |
 | 前端路由破坏 | 低 | 现有 URL 兼容（view 缺省回退 workbench）；只加不改 |
 | 锁/缓存引入不稳定 | 低 | Noop 回退路径保留；锁释放 Lua 校验持有者；缓存 TTL 短（60s） |
 | Web 静态 bundle 不同步 | 中 | 每个前端阶段跑 check_web_build_determinism.py，build 后同步 Java static |

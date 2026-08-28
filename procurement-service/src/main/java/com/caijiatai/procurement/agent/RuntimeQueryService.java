@@ -44,7 +44,8 @@ public final class RuntimeQueryService {
     }
 
     public boolean agentAvailable() {
-        var heartbeat = events.findFirstByTypeOrderByGlobalSeqDesc("heartbeat.ping");
+        // OccurredAt ordering, not globalSeq: see LIVE-1 / RuntimeEventRepository comment.
+        var heartbeat = events.findFirstByTypeOrderByOccurredAtDesc("heartbeat.ping").orElse(null);
         return heartbeat != null && Instant.now().minusSeconds(15).isBefore(heartbeat.getOccurredAt());
     }
 
@@ -90,7 +91,11 @@ public final class RuntimeQueryService {
     }
 
     public List<Map<String, Object>> runs() {
-        var rows = events.findAll(Sort.by(Sort.Direction.DESC, "globalSeq"));
+        // J-M8: bounded recent-window scan instead of events.findAll(...). A full-table
+        // load (~70k projection rows in the live review) made /api/runs take 8.2s and
+        // grow without limit. The top 20 000 events by global_seq still surface every
+        // run that has produced events inside that window; older runs drop off the list.
+        var rows = events.findTop20000ByOrderByGlobalSeqDesc();
         var seen = new java.util.LinkedHashSet<String>();
         var result = new ArrayList<Map<String, Object>>();
         for (var row : rows) {

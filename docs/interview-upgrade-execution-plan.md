@@ -3,7 +3,7 @@
 > 文档版本：2.0（2026-08）
 > 读者：**新会话 goal 执行 Agent（施工方）** + 用户（审核人）
 > 定位：本仓库**唯一的执行总控**。开工前必须通读：`README.md`、`docs/architecture.md`、`docs/recruitment-value-upgrade.md`（Track B，本计划不执行）、本文档。
-> Track B 分工：`docs/recruitment-value-upgrade.md` 的 P0-1 压测、P0-2 可观测性、P0-3 虚拟线程、P0-4 LLM-as-Judge、P1-1 MCP、P1-2 向量 RAG 属于**另一个 goal 会话**的范围，本计划一律不做、不重复、不引用其产出为前提。
+> Track B 分工：`docs/recruitment-value-upgrade.md` 的 P0-1 压测、P0-2 可观测性、P0-3 虚拟线程、P0-4 LLM-as-Judge、P1-1 MCP、P1-2 历史报价 RAG（已下线/暂缓） 属于**另一个 goal 会话**的范围，本计划一律不做、不重复、不引用其产出为前提。
 > 更新规则：每完成一个阶段只更新本文档对应状态；不另建平行路线图。
 
 ---
@@ -64,8 +64,7 @@
 | 冲突显示 + 人工修正 | 报价字段 `conflicts` + corrections API + `QuoteWorkspace` FieldEditor | 校验链雏形已有 |
 | 供应商档案/绩效/黑名单 | `supplier/` + `SupplierCenter.tsx` | 缺"准入流程"，不重写档案 |
 | 订单/对账状态机 + 超时调度 | `order/`、`settlement/` | 三单匹配建立其上 |
-| RAG 软提示 | `agent/ReferencePriceService` + Python `reference_prices.py` | 新 RAG 场景（合同条款库）参照此边界 |
-| 冻结评测 | `frozen-evaluation.json` + `frozen-evaluation-ext.json` | 新评测**必须**独立新文件 |
+| 冻结评测 | `frozen-evaluation.json` | 新评测**必须**独立新文件 |
 | 成本保护 | `max_cost_usd` + 429 Retry-After 退避 | LLM 网关在此基础上加"限流/熔断" |
 
 ---
@@ -153,7 +152,7 @@
 
 ### P2-3 语义缓存（1 天）
 
-- 场景：相同/相似报价文件重复上传解析、相同参考区间查询重复调用——用 Redis 缓存 LLM 解析结果与参考区间。
+- 场景：相同/相似报价文件重复上传解析——用 Redis 缓存 LLM 解析结果。
 - 实现：Java `cache/TaskContextCache` 之外新增 `SemanticResultCache`（或 Python 侧直连 Redis）：key = 输入内容 SHA-256（精确层）+ 结构相似度（语义层可选，本期只做精确层+TTL+版本失效）；`doc_version`（原件 SHA-256 或 schema 版本）参与 key；原件更新即失效。
 - 纪律：**缓存命中=确定性返回，不产生审计事件；解析结果缓存只对"已通过校验"的结果生效**。
 - 验收：同一文件二次上传不产生 LLM 调用（心跳/成本指标可证）；单测覆盖 TTL 与版本失效。
@@ -196,7 +195,7 @@
 - 合同变更单：变更需重新审批（allow-once），变更后旧条款留痕。
 
 **Agent 参与点**：
-- 合同草拟（模式 B：模板 + 条款库 RAG 软提示——参照 K5 的 `ReferencePriceService` 边界实现条款检索，只进草拟文本，不进正式合同）；
+- 合同草拟（模式 B：模板 + 条款库软提示——只进草拟文本，不进正式合同）；
 - 条款风险识别（模式 A+C：从草拟/上传文本提取条款 → 分级（高风险/提示）→ 自然语言解释，结构化结果经后端校验后展示）；
 - 后端一致性校验：草拟文本中的金额/日期必须与注入字段一致，不一致拦截并要求人工确认。
 
@@ -218,7 +217,7 @@
 
 ## 6. 纪律与禁止事项（违反 = 阶段不合格）
 
-1. **冻结资产零改动**：`ApprovalService`、`ComparisonEngine`、`frozen-evaluation.json`、`frozen-evaluation-ext.json`、`contracts/golden/*`、31 份黄金契约——一个字节不动；
+1. **冻结资产零改动**：`ApprovalService`、`ComparisonEngine`、`frozen-evaluation.json`、`contracts/golden/*`、31 份黄金契约——一个字节不动；
 2. **新评测集独立文件**，且 README 如实标注 synthetic；评测口径只增不改；
 3. 新 API 必须同步 `contracts/`（OpenAPI + schema）+ web bundle（`check_web_build_determinism.py` 验证）；
 4. 演示数据 synthetic 纪律；README/架构文档随代码同步，禁止单侧更新；
@@ -231,7 +230,7 @@
 
 ## 7. 与 Track B（recruitment-value-upgrade.md）的衔接
 
-- 本文档执行完毕后，建议另开 goal 会话执行 Track B（压测/可观测/虚拟线程/LLM-as-Judge/MCP/向量 RAG）；
+- 本文档执行完毕后，建议另开 goal 会话执行 Track B（压测/可观测/虚拟线程/LLM-as-Judge/MCP/历史报价 RAG（已下线/暂缓））；
 - 两计划的交集：P2-1 的熔断/降级事件与 Track B 的 P0-2 监控指标天然衔接——本计划只落事件与接口，不装 Prometheus/Grafana；
 - 若用户要求合并执行，先完成本文档 P1–P3 再进 Track B，不可并行（工作区纪律）。
 

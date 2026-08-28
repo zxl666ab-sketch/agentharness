@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 
 from agentharness.contracts import new_id
 from agentharness.storage.sqlite import Storage
+
+logger = logging.getLogger("agentharness.engine.lease")
+
+# A transient writer-lock failure (``database is locked``) must not silently
+# kill the heartbeat: the lease would expire while the run keeps writing, which
+# is exactly the double-write this manager exists to prevent. Tolerate a few
+# consecutive failures, then hand the run back through ``on_lost``.
+_MAX_CONSECUTIVE_HEARTBEAT_FAILURES = 3
 
 
 class LeaseManager:
@@ -47,11 +56,33 @@ class LeaseManager:
     async def _heartbeat_loop(
         self, run_id: str, on_lost: Callable[[str], None]
     ) -> None:
+        failures = 0
         while True:
             await asyncio.sleep(self.heartbeat_s)
-            renewed = self.storage.heartbeat_run_lease(
-                run_id, self.owner_id, ttl_s=self.ttl_s
-            )
+            try:
+                renewed = self.storage.heartbeat_run_lease(
+                    run_id, self.owner_id, ttl_s=self.ttl_s
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - never let one write kill the loop
+                failures += 1
+                logger.warning(
+                    "lease heartbeat failed for run %s (%d/%d consecutive)",
+                    run_id,
+                    failures,
+                    _MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
+                    exc_info=True,
+                )
+                if failures >= _MAX_CONSECUTIVE_HEARTBEAT_FAILURES:
+                    logger.warning(
+                        "lease heartbeat gave up for run %s; treating the lease as lost",
+                        run_id,
+                    )
+                    on_lost(run_id)
+                    return
+                continue
+            failures = 0
             if not renewed:
                 on_lost(run_id)
                 return
