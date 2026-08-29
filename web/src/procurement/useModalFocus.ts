@@ -28,8 +28,9 @@ export function useModalFocus(
     if (!open) return;
     restoreRef.current = (document.activeElement as HTMLElement | null) ?? null;
     const container = containerRef.current;
+    const preferred = initialFocusRef?.current;
     const target =
-      initialFocusRef?.current ??
+      (preferred && !preferred.hasAttribute("disabled") ? preferred : null) ??
       container?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR) ??
       container;
     target?.focus();

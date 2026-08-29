@@ -1,4 +1,4 @@
-import { Check, ChevronDown, ChevronRight, ClipboardEdit, LoaderCircle, Plus, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronRight, ClipboardEdit, LoaderCircle, Plus, ShieldCheck, X } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
 
 import type { CreateProcurementRequest, ProcurementRequest, RequirementSpecification } from "./types";
@@ -198,22 +198,42 @@ export function RequirementReview({ request, busy, error, onSave }: Props) {
   const baseCurrency = asText(constraints.base_currency || "CNY").toUpperCase();
   const terminal = request.status === "approved" || request.status === "no_award";
 
-  // W-H1：详情以 750ms 轮询刷新，`request` 的对象身份每轮都变。表单只在
-  // 切换到另一条采购需求（request.id 变化）时用最新服务端值整体重置；
-  // 服务端后续更新不自动并入用户正在编辑的表单。
+  // P-UX④：AI 抽取失败会写入"未说明"占位值；它作为硬性条件会淘汰全部报价，
+  // 必须在表单里显式警示，而不是让用户在比价页猜为什么全灭。
+  const unexplainedLabels: string[] = [];
+  if (request.schema_version === 2) {
+    for (const row of dynamicSpecs) {
+      if (row.priority === "hard" && String(row.value).trim() === "未说明") unexplainedLabels.push(row.label || row.key);
+    }
+  } else {
+    if (form.material.trim() === "未说明") unexplainedLabels.push("材质");
+    if (form.color.trim() === "未说明") unexplainedLabels.push("颜色");
+  }
+
+  // W-H1：详情以 750ms 轮询刷新，`request` 的对象身份每轮都变。
+  // P-UX③：新建任务的约束字段常由 Agent 在表单挂载之后才写入服务端；
+  // 用户未编辑（dirty=false）时，服务端任何更新都必须自动并入表单，
+  // 否则用户被迫手敲 AI 已解析出的值。开始编辑后不再覆盖用户输入。
   const requestId = request.id;
   const requestRef = useRef(request);
   requestRef.current = request;
+  const dirtyRef = useRef(false);
+  const syncedRef = useRef({ id: "", updatedAt: "" });
   useEffect(() => {
+    const switched = syncedRef.current.id !== requestId;
+    if (!switched && dirtyRef.current) return;
+    syncedRef.current = { id: requestId, updatedAt: request.updated_at };
+    dirtyRef.current = false;
     setForm(initialState(requestRef.current));
     setDynamicSpecs(initialDynamicSpecs(requestRef.current));
-  }, [requestId]);
+  }, [requestId, request.updated_at]);
 
   useEffect(() => {
     setCollapsed(request.status === "approved" || request.status === "no_award");
   }, [request.id, request.status]);
 
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
+    dirtyRef.current = true;
     setForm((current) => ({
       ...current,
       [key]: value,
@@ -224,6 +244,7 @@ export function RequirementReview({ request, busy, error, onSave }: Props) {
   }
 
   function updateMaxLeadDays(value: string) {
+    dirtyRef.current = true;
     setForm((current) => ({
       ...current,
       maxLeadDays: value,
@@ -236,12 +257,14 @@ export function RequirementReview({ request, busy, error, onSave }: Props) {
   }
 
   function updateDynamicSpec(index: number, field: keyof DynamicSpecForm, value: string | boolean) {
+    dirtyRef.current = true;
     setDynamicSpecs((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, [field]: value } : row));
     setLocalError(null);
     setNotice(null);
   }
 
   function addDynamicSpec() {
+    dirtyRef.current = true;
     setDynamicSpecs((current) => [
       ...current,
       {
@@ -301,6 +324,7 @@ export function RequirementReview({ request, busy, error, onSave }: Props) {
           };
       setLocalError(null);
       await onSave(payload);
+      dirtyRef.current = false;
       setNotice("采购需求已人工确认，旧比价快照已失效。");
     } catch (value) {
       setLocalError(value instanceof Error ? value.message : String(value));
@@ -347,7 +371,7 @@ export function RequirementReview({ request, busy, error, onSave }: Props) {
                       {row.type === "number" ? <label className="proc-field"><span>单位</span><input value={row.unit} placeholder="如 mm、m" onChange={(event) => updateDynamicSpec(index, "unit", event.target.value)} disabled={terminal || busy} /></label> : null}
                       <label className="proc-field"><span>匹配要求</span><select value={row.match} onChange={(event) => updateDynamicSpec(index, "match", event.target.value as DynamicSpecForm["match"])} disabled={terminal || busy}><option value="exact">完全一致</option><option value="tolerance">允许公差</option><option value="range">范围</option><option value="gte">不小于</option><option value="lte">不大于</option></select></label>
                       <label className="proc-field"><span>优先级</span><select value={row.priority} onChange={(event) => updateDynamicSpec(index, "priority", event.target.value as DynamicSpecForm["priority"])} disabled={terminal || busy}><option value="hard">必须满足</option><option value="preference">偏好</option></select></label>
-                      <button className="proc-icon-button compact" type="button" title="删除规格" aria-label={`删除规格 ${row.label || row.key}`} onClick={() => setDynamicSpecs((current) => current.filter((_item, rowIndex) => rowIndex !== index))} disabled={terminal || busy}><X size={14} /></button>
+                      <button className="proc-icon-button compact" type="button" title="删除规格" aria-label={`删除规格 ${row.label || row.key}`} onClick={() => { dirtyRef.current = true; setDynamicSpecs((current) => current.filter((_item, rowIndex) => rowIndex !== index)); }} disabled={terminal || busy}><X size={14} /></button>
                     </div>
                     <details className="proc-dynamic-spec-advanced">
                       <summary>高级设置</summary>
@@ -392,6 +416,12 @@ export function RequirementReview({ request, busy, error, onSave }: Props) {
             <label className="proc-field"><span>到货单价上限（{baseCurrency}）</span><input type="number" min="0" step="any" value={form.maxUnitCost} onChange={(event) => update("maxUnitCost", event.target.value)} disabled={terminal || busy} /></label>
             <label className="proc-field proc-span-2"><span>汇率（外币=本位币，例如 USD=7.2）</span><input value={form.rates} onChange={(event) => update("rates", event.target.value)} disabled={terminal || busy} /></label>
           </fieldset>
+          {unexplainedLabels.length && !terminal ? (
+            <p className="proc-review-warning text-xs font-medium text-warning bg-warning-soft border border-warning/30 rounded-lg p-2.5 flex items-center gap-1.5" role="note">
+              <AlertTriangle size={14} />
+              「{unexplainedLabels.join("、")}」仍是"未说明"：它会作为硬性条件淘汰所有报价，请改成真实规格后再保存确认。
+            </p>
+          ) : null}
           {localError || error ? <p className="proc-inline-error" role="alert">{localError || error}</p> : null}
           {notice ? <p className="proc-inline-success" role="status"><Check size={15} />{notice}</p> : null}
           <div className="proc-modal-actions">

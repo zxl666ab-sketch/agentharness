@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Clock3,
   FilePlus2,
   LoaderCircle,
   RefreshCw,
@@ -11,6 +12,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import { aiStepInFlight } from "./viewModel";
 import type { AiTaskDetail, AiTaskStatus } from "./types";
 
 type Props = {
@@ -156,7 +158,7 @@ export function AiTaskRecovery({ task, busy, error, onRetry, onCancel, onSupplem
             <ol>
               {task.records.map((record) => (
                 <li key={record.record_id} className={record.status.toLowerCase()}>
-                  <span>{record.status === "SUCCEEDED" ? <CheckCircle2 size={14} /> : record.status === "FAILED" ? <AlertTriangle size={14} /> : <LoaderCircle size={14} />}</span>
+                  <span>{record.status === "SUCCEEDED" ? <CheckCircle2 size={14} /> : record.status === "FAILED" ? <AlertTriangle size={14} /> : aiStepInFlight(task.status, record.status) ? <LoaderCircle size={14} /> : <Clock3 size={14} />}</span>
                   <div><strong>{STEP_LABELS[record.step]}</strong><small>{record.summary || record.error_message || record.status}</small></div>
                   <time dateTime={record.created_at}>{timeText(record.created_at)}</time>
                 </li>

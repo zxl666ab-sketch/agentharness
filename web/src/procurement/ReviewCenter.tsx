@@ -21,6 +21,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { procurementApi } from "./api";
 import { useEscape } from "./useEscape";
 import { useModalFocus } from "./useModalFocus";
+import { actionablePendingReviewCount, isSupersededTaskStatus, reviewIsGhost } from "./viewModel";
 import type {
   ProcurementRequestSummary,
   ReviewAction,
@@ -105,7 +106,9 @@ export function ReviewCenter({
   onOpenTask,
 }: Props) {
   const queryClient = useQueryClient();
-  const [status, setStatus] = useState<ReviewStatus | "ALL">(selectedId ? "ALL" : "PENDING");
+  // P-UX⑦：深链不再把筛选重置为"全部状态"——选中项始终保留在列表里（见 filtered），
+  // 默认视图永远是"待审核"行动队列，历史记录需要用户主动切换查看。
+  const [status, setStatus] = useState<ReviewStatus | "ALL">("PENDING");
   const [risk, setRisk] = useState("ALL");
   const [search, setSearch] = useState("");
   const [action, setAction] = useState<ReviewAction>("APPROVE_SUGGESTION");
@@ -124,13 +127,14 @@ export function ReviewCenter({
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
     return [...reviews]
-      .filter((item) => (status === "ALL" || item.status === status)
-        && (risk === "ALL" || item.risk_flags.includes(risk))
-        && (!query || [requestMap.get(item.business_id)?.reference, requestMap.get(item.business_id)?.title, item.evidence_sha256]
-          .filter(Boolean).join(" ").toLowerCase().includes(query)))
+      .filter((item) => item.review_id === selectedId
+        || ((status === "ALL" || item.status === status)
+          && (risk === "ALL" || item.risk_flags.includes(risk))
+          && (!query || [requestMap.get(item.business_id)?.reference, requestMap.get(item.business_id)?.title, item.evidence_sha256]
+            .filter(Boolean).join(" ").toLowerCase().includes(query))))
       .sort((left, right) => right.priority - left.priority
         || new Date(left.waiting_since).getTime() - new Date(right.waiting_since).getTime());
-  }, [requestMap, reviews, risk, search, status]);
+  }, [requestMap, reviews, risk, search, status, selectedId]);
 
   useEffect(() => {
     if (loading) return;
@@ -159,6 +163,9 @@ export function ReviewCenter({
     return (left.rank || 999) - (right.rank || 999);
   }), [detail?.comparison.result.quotes]);
   const pending = detail?.status === "PENDING" && !detail.action;
+  // P-UX⑦：任务已正式定标/关闭但审核仍 PENDING 的"幽灵记录"——禁止提交，只解释。
+  const taskSuperseded = isSupersededTaskStatus(request?.status);
+  const ghostReview = pending && taskSuperseded;
   const submittingDecision = detail?.status === "PENDING" && !!detail.action;
   const selectedQuote = quoteById(detail, finalQuoteId);
   const hasEligibleQuotes = Boolean(detail?.comparison.result.eligible_count);
@@ -170,13 +177,7 @@ export function ReviewCenter({
     && (action !== "APPROVE_SUGGESTION" || suggestion)
     && (action !== "NO_AWARD" || !hasEligibleQuotes));
 
-  useEffect(() => {
-    if (!selectedId || filtered.some((item) => item.review_id === selectedId)) return;
-    if (!reviews.some((item) => item.review_id === selectedId)) return;
-    setStatus("ALL");
-    setRisk("ALL");
-    setSearch("");
-  }, [filtered, reviews, selectedId]);
+  // P-UX⑦：选中项现在恒定保留在 filtered 中，无需再把筛选器重置为"全部"。
 
   // W-M5：待审核详情每 1.5s 轮询刷新，`detail` 的对象身份每轮都变。
   // 表单只在切换到另一条审核（review_id 变化）时重置，避免覆盖用户正在
@@ -237,7 +238,12 @@ export function ReviewCenter({
       // transient failure; the detail refetch below updates the panel state
       // (e.g. to STALE) when the server actually rejected the submission.
       setActionError(errorText(cause));
-      await queryClient.invalidateQueries({ queryKey: ["procurement-review", detail.review_id] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["procurement-review", detail.review_id] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-reviews"] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-request", detail.business_id] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-requests"] }),
+      ]);
     } finally {
       setBusy(false);
     }
@@ -256,7 +262,7 @@ export function ReviewCenter({
           </h1>
         </div>
         <div className="proc-page-summary flex items-center gap-2 bg-surface-subtle px-3.5 py-1.5 rounded-full border border-border">
-          <strong className="text-sm font-mono font-bold text-accent">{reviews.filter((item) => item.status === "PENDING").length}</strong>
+          <strong className="text-sm font-mono font-bold text-accent">{actionablePendingReviewCount(reviews, requests)}</strong>
           <span className="text-xs text-text-secondary">等待审核</span>
         </div>
       </header>
@@ -300,7 +306,7 @@ export function ReviewCenter({
                 </div>
                 <strong className="text-xs font-semibold text-text truncate">{owner?.title || item.business_id}</strong>
                 <small className="text-[11px] text-text-muted font-mono truncate">{owner?.reference || item.evidence_sha256}</small>
-                <span className="proc-risk-row flex flex-wrap gap-1 mt-0.5">{item.risk_flags.length ? item.risk_flags.map((value) => <em className="not-italic text-[10px] font-medium px-1.5 py-0.5 rounded bg-warning-soft text-warning border border-warning/20" key={value}>{riskText(value)}</em>) : <em className="not-italic text-[10px] text-text-muted">常规复核</em>}</span>
+                <span className="proc-risk-row flex flex-wrap gap-1 mt-0.5">{item.status === "PENDING" && reviewIsGhost(item, requests) ? <em className="not-italic text-[10px] font-semibold px-1.5 py-0.5 rounded bg-surface-subtle text-text-muted border border-border">任务已定标 · 无需提交</em> : item.risk_flags.length ? item.risk_flags.map((value) => <em className="not-italic text-[10px] font-medium px-1.5 py-0.5 rounded bg-warning-soft text-warning border border-warning/20" key={value}>{riskText(value)}</em>) : <em className="not-italic text-[10px] text-text-muted">常规复核</em>}</span>
                 <span className="proc-center-list-meta flex items-center justify-between pt-2 border-t border-border/40 text-[11px] text-text-muted"><span className="inline-flex items-center gap-1"><Clock3 size={12} />{waitText(item.waiting_since)}</span><time dateTime={item.updated_at}>{timeText(item.updated_at)}</time></span>
               </button>
             );
@@ -324,6 +330,7 @@ export function ReviewCenter({
               </header>
 
               {detail.status === "STALE" ? <div className="proc-review-banner stale flex items-center gap-2.5 p-3 rounded-lg bg-warning-soft text-warning border border-warning/30 text-xs" role="alert"><AlertTriangle size={17} /><span><strong>审核证据已过期</strong><small className="block opacity-90">{detail.stale_reason || "采购输入或比价快照已经变化"}</small></span></div> : null}
+              {ghostReview ? <div className="proc-review-banner stale flex items-start justify-between gap-3 p-3 rounded-lg bg-warning-soft text-warning border border-warning/30 text-xs" role="alert"><span className="flex items-start gap-2.5"><AlertTriangle size={17} className="mt-0.5" /><span><strong>任务已定标，本条审核无需提交</strong><small className="block opacity-90">该采购任务已通过正式决定完成定标，这条"待审核"是状态遗留的历史记录；提交会被证据校验拒绝。结论请在采购详情与审批报告中查看。</small></span></span><button className="proc-button secondary inline-flex items-center gap-1 px-3 py-1 rounded-lg border border-warning/40 text-warning text-xs font-semibold whitespace-nowrap" type="button" onClick={() => onOpenTask(detail.business_id)}>查看采购详情<ArrowRight size={13} /></button></div> : null}
               {submittingDecision ? <div className="proc-review-banner pending flex items-center gap-2.5 p-3 rounded-lg bg-accent-soft text-accent border border-accent/30 text-xs"><LoaderCircle className="spin" size={17} /><span><strong>审核动作已提交</strong><small className="block opacity-90">正式决定正在异步确认，页面会自动刷新。</small></span></div> : null}
               {detail.decision_id ? <div className="proc-review-banner success flex items-center gap-2.5 p-3 rounded-lg bg-accent-soft text-accent border border-accent/30 text-xs"><CheckCircle2 size={17} /><span><strong>正式决定已形成</strong><small className="block opacity-90">决定 ID {detail.decision_id}</small></span></div> : null}
               {detail.status === "REJECTED" ? <div className="proc-review-banner rejected flex items-center gap-2.5 p-3 rounded-lg bg-danger-soft text-danger border border-danger/30 text-xs"><RotateCcw size={17} /><span><strong>已驳回并返回分析</strong><small className="block opacity-90">{detail.reason}</small></span></div> : null}
@@ -355,7 +362,7 @@ export function ReviewCenter({
                 <div className="proc-evidence-strip flex flex-wrap items-center gap-4 pt-2 border-t border-border/40 text-[11px] text-text-muted"><span><small>审核证据：</small><code className="font-mono text-text ml-1" title={detail.evidence_sha256 || "-"}>{detail.evidence_sha256?.slice(0, 20) || "-"}</code></span><span><small>比价输入：</small><code className="font-mono text-text ml-1" title={detail.comparison.input_sha256}>{detail.comparison.input_sha256.slice(0, 20)}</code></span><span><small>AI 结果：</small><code className="font-mono text-text ml-1" title={detail.ai_result.result_sha256}>{detail.ai_result.result_sha256.slice(0, 20)}</code></span></div>
               </section>
 
-              {pending ? <section className="proc-detail-section proc-review-action-panel glass-panel rounded-xl p-5 border border-border/80 bg-surface/90 flex flex-col gap-4 shadow-sm">
+              {pending && !ghostReview ? <section className="proc-detail-section proc-review-action-panel glass-panel rounded-xl p-5 border border-border/80 bg-surface/90 flex flex-col gap-4 shadow-sm">
                 <header className="flex items-center justify-between pb-2 border-b border-border/40"><div className="flex items-center gap-2"><ClipboardEdit size={16} className="text-accent" /><h3 className="text-xs font-bold text-text">人工决定</h3></div><span className="text-[11px] text-text-muted">提交后不可修改</span></header>
                 <div className="proc-review-actions flex flex-wrap gap-2" role="group" aria-label="审核动作">
                   <button type="button" className={`px-3.5 py-2 rounded-lg text-xs font-semibold border transition-all inline-flex items-center gap-1.5 ${action === "APPROVE_SUGGESTION" ? "active bg-accent text-white border-accent shadow-xs" : "bg-surface border-border hover:bg-surface-subtle text-text"}`} disabled={!suggestion} onClick={() => setAction("APPROVE_SUGGESTION")}><ShieldCheck size={15} />确认建议</button>

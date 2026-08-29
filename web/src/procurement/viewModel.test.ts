@@ -13,6 +13,7 @@ import {
   procurementDecisionProgress,
   nextStepGuide,
   statusLabel,
+  statusLabelFor,
   statusTone,
 } from "./viewModel";
 
@@ -104,9 +105,21 @@ describe("procurement view model", () => {
 
   it("guides the next action per status with a visible blocker reason", () => {
     const base = { requirement_confirmed: true, quote_count: 2, unresolved_field_count: 0 };
-    expect(nextStepGuide({ ...base, status: "ready" }).action).toEqual({ kind: "compare" });
+    expect(nextStepGuide({ ...base, status: "ready" }).action).toEqual({ kind: "analyze" });
     expect(nextStepGuide({ ...base, status: "ready" }).actionLabel).toBe("开始比价");
     expect(nextStepGuide({ ...base, status: "analyzed" }).action).toEqual({ kind: "compare" });
+    // P-UX④：全部淘汰时不得再引导"审批"，必须指向需求调整
+    const allExcluded = {
+      ...base,
+      status: "analyzed",
+      comparison: { id: "snap", result: { eligible_count: 0 } },
+    };
+    const excludedGuide = nextStepGuide(allExcluded as unknown as Parameters<typeof nextStepGuide>[0]);
+    expect(excludedGuide.action).toEqual({ kind: "quotes" });
+    expect(excludedGuide.hint).toContain("无合格报价");
+    expect(excludedGuide.blocker).toContain("淘汰");
+    expect(statusLabelFor({ status: "analyzed" } as never)).toBe("待审批（比价完成）");
+    expect(statusLabelFor(allExcluded as unknown as Parameters<typeof statusLabelFor>[0])).toBe("比价完成（无合格报价）");
     expect(nextStepGuide({ ...base, status: "approved" }).action).toEqual({ kind: "orders" });
     expect(nextStepGuide({ ...base, status: "approved" }).actionLabel).toContain("订单已生成");
     expect(nextStepGuide({ ...base, status: "approval_pending" }).action).toEqual({ kind: "reviews" });

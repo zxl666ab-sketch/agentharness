@@ -12,10 +12,11 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useDeferredValue, useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useRef, useState } from "react";
 
 import { procurementApi } from "./api";
 import { useEscape } from "./useEscape";
+import { useModalFocus } from "./useModalFocus";
 import type {
   SupplierProfile,
   SupplierSaveRequest,
@@ -68,6 +69,10 @@ export function SupplierCenter({ onOpenTask }: Props) {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [profileId, setProfileId] = useState<string | null>(null);
+  const formDialogRef = useRef<HTMLElement | null>(null);
+  const formNameRef = useRef<HTMLInputElement | null>(null);
+  const deleteDialogRef = useRef<HTMLElement | null>(null);
+  const deleteCancelRef = useRef<HTMLButtonElement | null>(null);
 
   const pageSize = 50;
   // 服务端搜索防抖：输入保持即时回显，请求跟随低优先级渲染后的值，
@@ -188,6 +193,9 @@ export function SupplierCenter({ onOpenTask }: Props) {
   useEscape(!!editing, () => setEditing(null), formBusy);
   useEscape(!!deleteTarget, () => setDeleteTarget(null), deleteBusy);
   useEscape(!!profileId, () => setProfileId(null), false);
+  // P-UX⑤：弹窗打开时焦点进入对话框（新建聚焦名称输入；删除聚焦取消键防误触）。
+  useModalFocus(!!editing, formDialogRef, formNameRef);
+  useModalFocus(!!deleteTarget, deleteDialogRef, deleteCancelRef);
 
   return (
     <div className="proc-center-page flex flex-col gap-6 p-6 max-w-7xl mx-auto w-full">
@@ -323,13 +331,13 @@ export function SupplierCenter({ onOpenTask }: Props) {
 
       {editing ? (
         <div
-          className="proc-drawer-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
+          className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
           role="presentation"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget && !formBusy) setEditing(null);
           }}
         >
-          <section className="proc-confirm-dialog proc-supplier-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-lg w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="supplier-form-title">
+          <section ref={formDialogRef} className="proc-confirm-dialog proc-supplier-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-lg w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="supplier-form-title">
             <header className="flex items-center justify-between pb-3 border-b border-border/60">
               <div className="flex items-center gap-2 text-text font-bold text-base"><Building2 size={18} className="text-accent" /><h2 id="supplier-form-title">{editing === "new" ? "新建供应商" : "编辑供应商档案"}</h2></div>
               <button className="proc-icon-button compact w-7 h-7 rounded-lg border border-border flex items-center justify-center text-text-muted hover:text-text" type="button" title="关闭" aria-label="关闭" onClick={() => setEditing(null)} disabled={formBusy}><X size={16} /></button>
@@ -337,7 +345,7 @@ export function SupplierCenter({ onOpenTask }: Props) {
             <div className="proc-supplier-form grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
               <label className="proc-field proc-span-2 sm:col-span-2 flex flex-col gap-1 font-medium text-text">
                 <span>供应商名称 <b>*</b></span>
-                <input className="px-3 py-2 rounded-lg border border-border bg-surface-subtle text-text focus:outline-accent text-sm disabled:opacity-60" value={form.name || ""} disabled={editing !== "new"} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 华东优包" />
+                <input ref={formNameRef} className="px-3 py-2 rounded-lg border border-border bg-surface-subtle text-text focus:outline-accent text-sm disabled:opacity-60" value={form.name || ""} disabled={editing !== "new"} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 华东优包" />
                 {editing !== "new" ? <small className="text-[11px] text-text-muted">名称不可修改（报价历史按名称关联）</small> : null}
               </label>
               <label className="proc-field flex flex-col gap-1 font-medium text-text">
@@ -387,13 +395,13 @@ export function SupplierCenter({ onOpenTask }: Props) {
 
       {deleteTarget ? (
         <div
-          className="proc-drawer-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
+          className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
           role="presentation"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget && !deleteBusy) setDeleteTarget(null);
           }}
         >
-          <section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="delete-supplier-title">
+          <section ref={deleteDialogRef} className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="delete-supplier-title">
             <header className="flex items-center justify-between pb-3 border-b border-border/60">
               <div className="flex items-center gap-2 text-text font-bold text-base"><Trash2 size={18} className="text-danger" /><h2 id="delete-supplier-title">删除供应商档案</h2></div>
               <button className="proc-icon-button compact w-7 h-7 rounded-lg border border-border flex items-center justify-center text-text-muted hover:text-text" type="button" title="关闭" aria-label="关闭" onClick={() => setDeleteTarget(null)} disabled={deleteBusy}><X size={16} /></button>
@@ -405,7 +413,7 @@ export function SupplierCenter({ onOpenTask }: Props) {
             <p className="proc-confirm-warning text-xs text-text-muted">有关联报价历史的供应商会被拒绝删除（删除保护），可将状态改为暂停或黑名单。</p>
             {deleteError ? <p className="proc-form-error text-xs text-danger font-medium p-2.5 rounded-lg bg-danger-soft border border-danger/30" role="alert">{deleteError}</p> : null}
             <footer className="flex items-center justify-end gap-2 pt-3 border-t border-border/60">
-              <button className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" type="button" onClick={() => setDeleteTarget(null)} disabled={deleteBusy}>取消</button>
+              <button ref={deleteCancelRef} className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" type="button" onClick={() => setDeleteTarget(null)} disabled={deleteBusy}>取消</button>
               <button className="proc-button danger px-4 py-1.5 rounded-lg text-xs font-semibold bg-danger text-white hover:bg-rose-700 inline-flex items-center gap-1.5 shadow-xs" type="button" onClick={() => void confirmDelete()} disabled={deleteBusy}>
                 {deleteBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}删除档案
               </button>

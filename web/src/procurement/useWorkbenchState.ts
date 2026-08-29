@@ -33,6 +33,7 @@ export type WorkbenchState = {
   pendingRunId: string | null;
   pendingOperation: PendingOperation | null;
   orderTask: string | null;
+  invoiceOrder: string | null;
   actionError: string | null;
   urlState: WorkbenchUrlState;
   setActiveTab: (tab: TaskTab) => void;
@@ -66,6 +67,7 @@ export function useWorkbenchState(): WorkbenchState {
   const [pendingRunId, setPendingRunId] = useState<string | null>(null);
   const [pendingOperation, setPendingOperation] = useState<PendingOperation | null>(null);
   const [orderTask, setOrderTask] = useState<string | null>(initialUrl.orderTask);
+  const [invoiceOrder, setInvoiceOrder] = useState<string | null>(initialUrl.invoiceOrder);
   const [search, setSearch] = useState(initialUrl.q);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -79,7 +81,8 @@ export function useWorkbenchState(): WorkbenchState {
     q: search,
     page: taskPage,
     orderTask,
-  }), [activeTab, orderTask, search, selectedAiId, selectedId, selectedReviewId, taskFilter, taskPage, view]);
+    invoiceOrder,
+  }), [activeTab, orderTask, invoiceOrder, search, selectedAiId, selectedId, selectedReviewId, taskFilter, taskPage, view]);
 
   useEffect(() => writeWorkbenchUrl(urlState), [urlState]);
   useEffect(() => {
@@ -94,6 +97,7 @@ export function useWorkbenchState(): WorkbenchState {
       setSearch(next.q);
       setTaskPage(next.page);
       setOrderTask(next.orderTask);
+      setInvoiceOrder(next.invoiceOrder);
       setShowCreate(false);
     };
     window.addEventListener("popstate", restore);
@@ -114,6 +118,7 @@ export function useWorkbenchState(): WorkbenchState {
     setSearch(next.q);
     setTaskPage(next.page);
     setOrderTask(next.orderTask);
+    setInvoiceOrder(next.invoiceOrder);
   }, [urlState]);
 
   const openView = useCallback((nextView: WorkbenchView) => {
@@ -126,6 +131,7 @@ export function useWorkbenchState(): WorkbenchState {
       review: nextView === "reviews" ? selectedReviewId : null,
       page: 0,
       orderTask: null,
+      invoiceOrder: null,
     });
   }, [navigate, selectedAiId, selectedId, selectedReviewId]);
 
@@ -168,6 +174,7 @@ export function useWorkbenchState(): WorkbenchState {
     pendingRunId,
     pendingOperation,
     orderTask,
+    invoiceOrder,
     actionError,
     urlState,
     setActiveTab,
@@ -199,6 +206,7 @@ export function useWorkbenchState(): WorkbenchState {
     pendingRunId,
     pendingOperation,
     orderTask,
+    invoiceOrder,
     actionError,
     urlState,
     navigate,

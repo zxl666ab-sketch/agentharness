@@ -430,7 +430,7 @@ export function ContractCenter() {
       </div>
 
       {approveTarget ? (
-        <div className="proc-drawer-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && busy !== `approve:${approveTarget.id}`) setApproveTarget(null); }}>
+        <div className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && busy !== `approve:${approveTarget.id}`) setApproveTarget(null); }}>
           <section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="approve-contract-title">
             <header className="flex items-center justify-between pb-3 border-b border-border/60"><div className="flex items-center gap-2 text-text font-bold text-base"><CheckCircle2 size={18} className="text-accent" /><h2 id="approve-contract-title">{approveTarget.status === "CHANGE_REQUEST" ? "批准合同变更（重新审批）" : "批准合同（allow-once）"}</h2></div></header>
             <div className="proc-delete-target p-3 rounded-lg bg-surface-subtle border border-border flex flex-col gap-0.5 text-xs"><strong className="font-mono text-sm font-bold text-text">{approveTarget.contract_no}</strong><span className="text-text-muted">{approveTarget.supplier_name} · 金额 {money(approveTarget.amount)}</span></div>
@@ -451,7 +451,7 @@ export function ContractCenter() {
       ) : null}
 
       {changeTarget ? (
-        <div className="proc-drawer-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && busy !== `change:${changeTarget.id}`) setChangeTarget(null); }}>
+        <div className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && busy !== `change:${changeTarget.id}`) setChangeTarget(null); }}>
           <section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="change-contract-title">
             <header className="flex items-center justify-between pb-3 border-b border-border/60"><div className="flex items-center gap-2 text-text font-bold text-base"><RotateCcw size={18} className="text-warning" /><h2 id="change-contract-title">发起合同变更（修订金额/交期，需重新审批）</h2></div></header>
             <div className="proc-delete-target p-3 rounded-lg bg-surface-subtle border border-border flex flex-col gap-0.5 text-xs"><strong className="font-mono text-sm font-bold text-text">{changeTarget.contract_no}</strong><span className="text-text-muted">当前金额 {money(changeTarget.amount)} · 交期 {changeTarget.lead_days} 天；变更后旧条款快照留痕</span></div>

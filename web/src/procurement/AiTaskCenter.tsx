@@ -17,6 +17,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { procurementApi } from "./api";
+import { aiStepInFlight } from "./viewModel";
 import type {
   AiTaskStatus,
   AiTaskView,
@@ -194,7 +195,7 @@ export function AiTaskCenter({
         </label>
         <label className="flex items-center gap-2 text-xs text-text font-medium">
           <span className="text-text-muted">状态</span>
-          <select className="px-3 py-2 rounded-lg border border-border bg-surface text-xs text-text focus:outline-accent" value={status} onChange={(event) => setStatus(event.target.value as AiTaskStatus | "ALL")}>
+          <select className="px-3 py-2 rounded-lg border border-border bg-surface text-xs text-text focus:outline-accent" aria-label="AI 任务状态筛选" value={status} onChange={(event) => setStatus(event.target.value as AiTaskStatus | "ALL")}>
             <option value="ALL">全部状态</option>
             {Object.entries(STATUS_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
           </select>
@@ -205,7 +206,7 @@ export function AiTaskCenter({
         </label>
         <label className="flex items-center gap-2 text-xs text-text font-medium">
           <span className="text-text-muted">负责人</span>
-          <select className="px-3 py-2 rounded-lg border border-border bg-surface text-xs text-text focus:outline-accent" value={assignee} onChange={(event) => setAssignee(event.target.value)}>
+          <select className="px-3 py-2 rounded-lg border border-border bg-surface text-xs text-text focus:outline-accent" aria-label="AI 任务负责人筛选" value={assignee} onChange={(event) => setAssignee(event.target.value)}>
             <option value="ALL">全部负责人</option>
             {assignees.map((value) => <option value={value} key={value}>{value}</option>)}
           </select>
@@ -295,10 +296,15 @@ export function AiTaskCenter({
 
               <section className="proc-detail-section glass-panel rounded-xl p-4 border border-border/60 bg-surface/60 flex flex-col gap-3">
                 <header className="flex items-center justify-between pb-1 border-b border-border/30"><div className="flex items-center gap-2"><Timer size={16} className="text-accent" /><h3 className="text-xs font-bold text-text">执行步骤</h3></div><span className="text-xs text-text-muted">{detail.records.length} 条记录</span></header>
-                {detail.records.length ? <ol className="proc-step-timeline flex flex-col gap-2.5">{detail.records.map((record) => (
+                {detail.records.length ? <ol className="proc-step-timeline flex flex-col gap-2.5">{detail.records.map((record) => {
+                  // 只有任务本身仍在推进时，未结束的步骤才是"进行中"。
+                  // 任务已终态却留下未结束步骤（历史数据/步骤事件缺失），必须按已结束渲染，否则转圈永不停止。
+                  const openStep = record.status === "PENDING" || record.status === "RUNNING";
+                  const inFlight = aiStepInFlight(detail.status, record.status);
+                  return (
                   <li className={`flex items-center justify-between gap-3 p-2.5 rounded-lg border border-border/40 text-xs ${record.status.toLowerCase()} ${record.status === "SUCCEEDED" ? "bg-surface/80" : record.status === "FAILED" ? "bg-danger-soft/20 border-danger/30" : "bg-surface/60"}`} key={record.record_id}>
                     <div className="flex items-center gap-2.5 min-w-0">
-                      <span className="flex-shrink-0">{record.status === "SUCCEEDED" ? <CheckCircle2 size={14} className="text-accent" /> : record.status === "FAILED" ? <AlertTriangle size={14} className="text-danger" /> : <LoaderCircle size={14} className="text-accent spin" />}</span>
+                      <span className="flex-shrink-0">{record.status === "SUCCEEDED" ? <CheckCircle2 size={14} className="text-accent" /> : record.status === "FAILED" ? <AlertTriangle size={14} className="text-danger" /> : inFlight ? <LoaderCircle size={14} className="text-accent spin" /> : <span title={openStep ? "任务已进入终态，该步骤未再推进" : undefined}><Clock3 size={14} className="text-text-muted" /></span>}</span>
                       <div className="min-w-0">
                         <strong className="font-semibold text-text block truncate">{STEP_LABELS[record.step]}</strong>
                         <small className="text-[11px] text-text-muted block truncate">{record.summary || record.error_message || record.status}</small>
@@ -309,7 +315,8 @@ export function AiTaskCenter({
                       <time className="font-mono" dateTime={record.created_at}>{record.duration_ms != null ? `${record.duration_ms} ms` : timeText(record.created_at)}</time>
                     </div>
                   </li>
-                ))}</ol> : <p className="proc-detail-empty text-xs text-text-muted py-4 text-center">任务仍在等待调度，尚无步骤记录。</p>}
+                  );
+                })}</ol> : <p className="proc-detail-empty text-xs text-text-muted py-4 text-center">任务仍在等待调度，尚无步骤记录。</p>}
               </section>
 
               <section className="proc-detail-section glass-panel rounded-xl p-4 border border-border/60 bg-surface/60 flex flex-col gap-3">

@@ -53,6 +53,7 @@ const FIELD_LABELS: Record<string, string> = {
   quantity: "采购数量",
   width_mm: "宽度",
   length_mm: "长度",
+  height_mm: "高度",
   thickness_um: "厚度",
   material: "材质",
   color: "颜色",
@@ -64,13 +65,28 @@ const FIELD_LABELS: Record<string, string> = {
   required_delivery_date: "要求到货日期",
   destination: "送货地点",
   fx_rates: "汇率",
+  invoice_required: "需要开票",
+  unit: "采购单位",
 };
 
 type ValidationIssue = { msg?: string; loc?: Array<string | number> };
 
+/**
+ * Java 校验错误用嵌套 camelCase 路径（如 constraints.maxLeadDays），Python 用
+ * snake_case 叶子名；统一归一到 FIELD_LABELS，用户永远看不到原始字段路径（P-UX③）。
+ */
+function fieldLabel(rawField: string): string | null {
+  const direct = FIELD_LABELS[rawField];
+  if (direct) return direct;
+  const leaf = rawField.split(".").pop() || rawField;
+  if (FIELD_LABELS[leaf]) return FIELD_LABELS[leaf];
+  const snake = leaf.replace(/[A-Z]/g, (char) => "_" + char.toLowerCase());
+  return FIELD_LABELS[snake] || null;
+}
+
 function validationMessage(issue: ValidationIssue) {
   const field = String(issue.loc?.at(-1) || "表单");
-  const label = FIELD_LABELS[field] || "表单内容";
+  const label = fieldLabel(field) || "表单内容";
   const message = String(issue.msg || "");
   if (message.startsWith("Value error, ")) return message.slice(13);
   if (message === "Field required") return `${label}不能为空`;
@@ -111,9 +127,9 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
       if (typeof body.message === "string") message = body.message;
       else if (typeof body.detail === "string") message = body.detail;
       if (Array.isArray(body.field_errors) && body.field_errors.length) {
-        message = body.field_errors.map((item) => `${FIELD_LABELS[item.field] || item.field}：${item.message}`).join("；");
+        message = [...new Set(body.field_errors.map((item) => `${fieldLabel(item.field) || item.field}：${item.message}`))].join("；");
       } else if (Array.isArray(body.detail)) {
-        message = body.detail.map(validationMessage).join("；");
+        message = [...new Set(body.detail.map(validationMessage))].join("；");
       }
     } catch {
       // Preserve the HTTP status when the body is not JSON.

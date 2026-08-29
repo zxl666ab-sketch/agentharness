@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { WorkbenchHome } from "./WorkbenchHome";
 import { WorkbenchNavigation } from "./WorkbenchNavigation";
-import { Header, RoleSwitcher } from "../components/Header";
+import { ProcurementWorkbench } from "./ProcurementWorkbench";
 import { OrderCenter } from "./OrderCenter";
 import { SupplierCenter } from "./SupplierCenter";
 import { ReportsCenter } from "./ReportsCenter";
@@ -20,6 +20,38 @@ function createTestQueryClient() {
       queries: { retry: false, staleTime: Infinity },
     },
   });
+}
+
+/** jsdom 无 EventSource：工作台挂载必需的最小假实现。 */
+class FakeEventSource {
+  onopen: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  constructor(_url: string) {}
+  addEventListener() {}
+  close() {}
+}
+
+async function mountWorkbench(props: Partial<{ theme: "light" | "dark"; onToggleTheme: () => void }> = {}) {
+  vi.stubGlobal("EventSource", FakeEventSource);
+  const client = createTestQueryClient();
+  client.setQueryData(["procurement-requests"], []);
+  client.setQueryData(["procurement-ai-tasks"], { items: [], page: 0, size: 100, total: 0 });
+  client.setQueryData(["procurement-reviews"], { items: [], page: 0, size: 100, total: 0 });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={client}>
+        <ProcurementWorkbench
+          theme={props.theme ?? "light"}
+          backendVersion="0.5.0-test"
+          onToggleTheme={props.onToggleTheme ?? (() => undefined)}
+        />
+      </QueryClientProvider>,
+    );
+  });
+  return { host, unmount: async () => { await act(async () => root.unmount()); host.remove(); } };
 }
 
 afterEach(() => {
@@ -152,28 +184,9 @@ describe("CHALLENGER 1: Visual Layout & Empty / Extreme Data Resilience", () => 
 });
 
 describe("CHALLENGER 2: Theme Switching & Header Interaction", () => {
-  it("toggles theme correctly and displays appropriate Sun/Moon icon in Header", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    let currentTheme: "light" | "dark" = "light";
-    const toggleMock = vi.fn(() => {
-      currentTheme = currentTheme === "light" ? "dark" : "light";
-    });
-
-    await act(async () => {
-      root.render(
-        <Header
-          theme={currentTheme}
-          backendVersion="0.5.0-test"
-          role="buyer"
-          onRoleChange={vi.fn()}
-          onToggleTheme={toggleMock}
-          onOpenConfig={vi.fn()}
-        />,
-      );
-    });
+  it("toggles theme correctly from the workbench top bar", async () => {
+    const toggleMock = vi.fn();
+    const { host, unmount } = await mountWorkbench({ onToggleTheme: toggleMock });
 
     const themeButton = host.querySelector('button[aria-label="切换主题"]') as HTMLButtonElement;
     expect(themeButton).toBeTruthy();
@@ -184,7 +197,7 @@ describe("CHALLENGER 2: Theme Switching & Header Interaction", () => {
     });
     expect(toggleMock).toHaveBeenCalledTimes(1);
 
-    await act(async () => root.unmount());
+    await unmount();
   });
 });
 
@@ -228,29 +241,23 @@ describe("CHALLENGER 3: Role Filtering & State Transition Matrix", () => {
 
       expect(html).toContain("工作台");
       if (!views.has("orders")) {
-        expect(html).not.toContain("履约中心");
+        expect(html).not.toContain("采购订单");
       }
       if (!views.has("invoices")) {
-        expect(html).not.toContain("发票匹配");
+        expect(html).not.toContain("发票中心");
       }
       if (!views.has("contracts")) {
-        expect(html).not.toContain("合同管理");
+        expect(html).not.toContain("合同中心");
       }
       if (!views.has("audit")) {
-        expect(html).not.toContain("全局审计");
+        expect(html).not.toContain("审计日志");
       }
     }
   });
 
-  it("RoleSwitcher allows selecting any valid DemoRole and triggers onChange", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const roleChangeMock = vi.fn();
-
-    await act(async () => {
-      root.render(<RoleSwitcher role="buyer" onChange={roleChangeMock} />);
-    });
+  it("role switcher in the workbench top bar persists the demo role", async () => {
+    localStorage.removeItem("procurement.demo-role");
+    const { host, unmount } = await mountWorkbench();
 
     const select = host.querySelector('select[aria-label="演示角色"]') as HTMLSelectElement;
     expect(select).toBeTruthy();
@@ -262,8 +269,9 @@ describe("CHALLENGER 3: Role Filtering & State Transition Matrix", () => {
       select.dispatchEvent(new Event("change", { bubbles: true }));
     });
 
-    expect(roleChangeMock).toHaveBeenCalledWith("approver");
-    await act(async () => root.unmount());
+    expect(localStorage.getItem("procurement.demo-role")).toBe("approver");
+    await unmount();
+    localStorage.removeItem("procurement.demo-role");
   });
 });
 

@@ -81,6 +81,41 @@ public class AiTaskRecord {
         return record;
     }
 
+    /**
+     * Terminal reconciliation: an open (PENDING/RUNNING) step must never outlive its
+     * task. The creation-time placeholder at sequence 0 is only a "waiting for Agent"
+     * promise, so a task that reached SUCCEEDED/FAILED/CANCELLED closes it instead of
+     * leaving the workbench spinner turning forever.
+     *
+     * @return true when this record was still open and has now been closed.
+     */
+    public boolean close(
+            AiStepStatus terminal,
+            String summary,
+            AiErrorCategory errorCategory,
+            String errorCode,
+            String errorMessage,
+            Instant finishedAt) {
+        if (status != AiStepStatus.PENDING && status != AiStepStatus.RUNNING) return false;
+        if (terminal != AiStepStatus.FAILED) {
+            // Only a failure may rewrite the error triple; a closed success stays clean.
+            this.errorCategory = null;
+            this.errorCode = null;
+            this.errorMessage = null;
+        } else {
+            this.errorCategory = errorCategory;
+            this.errorCode = truncate(errorCode, 100);
+            this.errorMessage = truncate(errorMessage, 1000);
+        }
+        this.status = terminal;
+        if (summary != null && !summary.isBlank()) this.summary = truncate(summary, 500);
+        var started = startedAt == null ? createdAt : startedAt;
+        this.startedAt = started;
+        this.finishedAt = finishedAt;
+        this.durationMs = duration(started, finishedAt);
+        return true;
+    }
+
     public static AiTaskRecord pending(String aiTaskId, String operationId, int attempt) {
         return create(
                 aiTaskId,

@@ -12,6 +12,7 @@ const EMPTY: WorkbenchUrlState = {
   q: "",
   page: 0,
   orderTask: null,
+  invoiceOrder: null,
 };
 
 describe("procurement workbench URL state", () => {
@@ -51,6 +52,17 @@ describe("procurement workbench URL state", () => {
     expect(search).toContain("order_task=");
     expect(readWorkbenchUrl(search)).toEqual(state);
     expect(readWorkbenchUrl(`${search}&task=${"h".repeat(32)}`).orderTask).toBe("g".repeat(32));
+  });
+
+  it("round-trips the invoice-order focus set from order cards", () => {
+    const state: WorkbenchUrlState = {
+      ...EMPTY,
+      view: "invoices",
+      invoiceOrder: "i".repeat(32),
+    };
+    const search = workbenchSearch(state);
+    expect(search).toContain("invoice_order=");
+    expect(readWorkbenchUrl(search)).toEqual(state);
   });
 
   it("falls back from invalid URL values without losing a valid task", () => {

@@ -27,26 +27,24 @@ type Props = {
   onChange: (view: WorkbenchView) => void;
 };
 
+/** 导航顺序 = 采购生命周期：询价比价 → 定标审批 → 合同 → 订单 → 发票 → 报表（P-UX①）。 */
 const PRIMARY_ITEMS = [
   { id: "workbench" as const, label: "工作台", icon: LayoutDashboard },
   { id: "tasks" as const, label: "采购任务", icon: ListTodo },
-  { id: "orders" as const, label: "履约中心", icon: ShoppingCart },
-];
-
-const FULFILLMENT_ITEMS = [
-  { id: "invoices" as const, label: "发票匹配", icon: Receipt },
-];
-
-const BUSINESS_ITEMS = [
-  { id: "suppliers" as const, label: "供应商档案", icon: Users },
-  { id: "contracts" as const, label: "合同管理", icon: FileSignature },
+  { id: "reviews" as const, label: "人工审核", icon: ClipboardCheck },
+  { id: "contracts" as const, label: "合同中心", icon: FileSignature },
+  { id: "orders" as const, label: "采购订单", icon: ShoppingCart },
+  { id: "invoices" as const, label: "发票中心", icon: Receipt },
   { id: "reports" as const, label: "统计报表", icon: BarChart3 },
 ];
 
+const BUSINESS_ITEMS = [
+  { id: "suppliers" as const, label: "供应商管理", icon: Users },
+];
+
 const MANAGEMENT_ITEMS: Array<{ id: WorkbenchView; label: string; icon: typeof Users }> = [
-  { id: "ai", label: "AI 任务诊断", icon: Bot },
-  { id: "reviews", label: "人工审核", icon: ClipboardCheck },
-  { id: "audit", label: "全局审计", icon: ScrollText },
+  { id: "ai", label: "AI 任务中心", icon: Bot },
+  { id: "audit", label: "审计日志", icon: ScrollText },
   { id: "system", label: "系统信息", icon: Server },
 ];
 
@@ -57,7 +55,6 @@ function countFor(id: WorkbenchView, aiAttention: number, reviewAttention: numbe
 export function WorkbenchNavigation({ active, role, aiAttention, reviewAttention, onChange }: Props) {
   const visible = new Set(visibleViews(role));
   const primary = PRIMARY_ITEMS.filter((item) => visible.has(item.id));
-  const fulfillment = FULFILLMENT_ITEMS.filter((item) => visible.has(item.id));
   const business = BUSINESS_ITEMS.filter((item) => visible.has(item.id));
   const management = MANAGEMENT_ITEMS.filter((item) => visible.has(item.id));
 
@@ -114,11 +111,6 @@ export function WorkbenchNavigation({ active, role, aiAttention, reviewAttention
         <div className="proc-primary-nav-label px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-text-muted">采购主线</div>
         <div className="proc-nav-primary-items flex flex-col gap-1">
           {primary.map((item) => renderItem(item))}
-          {fulfillment.length ? (
-            <div className="proc-nav-children flex flex-col gap-1" aria-label="履约中心二级入口">
-              {fulfillment.map((item) => renderItem(item, true))}
-            </div>
-          ) : null}
         </div>
       </div>
 
@@ -132,7 +124,7 @@ export function WorkbenchNavigation({ active, role, aiAttention, reviewAttention
           >
             <span className="proc-nav-group-title flex items-center gap-2">
               <FolderOpen size={15} />
-              <span>业务资料</span>
+              <span>基础资料</span>
             </span>
             <ChevronDown size={14} className={`proc-nav-chevron transition-transform duration-200 ${businessOpen ? "open rotate-0" : "-rotate-90"}`} />
           </button>

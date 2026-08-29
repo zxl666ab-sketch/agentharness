@@ -8,6 +8,7 @@ import {
   Download,
   LoaderCircle,
   PackageCheck,
+  Receipt,
   Truck,
   X,
 } from "lucide-react";
@@ -134,6 +135,8 @@ type Props = {
   /** 闭环衔接：聚焦指定采购任务的订单（P1-3） */
   highlightTaskId?: string | null;
   onBackToTask?: (taskId: string) => void;
+  /** P-UX⑧：发票阶段动作跨中心直达（携带订单聚焦） */
+  onOpenInvoice?: (order: OrderView) => void;
 };
 
 function transitionKey(keys: Map<string, string>, scope: string, payload: unknown) {
@@ -153,6 +156,7 @@ type OrderCardProps = {
   onOpenReceive: (order: OrderView) => void;
   onCloseRequest: (order: OrderView, notes: string) => void;
   onOpenPay: (order: OrderView) => void;
+  onOpenInvoice?: (order: OrderView) => void;
 };
 
 /** 单张订单卡（memo 化：弹窗表单打字时 props 不变，卡片不重渲）。 */
@@ -164,6 +168,7 @@ const OrderCard = memo(function OrderCard({
   onOpenReceive,
   onCloseRequest,
   onOpenPay,
+  onOpenInvoice,
 }: OrderCardProps) {
   const next = fulfillmentNextStep(order);
   return (
@@ -203,6 +208,17 @@ const OrderCard = memo(function OrderCard({
         ) : null}
         {order.status === "RECEIVED" ? (
           <>
+            {/* P-UX⑧：发票阶段不再只是文字提示，给出跨中心直达按钮 */}
+            {order.invoice_status !== "RECONCILED" && onOpenInvoice ? (
+              <button
+                className={`proc-button inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all shadow-xs ${order.invoice_status === "DIFF_HOLD" ? "bg-danger text-white hover:bg-rose-700" : order.invoice_status === "MATCHED" ? "bg-warning text-white hover:bg-amber-600" : "bg-accent text-white hover:bg-accent-strong"}`}
+                type="button"
+                onClick={() => onOpenInvoice(order)}
+              >
+                <Receipt size={14} />
+                {order.invoice_count === 0 ? "上传发票" : order.invoice_status === "REGISTERED" ? "查看匹配进度" : order.invoice_status === "DIFF_HOLD" ? "处理发票差异" : order.invoice_status === "MATCHED" ? "前往核销" : "上传发票"}
+              </button>
+            ) : null}
             {order.settlement ? (
               <span className="proc-settlement-inline inline-flex items-center gap-2 text-xs font-medium text-text-secondary bg-surface-subtle px-2.5 py-1 rounded-lg border border-border">
                 <CreditCard size={14} className="text-accent" />
@@ -249,7 +265,7 @@ const OrderCard = memo(function OrderCard({
   );
 });
 
-export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
+export function OrderCenter({ highlightTaskId = null, onBackToTask, onOpenInvoice }: Props) {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<OrderStatus | "">("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -543,13 +559,14 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
             onOpenReceive={openReceive}
             onCloseRequest={openClose}
             onOpenPay={openPay}
+            onOpenInvoice={onOpenInvoice}
           />
         ))}
       </div>
 
       {receiveTarget ? (
         <div
-          className="proc-drawer-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
+          className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
           role="presentation"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget && busy !== `receive:${receiveTarget.id}`) setReceiveTarget(null);
@@ -557,7 +574,7 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
         >
           <section ref={receiveDialogRef} className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="receive-title">
             <header className="flex items-center justify-between pb-3 border-b border-border/60">
-              <div className="flex items-center gap-2 text-text font-bold text-base"><PackageCheck size={18} className="text-accent" /><h2 id="receive-title">确认收货</h2></div>
+              <div className="flex items-center gap-2 text-text font-bold text-base"><PackageCheck size={18} className="text-accent" /><h2 id="receive-title">登记本批收货</h2></div>
               <button className="proc-icon-button compact w-7 h-7 rounded-lg border border-border flex items-center justify-center text-text-muted hover:text-text" type="button" title="关闭" aria-label="关闭" onClick={() => setReceiveTarget(null)} disabled={busy === `receive:${receiveTarget.id}`}><X size={16} /></button>
             </header>
             <div className="proc-supplier-form flex flex-col gap-3">
@@ -584,7 +601,7 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
 
       {closeTarget ? (
         <div
-          className="proc-drawer-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
+          className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
           role="presentation"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget && busy !== `close:${closeTarget.id}`) setCloseTarget(null);
@@ -616,7 +633,7 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask }: Props) {
 
       {payTarget ? (
         <div
-          className="proc-drawer-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
+          className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
           role="presentation"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget && busy !== `pay:${payTarget.settlementId}`) setPayTarget(null);

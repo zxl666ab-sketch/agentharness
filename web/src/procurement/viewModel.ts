@@ -1,4 +1,12 @@
-import type { ContractStatus, OrderView, ProcurementRequest, ProcurementStatus } from "./types";
+import type {
+  AiStepStatus,
+  AiTaskStatus,
+  ComparisonSnapshot,
+  ContractStatus,
+  OrderView,
+  ProcurementRequest,
+  ProcurementStatus,
+} from "./types";
 
 /**
  * 采购任务视图模型（P1-1/P1-2/P1-3 共用）。
@@ -34,6 +42,29 @@ export const STATUS_TONES: Record<ProcurementStatus, string> = {
 };
 
 /** 定标前只展示采购决策主线，避免把尚不可执行的履约环节提前暴露给用户。 */
+/**
+ * AI 任务终态集合：进入终态后，时间线里任何未结束的步骤都不再是"进行中"。
+ * Agent 步骤事件可能缺失（历史任务、事件与结果分属不同 Kafka topic），
+ * 因此渲染层必须以任务终态为准，不能让转圈永远停在占位步骤上。
+ */
+export const AI_TASK_TERMINAL_STATUSES: readonly AiTaskStatus[] = [
+  "SUCCEEDED",
+  "FAILED",
+  "CANCELLED",
+];
+
+export function aiTaskIsTerminal(status: AiTaskStatus): boolean {
+  return AI_TASK_TERMINAL_STATUSES.includes(status);
+}
+
+/** 步骤是否真的在推进：仅当步骤未结束且任务尚未进入终态。 */
+export function aiStepInFlight(taskStatus: AiTaskStatus, stepStatus: AiStepStatus): boolean {
+  if (stepStatus === "SUCCEEDED" || stepStatus === "FAILED" || stepStatus === "SKIPPED") {
+    return false;
+  }
+  return !aiTaskIsTerminal(taskStatus);
+}
+
 export const PROCUREMENT_DECISION_STEPS = [
   "上传与解析",
   "字段复核",
@@ -58,6 +89,17 @@ export function statusLabel(status: ProcurementStatus): string {
   return STATUS_LABELS[status] ?? status;
 }
 
+/** 徽章文案必须与"能不能批"一致：全部淘汰时不得宣称"待审批"（P-UX④）。 */
+export function statusLabelFor(request: {
+  status: ProcurementStatus;
+  comparison?: ComparisonSnapshot | null;
+}): string {
+  if (request.status === "analyzed" && request.comparison && request.comparison.result.eligible_count === 0) {
+    return "比价完成（无合格报价）";
+  }
+  return statusLabel(request.status);
+}
+
 /** 合同状态文案唯一来源（ContractCenter 与工作台任务详情共用，避免内联重复/兜底误标）。 */
 export const CONTRACT_STATUS_LABELS: Record<ContractStatus, string> = {
   DRAFT: "草拟中",
@@ -74,6 +116,33 @@ export function contractStatusLabel(status: ContractStatus): string {
 
 export function statusTone(status: ProcurementStatus): string {
   return STATUS_TONES[status] ?? "neutral";
+}
+
+/** 已终结的采购任务（正式决定已形成或流程关闭）。 */
+const SUPERSEDED_TASK_STATUSES: readonly string[] = ["approved", "no_award", "cancelled"];
+
+export function isSupersededTaskStatus(status: string | undefined | null): boolean {
+  return !!status && SUPERSEDED_TASK_STATUSES.includes(status);
+}
+
+/**
+ * 幽灵审核：任务已正式定标/关闭，但审核记录仍停留在 PENDING（后端在定标路径
+ * 未同步收敛）。它不应计入待办徽标，也不应允许提交（服务端指纹校验必拒）。
+ */
+export function reviewIsGhost(
+  review: { status: string; business_id: string },
+  requests: Array<{ id: string; status: string }>,
+): boolean {
+  if (review.status !== "PENDING") return false;
+  const task = requests.find((item) => item.id === review.business_id);
+  return isSupersededTaskStatus(task?.status);
+}
+
+export function actionablePendingReviewCount(
+  reviews: Array<{ status: string; business_id: string }>,
+  requests: Array<{ id: string; status: string }>,
+): number {
+  return reviews.filter((item) => item.status === "PENDING" && !reviewIsGhost(item, requests)).length;
 }
 
 /** 状态推进到的闭环步骤（已完成步骤数；0 表示终止态不推进）。 */
@@ -203,6 +272,7 @@ export function closedLoopProgress(
 export type NextStepAction =
   | { kind: "quotes" }
   | { kind: "compare" }
+  | { kind: "analyze" }
   | { kind: "orders" }
   | { kind: "reviews" }
   | { kind: "none" };
@@ -217,7 +287,7 @@ export type NextStepGuide = {
 type GuidanceInput = Pick<
   ProcurementRequest,
   "status" | "requirement_confirmed" | "quote_count" | "unresolved_field_count"
-> & Partial<Pick<ProcurementRequest, "attachments">>;
+> & Partial<Pick<ProcurementRequest, "attachments" | "comparison">>;
 
 /** 状态驱动的「下一步」引导：文案与可执行动作一一对应，卡点原因可见。 */
 export function nextStepGuide(request: GuidanceInput): NextStepGuide {
@@ -269,7 +339,7 @@ export function nextStepGuide(request: GuidanceInput): NextStepGuide {
       return {
         hint: "报价字段已就绪，可以开始比价",
         blocker: null,
-        action: { kind: "compare" },
+        action: { kind: "analyze" },
         actionLabel: "开始比价",
       };
     case "analyzing":
@@ -280,6 +350,14 @@ export function nextStepGuide(request: GuidanceInput): NextStepGuide {
         actionLabel: null,
       };
     case "analyzed":
+      if (request.comparison && request.comparison.result.eligible_count === 0) {
+        return {
+          hint: "本轮无合格报价，不能审批；请调整需求或补充报价",
+          blocker: "全部报价已被硬性规则淘汰",
+          action: { kind: "quotes" },
+          actionLabel: "去调整需求",
+        };
+      }
       return {
         hint: "比价完成，等待人工审批",
         blocker: null,

@@ -19,7 +19,7 @@ import { AgentOfflineNotice } from "./AgentOfflineNotice";
 import { isViewVisible, type DemoRole } from "./roles";
 import type { AiTaskView, ProcurementRequestSummary, ReviewView } from "./types";
 import type { TaskFilter, WorkbenchView } from "./workbenchUrl";
-import { statusLabel, statusTone } from "./viewModel";
+import { actionablePendingReviewCount, statusLabel, statusTone } from "./viewModel";
 
 type Props = {
   role: DemoRole;
@@ -69,7 +69,7 @@ export function WorkbenchHome({
 
   const attention = requests.filter((item) => ATTENTION.has(item.status)).length;
   const aiIssues = aiTasks.filter((item) => item.status === "FAILED" || item.stale).length;
-  const pendingReviews = reviews.filter((item) => item.status === "PENDING").length;
+  const pendingReviews = actionablePendingReviewCount(reviews, requests);
   const recent = requests.slice(0, 8);
   const todo = requests.filter((item) => ATTENTION.has(item.status)).slice(0, 6);
 
@@ -156,7 +156,7 @@ export function WorkbenchHome({
           </div>
           <div className="proc-stat-body flex flex-col gap-0.5 mt-2">
             <strong className="proc-stat-number text-2xl font-bold font-mono text-text tracking-tight">{aiIssues + invoiceHolds + overdueTotal}</strong>
-            <span className="proc-stat-sub text-xs text-text-muted">AI异常 {aiIssues} · 差异发票 {invoiceHolds}</span>
+            <span className="proc-stat-sub text-xs text-text-muted">AI异常 {aiIssues} · 履约逾期 {overdueTotal} · 差异发票 {invoiceHolds}</span>
           </div>
         </button>
       </section>

@@ -557,8 +557,8 @@
 .proc-center-filters select:focus, .proc-filter-search:focus-within { border-color: var(--accent); outline: 0; box-shadow: 0 0 0 3px var(--accent-soft); }
 .proc-filter-search { display: grid !important; height: 34px; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-muted) !important; grid-template-columns: 16px minmax(0, 1fr); }
 .proc-filter-search input:focus { outline: 0; }
-.proc-center-layout { display: grid; min-width: 0; min-height: 0; flex: 1; overflow: hidden; grid-template-columns: 326px minmax(0, 1fr); }
-.proc-center-list { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow-y: auto; border-right: 1px solid var(--border); background: var(--surface); }
+.proc-center-layout { display: grid; min-width: 0; }
+.proc-center-list { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--border); background: var(--surface); }
 .proc-center-list > header { position: sticky; z-index: 2; top: 0; display: flex; min-height: 39px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--surface-subtle); }
 .proc-center-list > header strong { font-size: 10px; }
 .proc-center-list > header span { color: var(--text-muted); font-size: 8px; }
@@ -575,7 +575,7 @@
 .proc-center-list-meta time { flex: 0 0 auto; }
 .proc-center-empty { display: flex; min-height: 180px; align-items: center; justify-content: center; gap: 8px; padding: 18px; color: var(--text-muted); font-size: 10px; text-align: center; }
 .proc-center-empty.danger { color: var(--danger); }
-.proc-center-detail { min-width: 0; min-height: 0; overflow: auto; background: var(--bg); }
+.proc-center-detail { min-width: 0; background: var(--bg); }
 .proc-ai-detail, .proc-review-detail { display: grid; min-width: 0; gap: 12px; padding: 14px; }
 .proc-detail-head { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 2px; }
 .proc-detail-head > div { min-width: 0; }
@@ -653,8 +653,8 @@
 .proc-center-filters select:focus, .proc-filter-search:focus-within { border-color: var(--accent); outline: 0; box-shadow: 0 0 0 3px var(--accent-soft); }
 .proc-filter-search { display: grid !important; height: 34px; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-muted) !important; grid-template-columns: 16px minmax(0, 1fr); }
 .proc-filter-search input:focus { outline: 0; }
-.proc-center-layout { display: grid; min-width: 0; min-height: 0; flex: 1; overflow: hidden; grid-template-columns: 326px minmax(0, 1fr); }
-.proc-center-list { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow-y: auto; border-right: 1px solid var(--border); background: var(--surface); }
+.proc-center-layout { display: grid; min-width: 0; }
+.proc-center-list { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--border); background: var(--surface); }
 .proc-center-list > header { position: sticky; z-index: 2; top: 0; display: flex; min-height: 39px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--surface-subtle); }
 .proc-center-list > header strong { font-size: 10px; }
 .proc-center-list > header span { color: var(--text-muted); font-size: 8px; }
@@ -671,7 +671,7 @@
 .proc-center-list-meta time { flex: 0 0 auto; }
 .proc-center-empty { display: flex; min-height: 180px; align-items: center; justify-content: center; gap: 8px; padding: 18px; color: var(--text-muted); font-size: 10px; text-align: center; }
 .proc-center-empty.danger { color: var(--danger); }
-.proc-center-detail { min-width: 0; min-height: 0; overflow: auto; background: var(--bg); }
+.proc-center-detail { min-width: 0; background: var(--bg); }
 .proc-ai-detail, .proc-review-detail { display: grid; min-width: 0; gap: 12px; padding: 14px; }
 .proc-detail-head { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 2px; }
 .proc-detail-head > div { min-width: 0; }

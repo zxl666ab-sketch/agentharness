@@ -58,6 +58,25 @@ SUPPORTED_OPERATIONS = frozenset(
 )
 
 
+# AiStepStatus -> AiTaskEventEnvelope.event_type (contracts schema enum).
+_STEP_EVENT_TYPES = {
+    "RUNNING": "STEP_STARTED",
+    "SUCCEEDED": "STEP_SUCCEEDED",
+    "FAILED": "STEP_FAILED",
+    "SKIPPED": "STEP_SUCCEEDED",
+}
+
+
+def _attempt_number(payload: Any) -> int:
+    """Java stamps ``attempt`` on the command payload of every AI-task retry."""
+    if not isinstance(payload, dict):
+        return 1
+    try:
+        return max(1, int(payload.get("attempt") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _canonical_json(value: Any) -> bytes:
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -380,6 +399,15 @@ class AgentService:
         if payload_sha != _sha256(payload):
             logger.warning("命令 payload_sha256 不匹配：%s", operation_id)
             return
+        # 步骤投影：只有携带 ai_task_id 的命令（报价分析与其重试）才有执行时间线。
+        attempt = _attempt_number(payload)
+
+        def step(sequence: int, name: str, state: str, progress: float, summary: str) -> None:
+            self._publish_ai_step(
+                envelope, attempt, sequence, name, state, progress, summary
+            )
+
+        step(1, "INPUT_VALIDATE", "RUNNING", 0.15, "Agent 已接收任务，正在校验命令签名与输入指纹")
         try:
             body = AgentCommandBody.model_validate(
                 {
@@ -392,11 +420,18 @@ class AgentService:
                     "payload": payload,
                 }
             )
+            step(2, "INPUT_VALIDATE", "SUCCEEDED", 0.3, "命令签名、输入指纹与任务上下文校验通过")
+            step(3, "RULE_ANALYSIS", "RUNNING", 0.45, "正在执行采购分析（受治理 Runtime）")
             response = asyncio.run(self.commands.execute(body))
             status = str(response.get("status") or "failed")
             result = response.get("result")
             result = result if isinstance(result, dict) else None
             error = str(response.get("error") or "") or None
+            if status != "failed":
+                step(4, "RULE_ANALYSIS", "SUCCEEDED", 0.85, "采购分析执行完成")
+                step(5, "RESULT_PUBLISH", "RUNNING", 0.95, "正在回写并发布分析结果")
+            # 失败路径不发终态步骤事件：在途步骤由 Java 结果消费者收尾成 FAILED（带错误），
+            # 否则步骤事件会抢先把任务判死，跳过自动重试与 ai_task_failed 审计。
         except Exception as exc:  # noqa: BLE001 - failure must reach Java
             logger.exception("命令处理失败：%s", operation_id)
             result = _failure_details(exc)
@@ -456,6 +491,77 @@ class AgentService:
             "",
             {"provider": provider, **detail},
         )
+
+    def _publish_ai_step(
+        self,
+        envelope: dict[str, Any],
+        attempt: int,
+        sequence: int,
+        step: str,
+        step_status: str,
+        progress: float,
+        summary: str,
+    ) -> None:
+        """Publish one ``ai_task.step`` event for an AI-task-bearing command.
+
+        Java's ``KafkaEventConsumer`` routes ``type == "ai_task.step"`` to
+        ``AiTaskService.applyStepEvent``, which — per the frozen
+        ``AiTaskEventEnvelope`` contract — reads ``ai_task_id``/``operation_id``/
+        ``step``/``step_status``/``attempt``/``sequence``/``progress`` from the
+        **top level** of the envelope, not from ``payload``. Nesting them would
+        make the consumer silently drop every step, which is exactly how the
+        workbench timeline ended up stuck on its creation-time placeholder.
+
+        Step events are best-effort projection: a publish failure must never
+        change what the command result says.
+        """
+        if self.producer is None:
+            return
+        ai_task_id = str(envelope.get("ai_task_id") or "")
+        operation_id = str(envelope.get("operation_id") or "")
+        if not ai_task_id or not operation_id:
+            return
+        payload = {
+            "ai_task_id": ai_task_id,
+            "operation_id": operation_id,
+            "step": step,
+            "step_status": step_status,
+            "attempt": attempt,
+            "sequence": sequence,
+            "progress": progress,
+            "summary": summary,
+        }
+        message = {
+            "schema_version": 1,
+            "message_type": "ai_task.event",
+            "event_id": uuid.uuid4().hex,
+            "type": "ai_task.step",
+            "event_type": _STEP_EVENT_TYPES.get(step_status, "STEP_STARTED"),
+            "task_id": str(envelope.get("aggregate_id") or ""),
+            "run_id": str(envelope.get("run_id") or ""),
+            "global_seq": self._next_global_seq(),
+            "occurred_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "operation_id": operation_id,
+            "ai_task_id": ai_task_id,
+            "business_id": str(
+                envelope.get("business_id") or envelope.get("aggregate_id") or ""
+            ),
+            "trace_id": str(envelope.get("trace_id") or ""),
+            "generation": envelope.get("generation"),
+            "step": step,
+            "step_status": step_status,
+            "attempt": attempt,
+            "sequence": sequence,
+            "progress": progress,
+            "summary": summary,
+            "payload": payload,
+            "payload_sha256": _sha256(payload),
+        }
+        message["signature"] = _sign_envelope(self.hmac_key, message)
+        try:
+            self.producer.send(EVENTS_TOPIC, key=ai_task_id, value=message)
+        except Exception:  # noqa: BLE001 - projection only, never fails the command
+            logger.exception("ai_task.step 事件发布失败：step=%s seq=%s", step, sequence)
 
     def _publish_result(
         self,

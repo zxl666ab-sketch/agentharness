@@ -21,7 +21,7 @@ import {
   WifiOff,
   ChevronUp,
 } from "lucide-react";
-import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
 
 import { AuditView } from "./AuditView";
 import { AiTaskRecovery } from "./AiTaskRecovery";
@@ -47,9 +47,11 @@ import { useWorkbenchState } from "./useWorkbenchState";
 import {
   FULFILLMENT_STEPS,
   PROCUREMENT_DECISION_STEPS,
+  actionablePendingReviewCount,
   fulfillmentProgress,
   procurementDecisionProgress,
   statusLabel,
+  statusLabelFor,
   statusTone,
 } from "./viewModel";
 import { WorkbenchHome } from "./WorkbenchHome";
@@ -109,7 +111,7 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
   const [taskListCollapsed, setTaskListCollapsed] = useState(false);
   const {
     view, selectedId, selectedAiId, selectedReviewId, activeTab, taskFilter, taskPage,
-    search, showCreate, orderTask, actionError,
+    search, showCreate, orderTask, invoiceOrder, actionError,
     setTaskFilter, setTaskPage, setSearch, setActiveTab, openView, openTask, openTaskFilter,
     openCreate, selectAiTask, selectReview, navigate,
   } = state;
@@ -119,7 +121,7 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
     filtered, visibleRequests, totalTaskPages,
   } = queries;
   const {
-    busy, aiActionBusy, aiActionError, showConfig, configForm, configBusy, configError,
+    busy, actionErrorSource, generateContract, aiActionBusy, aiActionError, showConfig, configForm, configBusy, configError,
     configNotice, deleteTarget, deleteBusy, deleteError, conversationOpen,
     setConversationOpen, setShowConfig, setDeleteTarget, openDelete, deleteRequest,
     openConfig, updateConfigField, saveConfig, startConversation, uploadQuotes, correctField,
@@ -149,6 +151,11 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
   useEffect(() => {
     if (detail?.id) setConversationOpen(true);
   }, [detail?.id, setConversationOpen]);
+
+  // P-UX⑧：订单卡 → 发票中心跨中心直达（稳定引用，保住 OrderCard 的 memo）。
+  const openInvoiceForOrder = useCallback((order: { id: string }) => {
+    navigate({ view: "invoices", task: null, ai: null, review: null, orderTask: null, invoiceOrder: order.id });
+  }, [navigate]);
 
   return (
     <div className="proc-app">
@@ -215,7 +222,7 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
             active={view}
             role={role}
             aiAttention={allAiTasks.filter((task) => task.status === "FAILED" || task.stale).length}
-            reviewAttention={reviews.filter((review) => review.status === "PENDING").length}
+            reviewAttention={actionablePendingReviewCount(reviews, requests)}
             onChange={openView}
           />
           <div className="proc-rail-status flex items-center gap-1.5 text-xs font-semibold" title={agentDown ? "Java 采购服务在线，但 Agent 心跳已过期（分析类任务可能停滞）" : undefined}>
@@ -341,9 +348,9 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
           ) : view === "suppliers" ? (
             <DeferredCenter><SupplierCenter onOpenTask={openTask} /></DeferredCenter>
           ) : view === "orders" ? (
-            <DeferredCenter><OrderCenter highlightTaskId={orderTask} onBackToTask={(taskId) => openTask(taskId)} /></DeferredCenter>
+            <DeferredCenter><OrderCenter highlightTaskId={orderTask} onBackToTask={(taskId) => openTask(taskId)} onOpenInvoice={openInvoiceForOrder} /></DeferredCenter>
           ) : view === "invoices" ? (
-            <DeferredCenter><InvoiceCenter /></DeferredCenter>
+            <DeferredCenter><InvoiceCenter focusOrderId={invoiceOrder} /></DeferredCenter>
           ) : view === "contracts" ? (
             <DeferredCenter><ContractCenter /></DeferredCenter>
           ) : view === "reports" ? (
@@ -362,7 +369,7 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
             <div className="flex-1 w-full min-h-full flex items-center justify-center p-4 sm:p-8 bg-surface-subtle/30 overflow-auto">
               <NewProcurementConversation
                 busy={busy === "conversation"}
-                error={actionError}
+                error={actionErrorSource === "conversation" ? actionError : null}
                 maxFileBytes={metaQuery.data?.max_file_bytes ?? 5 * 1024 * 1024}
                 maxTotalBytes={metaQuery.data?.max_conversation_upload_bytes ?? 20 * 1024 * 1024}
                 maxQuotes={metaQuery.data?.max_quotes_per_request ?? 50}
@@ -395,7 +402,7 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
                     </div>
                   </div>
                   <span className={`proc-status ${statusTone(detail.status)} text-xs font-semibold px-3 py-1 rounded-full border inline-flex items-center gap-1.5 flex-shrink-0`}>
-                    <i className="w-2 h-2 rounded-full bg-current" />{statusLabel(detail.status)}
+                    <i className="w-2 h-2 rounded-full bg-current" />{statusLabelFor(detail)}
                   </span>
                 </div>
 
@@ -457,8 +464,11 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
                 request={detail}
                 order={taskOrder ?? null}
                 contract={taskContract ?? null}
+                busy={busy}
+                error={actionErrorSource === "contract" ? actionError : null}
                 onAction={handleNextStep}
                 onOpenContract={() => openView("contracts")}
+                onGenerateContract={generateContract}
               />
 
               {aiTaskQuery.data ? (
@@ -483,7 +493,7 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
                   >
                     <Bot size={15} />
                     <strong>Agent 会话</strong>
-                    <span className="proc-conversation-toggle-status"><i className={statusTone(detail.status)} />{statusLabel(detail.status)}</span>
+                    <span className="proc-conversation-toggle-status"><i className={statusTone(detail.status)} />{statusLabelFor(detail)}</span>
                     {conversationOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                   </button>
                   {conversationOpen ? (
@@ -491,7 +501,7 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
                       <ProcurementConversation
                         request={detail}
                         structuredInteractionActive={structuredInteractionActive}
-                        actionError={actionError}
+                        actionError={actionErrorSource === "conversation" ? actionError : null}
                         onResume={resume}
                         onRecover={analyze}
                         onOpenComparison={() => setActiveTab("compare")}
@@ -510,8 +520,8 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
                   <div className="proc-tab-content">
                     {activeTab === "quotes" && metaQuery.data ? (
                       <>
-                        <RequirementReview request={detail} busy={busy === "requirement"} error={actionError} onSave={correctRequirement} />
-                        <QuoteWorkspace request={detail} meta={metaQuery.data} busy={busy} error={actionError} onUpload={uploadQuotes} onCorrect={correctField} onAnalyze={analyze} />
+                        <RequirementReview request={detail} busy={busy === "requirement"} error={actionErrorSource === "requirement" ? actionError : null} onSave={correctRequirement} />
+                        <QuoteWorkspace request={detail} meta={metaQuery.data} busy={busy} error={actionErrorSource === "workspace" ? actionError : null} onUpload={uploadQuotes} onCorrect={correctField} onAnalyze={analyze} />
                       </>
                     ) : null}
                     {activeTab === "quotes" && metaQuery.isPending ? (
@@ -529,7 +539,7 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
                       <ComparisonView
                         request={detail}
                         busy={busy}
-                        error={actionError}
+                        error={actionErrorSource === "decision" ? actionError : null}
                         onAnalyze={analyze}
                         onApprove={approve}
                         onNoAward={noAward}

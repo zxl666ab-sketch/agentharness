@@ -22,24 +22,24 @@ export function writeRole(role: DemoRole) {
 }
 
 /**
- * 角色决定侧边栏可见项（冻结设计 4.7）：
- * 采购员：工作台/采购任务/AI 任务/人工审核/供应商/订单/报表
- * 审批人：待审批优先（人工审核/AI 任务/订单收货确认）
+ * 角色决定侧边栏可见项（冻结设计 4.7，导航顺序=采购生命周期 P-UX①）：
+ * 采购员：工作台/采购任务/人工审核/合同/订单/发票/供应商/报表 + AI 任务
+ * 审批人：工作台/人工审核/采购订单（收货确认）/AI 任务
  * 管理员：全部 + 系统管理（审计日志/系统信息）
  */
 const VISIBLE_VIEWS: Record<DemoRole, WorkbenchView[]> = {
-  buyer: ["workbench", "tasks", "ai", "reviews", "suppliers", "orders", "invoices", "contracts", "reports"],
-  approver: ["workbench", "orders", "ai", "reviews"],
+  buyer: ["workbench", "tasks", "reviews", "contracts", "orders", "invoices", "suppliers", "reports", "ai"],
+  approver: ["workbench", "reviews", "orders", "ai"],
   admin: [
     "workbench",
     "tasks",
-    "ai",
     "reviews",
-    "suppliers",
+    "contracts",
     "orders",
     "invoices",
-    "contracts",
+    "suppliers",
     "reports",
+    "ai",
     "audit",
     "system",
   ],

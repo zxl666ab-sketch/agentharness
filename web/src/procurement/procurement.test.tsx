@@ -243,11 +243,11 @@ describe("procurement workflow views", () => {
     expect(home).not.toContain("管理驾驶舱");
     expect(home).not.toContain("成本节约率");
     expect(navigation).toContain("工作台");
-    expect(navigation).toContain("履约中心");
-    expect(navigation).toContain("业务资料");
+    expect(navigation).toContain("采购订单");
+    expect(navigation).toContain("基础资料");
     expect(navigation).toContain("管理与技术");
-    expect(navigation).toContain("AI 任务诊断");
-    expect(navigation).toContain("供应商档案");
+    expect(navigation).toContain("AI 任务中心");
+    expect(navigation).toContain("供应商管理");
   });
 
   it("filters navigation by demo role (buyer hides approval views, admin sees all)", () => {
@@ -257,12 +257,12 @@ describe("procurement workflow views", () => {
     const approver = renderToString(
       <WorkbenchNavigation active="workbench" role="approver" aiAttention={2} reviewAttention={1} onChange={() => undefined} />
     );
-    expect(buyer).toContain("供应商档案");
-    expect(approver).toContain("AI 任务诊断");
+    expect(buyer).toContain("供应商管理");
+    expect(approver).toContain("AI 任务中心");
     expect(approver).toContain("人工审核");
-    expect(approver).toContain("履约中心");
+    expect(approver).toContain("采购订单");
     expect(approver).not.toContain("采购任务");
-    expect(approver).not.toContain("供应商档案");
+    expect(approver).not.toContain("供应商管理");
   });
 
   it("disables blind retry for non-retryable AI failures and keeps recovery actions visible", () => {

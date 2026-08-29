@@ -29,6 +29,10 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class AiTaskService {
+    /** Step records that still promise work; they must never survive a terminal task. */
+    private static final List<AiStepStatus> OPEN_STEP_STATUSES =
+            List.of(AiStepStatus.PENDING, AiStepStatus.RUNNING);
+
     private final ProcurementTaskRepository businessTasks;
     private final ProcurementQuoteRepository quotes;
     private final AgentCommandRepository commands;
@@ -192,11 +196,16 @@ public class AiTaskService {
         if (aiTaskId.isBlank() || operationId.isBlank()) return;
         var task = tasks.lockById(aiTaskId).orElse(null);
         if (task == null || !operationId.equals(task.getOperationId())) return;
+        // Kafka topics are independently ordered: a terminal task never takes back an
+        // open step record, or the workbench timeline would start spinning again after
+        // the result was already published.
+        if (isTerminal(task.getStatus())) return;
+        var step = enumOrNull(AiTaskStep.class, envelope.get("step"));
+        var stepStatus = enumOrNull(AiStepStatus.class, envelope.get("step_status"));
+        if (step == null || stepStatus == null) return;
         var attempt = integer(envelope.getOrDefault("attempt", task.getRetryCount() + 1));
         var sequence = integer(envelope.getOrDefault("sequence", 0));
         if (records.existsByAiTaskIdAndAttemptAndSequence(aiTaskId, attempt, sequence)) return;
-        var step = AiTaskStep.valueOf(text(envelope.get("step")));
-        var stepStatus = AiStepStatus.valueOf(text(envelope.get("step_status")));
         var occurredAt = instant(envelope.get("occurred_at"));
         var startedAt = stepStatus == AiStepStatus.RUNNING ? occurredAt : null;
         var finishedAt = switch (stepStatus) {
@@ -217,12 +226,20 @@ public class AiTaskService {
                 nullableText(envelope.get("error_message")),
                 startedAt,
                 finishedAt));
-        if (task.getStatus() == AiTaskStatus.SUCCEEDED
-                || task.getStatus() == AiTaskStatus.CANCELLED) {
-            return; // Kafka topics are independently ordered; never regress a terminal result.
+        if (sequence > 0) {
+            // The sequence-0 placeholder only promised "waiting for the Agent"; the
+            // first real step event proves the Agent picked the task up.
+            closeOpenRecords(
+                    aiTaskId, attempt, AiStepStatus.SUCCEEDED,
+                    "Agent 已接收任务并开始处理", null, null, null, occurredAt, 0);
         }
         var progress = decimal(envelope.getOrDefault("progress", task.getProgress()));
         if (stepStatus == AiStepStatus.RUNNING || stepStatus == AiStepStatus.SUCCEEDED) {
+            if (task.getStatus() == AiTaskStatus.PENDING) {
+                // An Agent that reports a step demonstrably received the command, even if
+                // the dispatch projection lost the race with this event.
+                task.dispatching();
+            }
             task.running(step, progress);
         } else if (stepStatus == AiStepStatus.FAILED) {
             task.failed(
@@ -264,6 +281,7 @@ public class AiTaskService {
                 text(value.getOrDefault("prompt_version", "quote-analysis-v1")),
                 nullableText(value.get("parser_version"))));
         task.succeeded(result.getId());
+        reconcileTimelineOnSuccess(task, command.getOperationId());
         audit.save(AuditEvent.create(
                 task.getBusinessId(),
                 null,
@@ -288,14 +306,25 @@ public class AiTaskService {
             if (task.getStatus() == AiTaskStatus.FAILED) return task;
             task.failed(category, errorCode(error), error, retryable);
             var attempt = task.getRetryCount() + 1;
-            var sequence = records.findFirstByAiTaskIdAndAttemptOrderBySequenceDesc(task.getId(), attempt)
-                    .map(record -> record.getSequence() + 1)
-                    .orElse(1);
-            records.save(AiTaskRecord.create(
-                    task.getId(), command.getOperationId(), attempt, sequence,
-                    task.getCurrentStep() == null ? AiTaskStep.INPUT_VALIDATE : task.getCurrentStep(),
-                    AiStepStatus.FAILED, "AI 任务失败", category, errorCode(error), error,
-                    null, Instant.now()));
+            var failedAt = Instant.now();
+            var closed = closeOpenRecords(
+                    task.getId(), attempt, AiStepStatus.FAILED,
+                    "AI 任务失败", category, errorCode(error), error, failedAt);
+            if (closed == 0) {
+                var sequence = records.findFirstByAiTaskIdAndAttemptOrderBySequenceDesc(
+                                task.getId(), attempt)
+                        .map(record -> record.getSequence() + 1)
+                        .orElse(1);
+                records.save(AiTaskRecord.create(
+                        task.getId(), command.getOperationId(), attempt, sequence,
+                        task.getCurrentStep() == null
+                                ? AiTaskStep.INPUT_VALIDATE : task.getCurrentStep(),
+                        AiStepStatus.FAILED, "AI 任务失败", category, errorCode(error), error,
+                        null, failedAt));
+            }
+            // 更早投递留下的未结束步骤同样不能存活到终态。
+            closeTaskWideRecords(task.getId(), AiStepStatus.SKIPPED,
+                    "任务已进入终态，该步骤未再推进", null, null, null, failedAt);
             audit.save(AuditEvent.create(
                     task.getBusinessId(),
                     null,
@@ -403,6 +432,9 @@ public class AiTaskService {
             operation.cancel();
         }
         task.cancelled();
+        closeTaskWideRecords(
+                task.getId(), AiStepStatus.SKIPPED,
+                "任务已取消，未完成的步骤不再推进", null, null, null, Instant.now());
         idempotency.save(IdempotencyRecord.reserve(
                 scope, key, requestSha, operation == null ? null : operation.getOperationId()));
         audit.save(AuditEvent.create(
@@ -433,6 +465,98 @@ public class AiTaskService {
 
     public Map<String, Object> summary(AiTask task) {
         return views.summary(task);
+    }
+
+    /**
+     * Terminal reconciliation: a succeeded task must present a closed timeline. The
+     * current attempt's open steps are closed as succeeded (the Agent may never have
+     * reported fine-grained steps), leftovers from earlier attempts are marked skipped,
+     * and the terminal RESULT_PUBLISH step is made visible exactly once.
+     */
+    private void reconcileTimelineOnSuccess(AiTask task, String operationId) {
+        var attempt = task.getRetryCount() + 1;
+        var finishedAt = task.getFinishedAt() == null ? Instant.now() : task.getFinishedAt();
+        closeOpenRecords(task.getId(), attempt, AiStepStatus.SUCCEEDED,
+                "Agent 已完成该步骤", null, null, null, finishedAt);
+        closeTaskWideRecords(task.getId(), AiStepStatus.SKIPPED,
+                "任务已进入终态，该步骤未再推进", null, null, null, finishedAt);
+        if (records.existsByAiTaskIdAndAttemptAndStep(
+                task.getId(), attempt, AiTaskStep.RESULT_PUBLISH)) {
+            return;
+        }
+        var sequence = records.findFirstByAiTaskIdAndAttemptOrderBySequenceDesc(
+                        task.getId(), attempt)
+                .map(record -> record.getSequence() + 1)
+                .orElse(1);
+        records.save(AiTaskRecord.create(
+                task.getId(), operationId, attempt, sequence,
+                AiTaskStep.RESULT_PUBLISH, AiStepStatus.SUCCEEDED,
+                "分析结果已发布并回写采购任务", null, null, null, finishedAt, finishedAt));
+    }
+
+    /**
+     * Close every open step of the task, across all attempts. A retried task can leave a
+     * placeholder behind on an earlier attempt, and any open record renders as a spinner.
+     */
+    private int closeTaskWideRecords(
+            String aiTaskId,
+            AiStepStatus terminal,
+            String summary,
+            AiErrorCategory errorCategory,
+            String errorCode,
+            String errorMessage,
+            Instant finishedAt) {
+        var closed = 0;
+        for (var record : records.findByAiTaskIdAndStatusIn(aiTaskId, OPEN_STEP_STATUSES)) {
+            if (record.close(
+                    terminal, summary, errorCategory, errorCode, errorMessage, finishedAt)) {
+                closed++;
+            }
+        }
+        return closed;
+    }
+
+    private int closeOpenRecords(
+            String aiTaskId,
+            int attempt,
+            AiStepStatus terminal,
+            String summary,
+            AiErrorCategory errorCategory,
+            String errorCode,
+            String errorMessage,
+            Instant finishedAt) {
+        return closeOpenRecords(
+                aiTaskId, attempt, terminal, summary, errorCategory, errorCode, errorMessage,
+                finishedAt, Integer.MAX_VALUE);
+    }
+
+    /** @param upToSequence only records at or below this sequence are reconciled. */
+    private int closeOpenRecords(
+            String aiTaskId,
+            int attempt,
+            AiStepStatus terminal,
+            String summary,
+            AiErrorCategory errorCategory,
+            String errorCode,
+            String errorMessage,
+            Instant finishedAt,
+            int upToSequence) {
+        var closed = 0;
+        for (var record : records.findByAiTaskIdAndAttemptAndStatusIn(
+                aiTaskId, attempt, OPEN_STEP_STATUSES)) {
+            if (record.getSequence() > upToSequence) continue;
+            if (record.close(
+                    terminal, summary, errorCategory, errorCode, errorMessage, finishedAt)) {
+                closed++;
+            }
+        }
+        return closed;
+    }
+
+    private static boolean isTerminal(AiTaskStatus status) {
+        return status == AiTaskStatus.SUCCEEDED
+                || status == AiTaskStatus.FAILED
+                || status == AiTaskStatus.CANCELLED;
     }
 
     private Launch replay(IdempotencyRecord record, String requestSha) {
@@ -516,6 +640,16 @@ public class AiTaskService {
     private <T extends Enum<T>> T nullableEnum(Class<T> type, Object value) {
         var text = text(value);
         return text.isBlank() ? null : Enum.valueOf(type, text);
+    }
+    /** Tolerant parse for wire input: an unknown enum must not poison the event topic. */
+    private <T extends Enum<T>> T enumOrNull(Class<T> type, Object value) {
+        var text = text(value);
+        if (text.isBlank()) return null;
+        try {
+            return Enum.valueOf(type, text);
+        } catch (IllegalArgumentException unknown) {
+            return null;
+        }
     }
     private ApiException conflict(String code, String message) {
         return new ApiException(HttpStatus.CONFLICT, code, message);

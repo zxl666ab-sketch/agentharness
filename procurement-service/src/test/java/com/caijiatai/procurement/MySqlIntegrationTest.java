@@ -410,7 +410,19 @@ class MySqlIntegrationTest {
         assertThat(tasks.findById(taskId).orElseThrow().getStatus()).isEqualTo("analyzed");
         assertThat(snapshots.findFirstByTaskIdOrderBySnapshotVersionDesc(taskId)).isPresent();
         assertThat(aiResults.findByAiTaskId(aiTask.getId())).isPresent();
-        assertThat((List<?>) detail.get("records")).hasSize(2);
+        // 终态收尾：占位步骤被 Agent 的首个真实步骤关闭，成功时补齐"发布结果"步骤，
+        // 时间线不得留下 PENDING/RUNNING——否则工作台执行步骤会永远转圈。
+        var stepRecords = (List<?>) detail.get("records");
+        assertThat(stepRecords).hasSize(3);
+        assertThat(stepRecords.stream()
+                .map(item -> String.valueOf(((Map<?, ?>) item).get("status"))).toList())
+                .doesNotContain("PENDING", "RUNNING");
+        assertThat(stepRecords.stream()
+                .map(item -> (Map<?, ?>) item)
+                .filter(item -> "RESULT_PUBLISH".equals(String.valueOf(item.get("step")))))
+                .singleElement()
+                .satisfies(item -> assertThat(String.valueOf(item.get("status")))
+                        .isEqualTo("SUCCEEDED"));
         var persistedResult = (Map<?, ?>) detail.get("result");
         assertThat(persistedResult.containsKey("ai_result_id")).isTrue();
         assertThat(persistedResult.containsKey("input_sha256")).isTrue();
@@ -530,6 +542,11 @@ class MySqlIntegrationTest {
         assertThat(aiTasks.findById(aiTaskId).orElseThrow().getStatus())
                 .isEqualTo(AiTaskStatus.SUCCEEDED);
         assertThat(aiResults.findByAiTaskId(aiTaskId)).isPresent();
+        // 重试恢复后，第一次投递留下的占位步骤同样不能停在未结束状态。
+        var recoveredRecords = (List<?>) aiTaskService.detail(aiTaskId).get("records");
+        assertThat(recoveredRecords.stream()
+                .map(item -> String.valueOf(((Map<?, ?>) item).get("status"))).toList())
+                .doesNotContain("PENDING", "RUNNING");
         assertThat(tasks.findById(taskId).orElseThrow().getStatus()).isEqualTo("analyzed");
     }
 
@@ -544,6 +561,11 @@ class MySqlIntegrationTest {
         var replay = aiTaskService.cancel(aiTask.getId(), "cancel-once-key");
         assertThat(cancelled.getStatus()).isEqualTo(AiTaskStatus.CANCELLED);
         assertThat(replay.getStatus()).isEqualTo(AiTaskStatus.CANCELLED);
+        // 取消同样必须关闭占位步骤：已取消的任务不能留下"等待 Agent 接收任务"的进行中记录。
+        var cancelRecords = (List<?>) aiTaskService.detail(aiTask.getId()).get("records");
+        assertThat(cancelRecords.stream()
+                .map(item -> String.valueOf(((Map<?, ?>) item).get("status"))).toList())
+                .containsExactly("SKIPPED");
         assertThat(commands.findById(command.getOperationId()).orElseThrow().getStatus())
                 .isEqualTo("cancelled");
 

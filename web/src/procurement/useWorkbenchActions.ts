@@ -40,6 +40,9 @@ export function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error || "操作失败");
 }
 
+/** 错误来源面板：同一条 actionError 只渲染在触发它的面板，避免一屏重复两条（P-UX③）。 */
+export type ActionErrorSource = "conversation" | "workspace" | "requirement" | "decision" | "contract";
+
 /**
  * P1-5 拆分 3/5：13 个动作 handler + busy/错误状态 + 删除/配置弹窗状态。
  * 职责：对话创建、报价上传/字段修正/需求修正、分析、AI 任务重试/取消、
@@ -50,6 +53,17 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
   const { selectedId } = state;
 
   const [busy, setBusy] = useState<string | null>(null);
+  const [actionErrorSource, setActionErrorSource] = useState<ActionErrorSource | null>(null);
+
+  /** 错误只回显到触发它的面板；清空时一并清来源。 */
+  function fail(source: ActionErrorSource, error: unknown) {
+    setActionErrorSource(source);
+    state.setActionError(errorText(error));
+  }
+  function clearError() {
+    setActionErrorSource(null);
+    state.setActionError(null);
+  }
   const [aiActionBusy, setAiActionBusy] = useState<"retry" | "cancel" | null>(null);
   const [aiActionError, setAiActionError] = useState<string | null>(null);
   const [showConfig, setShowConfig] = useState(false);
@@ -64,7 +78,7 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
 
   async function startConversation(message: string, files: File[]) {
     setBusy("conversation");
-    state.setActionError(null);
+    clearError();
     // Optimistic navigation happens before the multipart request completes.
     // The accepting shell gives immediate feedback while Java durably stores
     // the files and returns the real task id in its 202 response.
@@ -99,7 +113,7 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
         }),
       ]);
     } catch (error) {
-      state.setActionError(errorText(error));
+      fail("conversation", error);
       state.setShowCreate(true);
     } finally {
       setBusy(null);
@@ -109,7 +123,7 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
   async function uploadQuotes(files: File[]) {
     if (!selectedId) return;
     setBusy("upload");
-    state.setActionError(null);
+    clearError();
     try {
       // The server receives the full selection as one durable operation.  That
       // prevents a per-file generation bump from staling earlier results and
@@ -121,7 +135,7 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
         queryClient.invalidateQueries({ queryKey: ["procurement-request", selectedId] }),
       ]);
     } catch (error) {
-      state.setActionError(errorText(error));
+      fail("workspace", error);
     } finally {
       setBusy(null);
     }
@@ -135,12 +149,12 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
   ) {
     if (!selectedId) return;
     setBusy(`field:${quoteId}:${field}`);
-    state.setActionError(null);
+    clearError();
     try {
       await procurementApi.correctField(selectedId, quoteId, field, value, chosenFromConflicts);
       await commit(await procurementApi.request(selectedId));
     } catch (error) {
-      state.setActionError(errorText(error));
+      fail("workspace", error);
     } finally {
       setBusy(null);
     }
@@ -151,11 +165,11 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
   ) {
     if (!selectedId) return;
     setBusy("requirement");
-    state.setActionError(null);
+    clearError();
     try {
       await commit(await procurementApi.correctRequirement(selectedId, payload));
     } catch (error) {
-      state.setActionError(errorText(error));
+      fail("requirement", error);
       throw error;
     } finally {
       setBusy(null);
@@ -165,7 +179,7 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
   async function analyze() {
     if (!selectedId) return;
     setBusy("analyze");
-    state.setActionError(null);
+    clearError();
     try {
       const accepted = await procurementApi.analyze(selectedId);
       state.setPendingRunId(accepted.run_id);
@@ -177,7 +191,7 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
       ]);
       state.setActiveTab("compare");
     } catch (error) {
-      state.setActionError(errorText(error));
+      fail("workspace", error);
     } finally {
       await queryClient.invalidateQueries({ queryKey: ["procurement-ai-tasks", selectedId] });
       setBusy(null);
@@ -220,7 +234,7 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
 
   async function resume(message: string) {
     if (!selectedId) return;
-    state.setActionError(null);
+    clearError();
     try {
       const accepted = await procurementApi.resume(selectedId, message);
       state.setPendingRunId(accepted.run_id);
@@ -233,7 +247,7 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
         queryClient.invalidateQueries({ queryKey: ["procurement-tools", accepted.run_id] }),
       ]);
     } catch (error) {
-      state.setActionError(errorText(error));
+      fail("conversation", error);
       throw error;
     }
   }
@@ -242,7 +256,7 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
     const detail = detailQuery.data;
     if (!selectedId || !detail?.comparison) return;
     setBusy("approve");
-    state.setActionError(null);
+    clearError();
     try {
       const updated = await procurementApi.approve(selectedId, {
         decision: "approved",
@@ -255,7 +269,7 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
       await commit(updated);
       state.setActiveTab("report");
     } catch (error) {
-      state.setActionError(errorText(error));
+      fail("decision", error);
     } finally {
       setBusy(null);
     }
@@ -265,7 +279,7 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
     const detail = detailQuery.data;
     if (!selectedId || !detail?.comparison) return;
     setBusy("no_award");
-    state.setActionError(null);
+    clearError();
     try {
       const updated = await procurementApi.approve(selectedId, {
         decision: "no_award",
@@ -278,7 +292,7 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
       await commit(updated);
       state.setActiveTab("report");
     } catch (error) {
-      state.setActionError(errorText(error));
+      fail("decision", error);
     } finally {
       setBusy(null);
     }
@@ -287,14 +301,14 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
   async function reopen(copyQuotes: boolean) {
     if (!selectedId) return;
     setBusy(copyQuotes ? "reopen_quotes" : "reopen");
-    state.setActionError(null);
+    clearError();
     try {
       const updated = await procurementApi.reopen(selectedId, copyQuotes);
       await commit(updated);
       state.setSelectedId(updated.id);
       state.setActiveTab("quotes");
     } catch (error) {
-      state.setActionError(errorText(error));
+      fail("decision", error);
     } finally {
       setBusy(null);
     }
@@ -360,6 +374,26 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
     }
   }
 
+  /** 「生成合同（AI 草拟）」真实生成：等待草拟操作完成后跳转合同中心（P-UX②）。 */
+  async function generateContract() {
+    if (!selectedId) return;
+    setBusy("contract");
+    clearError();
+    try {
+      await procurementApi.createContractDraft(selectedId);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["procurement-contracts"] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-contracts-tasks"] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-task-contract", selectedId] }),
+      ]);
+      state.navigate({ view: "contracts", task: null, ai: null, review: null });
+    } catch (error) {
+      fail("contract", error);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   function handleNextStep(action: NextStepAction) {
     switch (action.kind) {
       case "quotes":
@@ -367,6 +401,9 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
         break;
       case "compare":
         state.setActiveTab("compare");
+        break;
+      case "analyze":
+        void analyze();
         break;
       case "orders":
         state.navigate({ view: "orders", task: null, ai: null, review: null, orderTask: selectedId });
@@ -381,6 +418,8 @@ export function useWorkbenchActions(state: WorkbenchState, queries: RequestQueri
 
   return {
     busy,
+    actionErrorSource,
+    generateContract,
     aiActionBusy,
     aiActionError,
     showConfig,

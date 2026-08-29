@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Activity, AlertTriangle, CheckCircle2, Clock3, Database, FlaskConical, Gauge, ShieldCheck } from "lucide-react";
 
 import { api } from "../api/client";
-import { RunReport } from "../components/RunReport";
+import { RunReport } from "./RunReport";
 import { procurementApi } from "./api";
 import type { ProcurementRequest } from "./types";
 

@@ -173,22 +173,29 @@ function client() {
   return new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
 }
 
-function aiHtml() {
+function aiHtml(detail: AiTaskDetail = aiTask) {
   const queryClient = client();
-  queryClient.setQueryData(["procurement-ai-task", aiTask.ai_task_id], aiTask);
+  queryClient.setQueryData(["procurement-ai-task", detail.ai_task_id], detail);
   return renderToString(
     <QueryClientProvider client={queryClient}>
       <AiTaskCenter
         requests={[request]}
-        tasks={[aiTask]}
+        tasks={[detail]}
         loading={false}
         error={null}
-        selectedId={aiTask.ai_task_id}
+        selectedId={detail.ai_task_id}
         onSelect={vi.fn()}
         onOpenTask={vi.fn()}
       />
     </QueryClientProvider>,
   );
+}
+
+/** 步骤时间线片段：把断言限制在执行步骤里，避免被页面其他加载态干扰。 */
+function stepTimeline(html: string) {
+  const start = html.indexOf("proc-step-timeline");
+  expect(start).toBeGreaterThan(-1);
+  return html.slice(start, html.indexOf("</ol>", start));
 }
 
 function reviewHtml(value: ReviewDetail) {
@@ -223,6 +230,28 @@ describe("AI task center", () => {
     expect(html).toContain("packaging-quote-v3");
     expect(html).toContain("报价明细!B4");
     expect(html).toContain("采购详情");
+  });
+
+  it("stops spinning a step record once the task reached a terminal state", () => {
+    // Java 建单时会写一条 PENDING 占位步骤；Agent 步骤事件缺失（历史任务）时它不会被推进。
+    // 任务已进入终态，渲染层就不能再把它画成"进行中"，否则执行步骤永远转圈。
+    const stalled: AiTaskDetail = {
+      ...aiTask,
+      records: [{
+        ...aiTask.records[0],
+        record_id: "9".repeat(32),
+        sequence: 0,
+        step: "INPUT_VALIDATE",
+        status: "PENDING",
+        summary: "等待 Agent 接收任务",
+        duration_ms: null,
+      }],
+    };
+    expect(stepTimeline(aiHtml(stalled))).not.toContain("spin");
+
+    // 任务确实还在推进时，未结束的步骤仍然必须显示为进行中。
+    const live: AiTaskDetail = { ...stalled, status: "RUNNING", progress: 0.45 };
+    expect(stepTimeline(aiHtml(live))).toContain("spin");
   });
 
   it("recovers busy state and shows the error when retry/cancel fails", async () => {

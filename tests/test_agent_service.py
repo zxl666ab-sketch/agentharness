@@ -92,6 +92,88 @@ def test_command_delegates_to_the_canonical_harness_processor(service) -> None: 
     assert published.kwargs["value"]["result"]["status"] == "waiting_approval"
 
 
+def test_analyze_command_projects_the_ai_task_step_timeline(service) -> None:  # type: ignore[no-untyped-def]
+    """Java 消费 ``ai_task.step``，所以 Python 必须真的发出来。
+
+    缺生产者时，任务时间线永远停在 Java 建单时写下的占位步骤上，
+    已成功的任务在工作台里一直转圈。
+    """
+    service.commands.execute = AsyncMock(
+        return_value={"status": "completed", "result": {"run_id": "r" * 32}}
+    )
+    command = envelope()
+    service.handle_command(command)
+
+    steps = [
+        call.kwargs["value"]
+        for call in service.producer.send.call_args_list
+        if call.args[0] == svc.EVENTS_TOPIC
+        and call.kwargs["value"].get("type") == "ai_task.step"
+    ]
+    assert [step["step"] for step in steps] == [
+        "INPUT_VALIDATE",
+        "INPUT_VALIDATE",
+        "RULE_ANALYSIS",
+        "RULE_ANALYSIS",
+        "RESULT_PUBLISH",
+    ]
+    assert [step["step_status"] for step in steps] == [
+        "RUNNING",
+        "SUCCEEDED",
+        "RUNNING",
+        "SUCCEEDED",
+        "RUNNING",
+    ]
+    for step in steps:
+        # 契约 AiTaskEventEnvelope：AI 任务字段在信封顶层，Java 只从顶层读取。
+        assert step["ai_task_id"] == "b" * 32
+        assert step["operation_id"] == command["operation_id"]
+        assert step["message_type"] == "ai_task.event"
+        assert step["event_type"] in {"STEP_STARTED", "STEP_SUCCEEDED"}
+        assert step["attempt"] == 1
+        # sequence 0 是 Java 建单占位，步骤事件必须从 1 开始才不会被幂等丢弃。
+        assert step["sequence"] >= 1
+        assert step["payload_sha256"] == svc._sha256(step["payload"])
+        assert svc._verify_envelope(CONFIG["AGENT_INTERNAL_HMAC_KEY"], step)
+    assert len({step["sequence"] for step in steps}) == len(steps)
+    assert len({step["global_seq"] for step in steps}) == len(steps)
+
+
+def test_non_ai_task_command_emits_no_step_events(service) -> None:  # type: ignore[no-untyped-def]
+    service.commands.execute = AsyncMock(
+        return_value={"status": "completed", "result": {"run_id": "r" * 32}}
+    )
+    service.handle_command(envelope(operation_type="import_quote"))
+    events = [
+        call.kwargs["value"]
+        for call in service.producer.send.call_args_list
+        if call.args[0] == svc.EVENTS_TOPIC
+    ]
+    assert not [event for event in events if event.get("type") == "ai_task.step"]
+
+
+def test_failed_command_defers_step_reconciliation_to_java(service) -> None:  # type: ignore[no-untyped-def]
+    """失败路径不发终态步骤事件：否则任务被步骤判死，会抢掉自动重试与失败审计。
+
+    在途的那条 RUNNING 由 Java ``AiTaskService.fail()`` 收尾成 FAILED 并带上错误，
+    所以时间线仍然能指出失败发生在哪一步。
+    """
+    service.commands.execute = AsyncMock(side_effect=TimeoutError("RPC timed out"))
+    service.handle_command(envelope())
+    steps = [
+        call.kwargs["value"]
+        for call in service.producer.send.call_args_list
+        if call.args[0] == svc.EVENTS_TOPIC
+        and call.kwargs["value"].get("type") == "ai_task.step"
+    ]
+    assert [(step["step"], step["step_status"]) for step in steps] == [
+        ("INPUT_VALIDATE", "RUNNING"),
+        ("INPUT_VALIDATE", "SUCCEEDED"),
+        ("RULE_ANALYSIS", "RUNNING"),
+    ]
+    assert steps[-1]["sequence"] == 3
+
+
 def test_invalid_signature_never_reaches_the_runtime(service) -> None:  # type: ignore[no-untyped-def]
     service.commands.execute = AsyncMock()
     value = envelope()

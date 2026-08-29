@@ -12,7 +12,7 @@ import {
   Upload,
   XCircle,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { POLL_FETCH_CAP, pollFetchCount, procurementApi } from "./api";
 import type { InvoiceStatus, InvoiceView } from "./types";
@@ -50,7 +50,12 @@ function money(value: string | null | undefined) {
     : String(value);
 }
 
-export function InvoiceCenter() {
+/**
+ * P-UX⑧：focusOrderId 来自订单卡的「上传发票 / 处理发票」跳转
+ * （URL: ?view=invoices&invoice_order=<id>），自动预选订单并打开
+ * 该订单最新一张非作废发票的详情，用户落地即可操作。
+ */
+export function InvoiceCenter({ focusOrderId = null }: { focusOrderId?: string | null }) {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<InvoiceStatus | "">("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -87,7 +92,7 @@ export function InvoiceCenter() {
     queryKey: ["procurement-invoices-orders"],
     queryFn: () => procurementApi.orders(undefined, 0, 100),
   });
-  const invoices = invoicesQuery.data?.items || [];
+  const invoices = useMemo(() => invoicesQuery.data?.items ?? [], [invoicesQuery.data]);
   const selected = invoices.find((item) => item.id === selectedId) || null;
   const detailQuery = useQuery({
     queryKey: ["procurement-invoice", selectedId],
@@ -102,6 +107,14 @@ export function InvoiceCenter() {
     },
   });
   const detail = detailQuery.data ?? selected ?? null;
+
+  // P-UX⑧：跨中心聚焦——预选上传订单下拉，并打开该订单最新的非作废发票详情。
+  useEffect(() => {
+    if (!focusOrderId) return;
+    setOrderId(focusOrderId);
+    const target = invoices.find((item) => item.order_id === focusOrderId && item.status !== "VOIDED");
+    if (target) setSelectedId(target.id);
+  }, [focusOrderId, invoices]);
 
   const invalidate = () =>
     Promise.all([
@@ -402,7 +415,7 @@ export function InvoiceCenter() {
       </div>
 
       {voidTarget ? (
-        <div className="proc-drawer-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && busy !== `void:${voidTarget.id}`) setVoidTarget(null); }}>
+        <div className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && busy !== `void:${voidTarget.id}`) setVoidTarget(null); }}>
           <section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="void-invoice-title">
             <header className="flex items-center justify-between pb-3 border-b border-border/60"><div className="flex items-center gap-2 text-text font-bold text-base"><XCircle size={18} className="text-danger" /><h2 id="void-invoice-title">作废发票（退回重开）</h2></div></header>
             <div className="proc-delete-target p-3 rounded-lg bg-surface-subtle border border-border flex flex-col gap-0.5 text-xs"><strong className="font-mono text-sm font-bold text-text">{voidTarget.invoice_no}</strong><span className="text-text-muted">{voidTarget.supplier_name} · {money(voidTarget.total_amount)}</span></div>
@@ -419,7 +432,7 @@ export function InvoiceCenter() {
       ) : null}
 
       {forceTarget ? (
-        <div className="proc-drawer-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && busy !== `force:${forceTarget.id}`) setForceTarget(null); }}>
+        <div className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && busy !== `force:${forceTarget.id}`) setForceTarget(null); }}>
           <section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="force-invoice-title">
             <header className="flex items-center justify-between pb-3 border-b border-border/60"><div className="flex items-center gap-2 text-text font-bold text-base"><ShieldCheck size={18} className="text-warning" /><h2 id="force-invoice-title">强制通过（allow-once 审批）</h2></div></header>
             <div className="proc-delete-target p-3 rounded-lg bg-surface-subtle border border-border flex flex-col gap-0.5 text-xs"><strong className="font-mono text-sm font-bold text-text">{forceTarget.invoice_no}</strong><span className="text-text-muted">差异 {forceTarget.match_result?.diffs?.length || 0} 项</span></div>
@@ -437,7 +450,7 @@ export function InvoiceCenter() {
       ) : null}
 
       {correctTarget ? (
-        <div className="proc-drawer-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && busy !== `correct:${correctTarget.id}`) setCorrectTarget(null); }}>
+        <div className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && busy !== `correct:${correctTarget.id}`) setCorrectTarget(null); }}>
           <section className="proc-confirm-dialog wide glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-xl w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="correct-invoice-title">
             <header className="flex items-center justify-between pb-3 border-b border-border/60"><div className="flex items-center gap-2 text-text font-bold text-base"><RotateCcw size={18} className="text-accent" /><h2 id="correct-invoice-title">手工改单（重新三单匹配）</h2></div></header>
             <div className="proc-supplier-form grid grid-cols-1 sm:grid-cols-2 gap-3">
