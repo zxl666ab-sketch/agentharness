@@ -18,6 +18,7 @@ import {
 import { DragEvent, FormEvent, useMemo, useState } from "react";
 
 import { api, type ToolInvocationRow } from "../api/client";
+import { Button } from "../components/ui";
 import type { ProcurementRequest } from "./types";
 
 const TOOL_LABELS: Record<string, string> = {
@@ -93,7 +94,7 @@ function ToolState({ invocation }: { invocation: ToolInvocationRow }) {
         {tone === "active" ? <LoaderCircle className="spin" size={14} /> : null}
       </span>
       <span>
-        <strong>{TOOL_LABELS[invocation.tool_name] || invocation.tool_name}</strong>
+        <strong>{TOOL_LABELS[invocation.tool_name] || invocation.tool_name || "工具调用"}</strong>
         <small>{toolSucceeded(invocation.status) ? "已完成" : invocation.status === "failed" ? "失败" : invocation.status === "indeterminate" ? "结果待确认" : "执行中"}</small>
       </span>
     </li>
@@ -171,28 +172,26 @@ export function NewProcurementConversation({
   }
 
   return (
-    <section className="proc-new-conversation w-full max-w-3xl mx-auto my-6 p-6 sm:p-8 bg-surface rounded-2xl border border-border/80 shadow-sm space-y-5" aria-label="新建采购任务">
-      <div className="proc-new-conversation-head flex items-start gap-4">
-        <span className="w-11 h-11 rounded-xl bg-accent-soft text-accent flex items-center justify-center flex-shrink-0 shadow-2xs">
-          <Bot size={22} />
-        </span>
-        <div className="flex flex-col gap-1 min-w-0">
-          <h1 className="text-lg sm:text-xl font-bold text-text tracking-tight">新建采购询价与比价任务</h1>
-          <p className="text-xs text-text-muted leading-relaxed">
+    <section className="proc-new-conversation" aria-label="新建采购任务">
+      <div className="proc-new-conversation-head">
+        <span aria-hidden><Bot size={22} /></span>
+        <div>
+          <h1>新建采购询价与比价任务</h1>
+          <p>
             AI 自动提取采购需求与报价字段，Java 确定性规则引擎负责供应商资格检查、税费到货核算与智能比价。
           </p>
         </div>
       </div>
 
-      <div className="proc-prompt-suggestions flex flex-wrap items-center gap-2 text-xs" aria-label="快速模板提示词">
-        <span className="proc-prompt-suggestion-title inline-flex items-center gap-1 font-semibold text-text-muted text-xs">
-          <Sparkles size={13} className="text-accent" />常用模板：
+      <div className="proc-prompt-suggestions" aria-label="快速模板提示词">
+        <span className="proc-prompt-suggestion-title">
+          <Sparkles size={13} />常用模板：
         </span>
         {PROMPT_SUGGESTIONS.map((tpl, i) => (
           <button
             key={i}
             type="button"
-            className="proc-prompt-chip px-2.5 py-1 rounded-lg bg-surface-subtle hover:bg-accent-soft text-text-secondary hover:text-accent border border-border hover:border-accent/30 text-xs transition-all font-medium"
+            className="proc-prompt-chip"
             disabled={busy}
             onClick={() => setMessage(tpl)}
           >
@@ -201,10 +200,9 @@ export function NewProcurementConversation({
         ))}
       </div>
 
-      <form className="proc-conversation-composer new rounded-xl border border-border bg-surface focus-within:border-accent focus-within:ring-2 focus-within:ring-accent-soft overflow-hidden transition-all shadow-2xs" onSubmit={(event) => void submit(event)}>
+      <form className="proc-conversation-composer new" onSubmit={(event) => void submit(event)}>
         <textarea
           aria-label="采购目标"
-          className="w-full p-4 text-xs sm:text-sm text-text bg-transparent border-0 resize-none min-h-[96px] max-h-[220px] outline-none placeholder:text-text-muted/60 leading-relaxed"
           value={message}
           onChange={(event) => setMessage(event.target.value)}
           onKeyDown={(event) => {
@@ -218,7 +216,7 @@ export function NewProcurementConversation({
           disabled={busy}
         />
         <label
-          className={`proc-quote-dropzone flex items-center gap-3 m-3 p-3.5 rounded-xl border-1.5 border-dashed cursor-pointer transition-all ${dragging ? "border-accent bg-accent-soft/30 text-accent" : "border-border hover:border-accent/60 bg-surface-subtle/70 text-text-secondary"}`}
+          className={`proc-quote-dropzone ${dragging ? "dragging" : ""}`}
           onDragEnter={(event: DragEvent<HTMLLabelElement>) => { event.preventDefault(); setDragging(true); }}
           onDragOver={(event: DragEvent<HTMLLabelElement>) => event.preventDefault()}
           onDragLeave={(event: DragEvent<HTMLLabelElement>) => {
@@ -230,12 +228,10 @@ export function NewProcurementConversation({
             addFiles(Array.from(event.dataTransfer.files));
           }}
         >
-          <div className="w-8 h-8 rounded-lg bg-surface flex items-center justify-center text-accent flex-shrink-0 shadow-2xs">
-            <UploadCloud size={18} />
-          </div>
-          <span className="flex flex-col gap-0.5 min-w-0 flex-1">
-            <strong className="text-xs font-semibold text-text truncate">拖拽供应商报价到这里，或点击选择文件</strong>
-            <small className="text-[11px] text-text-muted truncate">支持 XLSX、PDF 格式 · 2–{maxQuotes} 家供应商 · 单文件上限 {formatBytes(maxFileBytes)}</small>
+          <span aria-hidden><UploadCloud size={18} /></span>
+          <span>
+            <strong>拖拽供应商报价到这里，或点击选择文件</strong>
+            <small>支持 XLSX、PDF 格式 · 2–{maxQuotes} 家供应商 · 单文件上限 {formatBytes(maxFileBytes)}</small>
           </span>
           <input
             data-testid="conversation-upload"
@@ -250,17 +246,16 @@ export function NewProcurementConversation({
           />
         </label>
         {files.length ? (
-          <ul className="proc-compose-files flex flex-wrap gap-2 px-3 pb-3 list-none m-0">
+          <ul className="proc-compose-files">
             {files.map((file, index) => (
-              <li key={`${file.name}-${file.size}`} className="inline-flex items-center gap-2 px-2.5 py-1 rounded-lg bg-surface-subtle border border-border text-xs text-text">
-                <span className="text-accent">{fileIcon(file.name)}</span>
-                <span className="font-medium truncate max-w-[180px]">{file.name}</span>
-                <small className="text-text-muted font-mono">{formatBytes(file.size)}</small>
+              <li key={`${file.name}-${file.size}`}>
+                {fileIcon(file.name)}
+                <span title={file.name}>{file.name}</span>
+                <small className="mono">{formatBytes(file.size)}</small>
                 <button
                   type="button"
                   title="移除附件"
                   aria-label={`移除 ${file.name}`}
-                  className="text-text-muted hover:text-danger p-0.5 rounded transition-colors"
                   disabled={busy}
                   onClick={() => setFiles((current) => current.filter((_, item) => item !== index))}
                 >
@@ -270,28 +265,29 @@ export function NewProcurementConversation({
             ))}
           </ul>
         ) : null}
-        <div className="proc-compose-actions flex items-center justify-between gap-3 px-3.5 py-2.5 bg-surface-subtle/60 border-t border-border/60 text-xs">
-          <div className="flex items-center gap-2 text-text-muted">
+        <div className="proc-compose-actions">
+          <div>
             <Paperclip size={13} />
             <span>已选报价：</span>
-            <span className={`font-mono font-bold px-2 py-0.5 rounded-full text-xs ${files.length >= 2 ? "bg-accent-soft text-accent" : "bg-surface text-text-muted border border-border"}`}>
+            <span className={`proc-compose-count ${files.length >= 2 ? "ok" : ""}`}>
               {files.length} / {maxQuotes} 份
             </span>
             {files.length < 2 ? (
-              <span className="text-[11px] text-text-muted/70 hidden sm:inline">（至少上传 2 家报价才能比价）</span>
+              <span className="proc-compose-hint">（至少上传 2 家报价才能比价）</span>
             ) : null}
           </div>
-          <button
-            className="proc-button primary inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-accent text-white text-xs font-semibold hover:bg-accent-strong disabled:opacity-50 shadow-xs transition-colors"
+          <Button
+            variant="primary"
             type="submit"
-            disabled={busy || !message.trim() || files.length < 2}
+            icon={busy ? undefined : <Send size={14} />}
+            loading={busy}
+            disabled={!message.trim() || files.length < 2}
           >
-            {busy ? <LoaderCircle className="spin" size={14} /> : <Send size={14} />}
-            <span>{busy ? "正在解析报价" : "开始解析报价"}</span>
-          </button>
+            {busy ? "正在解析报价" : "开始解析报价"}
+          </Button>
         </div>
         {localError || error ? (
-          <p className="proc-compose-error m-0 p-2.5 bg-danger-soft text-danger text-xs border-t border-danger/20 flex items-center gap-1.5" role="alert">
+          <p className="proc-compose-error" role="alert">
             <AlertTriangle size={14} />
             {localError || error}
           </p>
@@ -391,11 +387,15 @@ export function ProcurementConversation({
         <div><Bot size={17} /><strong>采购 Agent</strong></div>
         <span className={`proc-run-state ${status}`}>{active ? <LoaderCircle className="spin" size={13} /> : <Circle size={10} fill="currentColor" />}{runLabel}</span>
       </header>
-      <div className="proc-conversation-ids">
-        <span><small>SESSION</small><code title={request.session_id || "-"}>{request.session_id ? request.session_id.slice(0, 10) : "-"}</code></span>
-        <span><small>REQUEST</small><code title={request.id}>{request.id.slice(0, 10)}</code></span>
-        <span><small>RUN</small><code title={runId || "-"}>{runId ? runId.slice(0, 10) : "-"}</code></span>
-      </div>
+      {/* 痛点⑤：工程 ID 收进「技术详情」折叠，日常不占用视线 */}
+      <details className="proc-conversation-tech">
+        <summary>技术详情（SESSION · RUN）</summary>
+        <div className="proc-conversation-ids">
+          <span><small>SESSION</small><code title={request.session_id || "—"}>{request.session_id ? request.session_id.slice(0, 10) : "—"}</code></span>
+          <span><small>REQUEST</small><code title={request.id}>{request.id.slice(0, 10)}</code></span>
+          <span><small>RUN</small><code title={runId || "—"}>{runId ? runId.slice(0, 10) : "—"}</code></span>
+        </div>
+      </details>
       <div className="proc-conversation-scroll">
         {messages.map((item, index) => (
           <article className={`proc-chat-message ${item.role}`} key={item.id}>

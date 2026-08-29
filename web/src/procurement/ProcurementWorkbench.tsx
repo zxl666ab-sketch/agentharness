@@ -19,10 +19,12 @@ import {
   Trash2,
   Wifi,
   WifiOff,
+  X,
   ChevronUp,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
 
+import { Fact, StatusPill, unitLabel } from "../components/ui";
 import { AuditView } from "./AuditView";
 import { AiTaskRecovery } from "./AiTaskRecovery";
 import { AgentOfflineNotice } from "./AgentOfflineNotice";
@@ -88,19 +90,48 @@ function requestDate(value: string) {
 function quantityUnitText(value: number | string | null, unit: string | null) {
   if (value == null || String(value).trim() === "" || !unit?.trim()) return "待补充";
   const quantity = typeof value === "number" ? value.toLocaleString("zh-CN") : String(value);
-  return `${quantity} ${unit}`;
+  return `${quantity} ${unitLabel(unit)}`;
 }
+
+/** 常见规格键中文化（未知键回退原值，绝不裸露英文枚举当文案）。 */
+const SPEC_KEY_LABELS: Record<string, string> = {
+  width_mm: "宽度",
+  length_mm: "长度",
+  height_mm: "高度",
+  thickness_um: "厚度",
+  material: "材质",
+  color: "颜色",
+  print_colors: "印刷色数",
+  moq: "起订量",
+  layers: "层数",
+};
 
 function specificationText(specifications: ProcurementRequest["specifications"]) {
   const values = Object.entries(specifications || {}).slice(0, 3).map(([key, value]) => {
+    const label = SPEC_KEY_LABELS[key] || key;
     if (value && typeof value === "object" && "value" in value) {
       const spec = value as { label?: string; value?: unknown; unit?: string };
-      return `${spec.label || key} ${String(spec.value ?? "-")}${spec.unit ? ` ${spec.unit}` : ""}`;
+      return `${spec.label || label} ${String(spec.value ?? "——")}${spec.unit ? ` ${spec.unit}` : ""}`;
     }
-    return `${key} ${String(value ?? "-")}`;
+    return `${label} ${String(value ?? "——")}`;
   });
   return values.join(" · ") || "未填写规格";
 }
+
+/** 视图标题（导航与深链提示共用，避免文案漂移）。 */
+const VIEW_TITLES: Record<string, string> = {
+  workbench: "工作台",
+  tasks: "采购任务",
+  reviews: "人工审核",
+  contracts: "合同中心",
+  orders: "采购订单",
+  invoices: "发票中心",
+  reports: "统计报表",
+  suppliers: "供应商管理",
+  ai: "AI 任务中心",
+  audit: "审计日志",
+  system: "系统信息",
+};
 
 /** 工作台布局壳 + 视图分发（P1-5 拆分后仅保留组合职责）。 */
 export function ProcurementWorkbench({ theme, backendVersion, agentDown = false, onToggleTheme }: Props) {
@@ -131,9 +162,14 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
 
   useEscape(!!deleteTarget, () => setDeleteTarget(null), deleteBusy);
   useEscape(showConfig, () => setShowConfig(false), configBusy);
+  // 痛点⑫：角色不可见的 ?view=… 深链不再静默回落工作台，明示去向与入口。
+  const [redirectNotice, setRedirectNotice] = useState<string | null>(null);
   useEffect(() => {
     const allowedView = visibleViewOrDefault(role, view);
-    if (allowedView !== view) openView(allowedView);
+    if (allowedView !== view) {
+      setRedirectNotice(VIEW_TITLES[view] ?? view);
+      openView(allowedView);
+    }
   }, [openView, role, view]);
 
   const detail = detailQuery.data || null;
@@ -311,6 +347,18 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
         </aside> : null}
 
         <section className={`proc-main ${view !== "tasks" ? "proc-scroll-page" : ""}`}>
+          {redirectNotice ? (
+            <div className="proc-view-redirect" role="alert">
+              <AlertTriangle size={15} aria-hidden />
+              <span>
+                「<strong>{redirectNotice}</strong>」在当前角色下不可访问，已返回工作台。
+                {role !== "admin" ? "（顶部切换到「管理员」角色可查看审计与系统页面）" : ""}
+              </span>
+              <button type="button" className="proc-icon-button" title="关闭提示" aria-label="关闭提示" onClick={() => setRedirectNotice(null)}>
+                <X size={14} />
+              </button>
+            </div>
+          ) : null}
           {view === "workbench" ? (
             <WorkbenchHome
               role={role}
@@ -378,12 +426,12 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
             </div>
           ) : detail ? (
             <>
-              <header className="proc-request-head flex flex-col bg-surface border-b border-border">
-                <div className="proc-title-line flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-3 min-w-0 flex-1">
+              <header className="proc-request-head">
+                <div className="proc-title-line">
+                  <div className="proc-title-main">
                     {taskListCollapsed ? (
                       <button
-                        className="proc-icon-button compact w-8 h-8 rounded-lg border border-border flex items-center justify-center text-text-muted hover:text-text"
+                        className="proc-icon-button"
                         type="button"
                         title="展开任务列表"
                         aria-label="展开任务列表"
@@ -392,55 +440,37 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
                         <ChevronRight size={16} />
                       </button>
                     ) : null}
-                    <div className="flex flex-col gap-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <code className="font-mono text-xs font-bold text-accent bg-accent-soft px-2 py-0.5 rounded border border-accent/20">
-                          {detail.reference}
-                        </code>
-                      </div>
-                      <h1 className="text-lg font-bold text-text tracking-tight truncate">{detail.title}</h1>
+                    <div className="proc-title-copy">
+                      <code className="proc-ref-chip">{detail.reference}</code>
+                      <h1>{detail.title}</h1>
                     </div>
                   </div>
-                  <span className={`proc-status ${statusTone(detail.status)} text-xs font-semibold px-3 py-1 rounded-full border inline-flex items-center gap-1.5 flex-shrink-0`}>
-                    <i className="w-2 h-2 rounded-full bg-current" />{statusLabelFor(detail)}
-                  </span>
+                  <StatusPill tone={statusTone(detail.status)}>{statusLabelFor(detail)}</StatusPill>
                 </div>
 
-                <div className="proc-request-facts flex flex-wrap items-center gap-2 text-xs">
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-subtle border border-border/60 text-text">
-                    <small className="text-text-muted">物料</small>
-                    <strong className="font-semibold">{detail.item_name}</strong>
-                  </span>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-subtle border border-border/60 text-text">
-                    <small className="text-text-muted">采购量</small>
-                    <strong className="font-semibold font-mono">{quantityUnitText(detail.quantity, detail.unit)}</strong>
-                  </span>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-subtle border border-border/60 text-text">
-                    <small className="text-text-muted">规格</small>
-                    <strong className="font-semibold">{specificationText(detail.specifications)}</strong>
-                  </span>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-subtle border border-border/60 text-text">
-                    <small className="text-text-muted">最长交期</small>
-                    <strong className="font-semibold font-mono">{String(detail.constraints.max_lead_days ?? "-")} 天</strong>
-                  </span>
+                <div className="proc-request-facts">
+                  <Fact label="物料">{detail.item_name || "——"}</Fact>
+                  <Fact label="采购量" mono>{quantityUnitText(detail.quantity, detail.unit)}</Fact>
+                  <Fact label="规格">{specificationText(detail.specifications)}</Fact>
+                  <Fact label="最长交期" mono>{detail.constraints.max_lead_days != null ? `${detail.constraints.max_lead_days} 天` : "——"}</Fact>
                 </div>
 
-                <div className="flex flex-col gap-1.5 pt-2 border-t border-border/40">
-                  <div className="proc-progress-context text-[11px] font-medium text-text-muted">
+                <div className="proc-progress-wrap">
+                  <div className="proc-progress-context">
                     <span>{fulfillmentStage ? "采购方案已确认 · 当前履约阶段" : "当前采购决策阶段"}</span>
                   </div>
-                  <ol className={`proc-progress ${fulfillmentStage ? "fulfillment" : "decision"} flex items-center gap-2 overflow-x-auto w-full list-none p-0 m-0`} aria-label={fulfillmentStage ? "履约进度" : "采购决策进度"}>
+                  <ol className={`proc-progress ${fulfillmentStage ? "fulfillment" : "decision"}`} aria-label={fulfillmentStage ? "履约进度" : "采购决策进度"}>
                     {progressSteps.map((step, index) => {
                       const position = index + 1;
                       const done = position < progressCurrent || (fulfillmentStage && position === 6 && taskOrder?.settlement?.status === "PAID");
                       const current = position === progressCurrent && !done;
                       return (
-                        <li key={step} className={`flex items-center gap-2 text-xs font-medium whitespace-nowrap ${done ? "done text-accent font-semibold" : current ? "current text-info font-bold" : "text-text-muted"}`} aria-current={current ? "step" : undefined}>
-                          <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-mono font-bold border ${done ? "bg-accent-soft text-accent border-accent/40" : current ? "bg-info-soft text-info border-info ring-2 ring-info/20" : "bg-surface-subtle text-text-muted border-border"}`}>
+                        <li key={step} className={done ? "done" : current ? "current" : undefined} aria-current={current ? "step" : undefined}>
+                          <span className="proc-progress-dot">
                             {done ? <CheckCircle2 size={13} /> : position}
                           </span>
                           <strong>{step}</strong>
-                          {index < progressSteps.length - 1 ? <span className="text-border text-xs px-1">→</span> : null}
+                          {index < progressSteps.length - 1 ? <span className="proc-progress-arrow" aria-hidden>→</span> : null}
                         </li>
                       );
                     })}

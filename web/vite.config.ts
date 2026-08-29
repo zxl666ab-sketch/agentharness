@@ -61,6 +61,9 @@ export default defineConfig(({ command }) => ({
   },
   server: {
     port: 5173,
+    watch: {
+      ignored: ["**/*.tmp*", "**/.tailwind*/**", "**/*.tmpdir/**"],
+    },
     proxy: {
       "/api": {
         target: "http://127.0.0.1:8741",

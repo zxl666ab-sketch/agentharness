@@ -1,11 +1,11 @@
 import { useRef } from "react";
 
 import type { UseQueryResult } from "@tanstack/react-query";
-import { LoaderCircle, Save, Settings, ShieldCheck, X } from "lucide-react";
+import { LoaderCircle, Save, Settings, ShieldCheck } from "lucide-react";
 
+import { Button, Drawer } from "../components/ui";
 import type { ProcurementModelConfig, ProcurementModelConfigUpdate } from "./types";
 import { errorText } from "./useWorkbenchActions";
-import { useModalFocus } from "./useModalFocus";
 
 type Props = {
   query: UseQueryResult<ProcurementModelConfig, Error>;
@@ -21,47 +21,39 @@ type Props = {
   onSave: () => Promise<void>;
 };
 
-/** API / 模型配置抽屉（P1-5 从工作台拆出）。 */
+/** API / 模型配置抽屉（Phase 3：统一 Drawer 骨架）。 */
 export function ConfigDrawer({ query, form, busy, error, notice, onClose, onFieldChange, onSave }: Props) {
-  const drawerRef = useRef<HTMLElement | null>(null);
   const firstFieldRef = useRef<HTMLSelectElement | null>(null);
-  // 组件由父级条件挂载：打开即聚焦首个表单控件（Provider），Tab 循环限制在抽屉内。
-  useModalFocus(true, drawerRef, firstFieldRef);
   return (
-    <div
-      className="proc-drawer-backdrop"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
+    <Drawer
+      titleId="proc-config-title"
+      title="API / 模型配置"
+      subtitle="仅影响之后新启动的采购 Agent 运行"
+      icon={<Settings size={17} />}
+      closeLabel="关闭配置"
+      onClose={onClose}
+      initialFocusRef={firstFieldRef}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>取消</Button>
+          <Button variant="primary" icon={<Save size={15} />} loading={busy} disabled={query.isPending || query.isError} onClick={() => void onSave()}>
+            保存配置
+          </Button>
+        </>
+      }
     >
-      <aside ref={drawerRef} className="proc-config-drawer" role="dialog" aria-modal="true" aria-labelledby="proc-config-title">
-        <header className="proc-config-head">
-          <div>
-            <span className="proc-config-icon"><Settings size={17} /></span>
-            <div>
-              <h2 id="proc-config-title">API / 模型配置</h2>
-              <p>仅影响之后新启动的采购 Agent 运行</p>
-            </div>
-          </div>
-          <button className="proc-icon-button compact" type="button" title="关闭配置" aria-label="关闭配置" onClick={onClose}>
-            <X size={16} />
-          </button>
-        </header>
-
-        <div className="proc-config-body">
-          {query.isPending ? <div className="proc-config-loading"><LoaderCircle className="spin" size={18} />正在读取当前配置…</div> : null}
-          {query.isError ? (
-            <section className="proc-config-error" role="alert">
-              <strong>配置读取失败</strong>
-              <span>{errorText(query.error)}</span>
-              <button className="proc-button secondary" type="button" onClick={() => void query.refetch()}>重新读取</button>
-            </section>
-          ) : null}
-          {!query.isPending && !query.isError ? (
-            <>
-              <section className="proc-config-section">
-                <div className="proc-config-section-title"><strong>模型服务</strong><span>选择离线演示或 OpenAI 兼容接口</span></div>
+      {query.isPending ? <div className="proc-config-loading"><LoaderCircle className="spin" size={18} />正在读取当前配置…</div> : null}
+      {query.isError ? (
+        <div className="proc-config-error" role="alert">
+          <strong>配置读取失败</strong>
+          <span>{errorText(query.error)}</span>
+          <Button variant="secondary" size="sm" onClick={() => void query.refetch()}>重新读取</Button>
+        </div>
+      ) : null}
+      {!query.isPending && !query.isError ? (
+        <>
+          <section className="proc-config-section">
+            <div className="proc-config-section-title"><strong>模型服务</strong><span>选择离线演示或 OpenAI 兼容接口</span></div>
                 <label className="proc-field proc-span-2">
                   <span>Provider</span>
                   <select ref={firstFieldRef} value={form.provider} onChange={(event) => {
@@ -127,19 +119,11 @@ export function ConfigDrawer({ query, form, busy, error, notice, onClose, onFiel
                 </label>
               </section>
 
-              <p className="proc-config-security"><span><ShieldCheck size={15} />密钥保存在本机采购服务配置中，GET 接口只返回脱敏状态。</span></p>
-              {error ? <p className="proc-form-error" role="alert">{error}</p> : null}
-              {notice ? <p className="proc-form-success" role="status">{notice}</p> : null}
-            </>
-          ) : null}
-        </div>
-        <footer className="proc-config-actions">
-          <button className="proc-button secondary" type="button" onClick={onClose}>取消</button>
-          <button className="proc-button" type="button" disabled={busy || query.isPending || query.isError} onClick={() => void onSave()}>
-            {busy ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}保存配置
-          </button>
-        </footer>
-      </aside>
-    </div>
+          <p className="proc-config-security"><span><ShieldCheck size={15} />密钥保存在本机采购服务配置中，GET 接口只返回脱敏状态。</span></p>
+          {error ? <p className="proc-form-error" role="alert">{error}</p> : null}
+          {notice ? <p className="proc-form-success" role="status">{notice}</p> : null}
+        </>
+      ) : null}
+    </Drawer>
   );
 }

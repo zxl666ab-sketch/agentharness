@@ -2,39 +2,58 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ============================================================
+   采价台设计 token（Phase 1 · 全量重刷）
+   - 明暗双主题语义色；WCAG AA 对比度（正文 ≥4.5:1，大字/图标 ≥3:1）
+   - 圆角标尺 6/8/12/14/18；8px 间距节奏；字号下限 11px
+   - 动效 150–200ms，尊重 prefers-reduced-motion
+   ============================================================ */
+
 :root {
   --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
   --mono: "Cascadia Code", ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, "Microsoft YaHei", monospace;
 
-  /* Type scale */
+  /* Type scale — 11px 为硬下限；24/28 用于驾驶舱核心大数字 */
+  --text-3xl: 28px;
+  --text-2xl: 24px;
   --text-xl: 18px;
   --text-lg: 16px;
   --text-base: 14px;
   --text-sm: 13px;
   --text-xs: 12px;
-  --text-micro: 11px;
+  --text-micro: 11px; /* 最小可用字号 */
 
-  --bg: #f8fafc;
+  /* Light theme —— accent 深翡翠绿（白底 5.5:1），warning 深琥珀（白底 5:1） */
+  --bg: #f6f8fa;
   --surface: #ffffff;
   --surface-subtle: #f1f5f9;
   --surface-strong: #e2e8f0;
   --surface-elevated: #ffffff;
   --text: #0f172a;
-  --text-secondary: #475569;
-  --text-muted: #64748b;
+  --text-secondary: #475569;      /* 白底 7.6:1 */
+  --text-muted: #5b6b82;          /* 白底 5.4:1 / subtle 底 4.9:1（原 #64748b 不达标） */
   --border: #e2e8f0;
   --border-strong: #cbd5e1;
-  --accent: #059669;
-  --accent-hover: #047857;
-  --accent-strong: #065f46;
+  --accent: #047857;              /* 白底 5.5:1（原 #059669 3.8:1 不达标） */
+  --accent-hover: #065f46;
+  --accent-strong: #064e3b;
   --accent-soft: #ecfdf5;
   --accent-softer: #f0fdf4;
   --danger: #e11d48;
+  --danger-text: #be123c;        /* danger-soft 底上 ≥4.5:1（--danger 只有 3.9:1） */
   --danger-soft: #ffe4e6;
-  --warning: #d97706;
+  --warning: #b45309;             /* 白底 5:1（原 #d97706 3.3:1 不达标） */
   --warning-soft: #fef3c7;
   --info: #2563eb;
   --info-soft: #eff6ff;
+  --success: #047857;
+  --neutral-dot: #94a3b8;
+
+  /* 实色按钮/徽章上的前景色（明暗主题下均保证 ≥4.5:1） */
+  --on-accent: #ffffff;
+  --on-danger: #ffffff;
+  --on-warning: #ffffff;
+  --on-info: #ffffff;
 
   /* Governance language — one color per effect kind */
   --effect-read: #475569;
@@ -48,12 +67,50 @@
   --effect-external: #6d28d9;
   --effect-external-soft: #f5f3ff;
 
-  --shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  --shadow-sm: 0 4px 6px -1px rgb(0 0 0 / 0.07), 0 2px 4px -2px rgb(0 0 0 / 0.07);
-  --shadow-md: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.04);
-  --shadow-lg: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
-  --radius: 12px;
+  /* Radii — 6 / 8 / 12 / 14 / 18 标尺 */
+  --radius-xs: 6px;
   --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-full: 9999px;
+  --radius: var(--radius-md); /* legacy alias */
+
+  /* Spacing — 8px 节奏 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Motion */
+  --dur-fast: 150ms;
+  --dur-base: 200ms;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Elevation */
+  --shadow-2xs: 0 1px 1px 0 rgb(15 23 42 / 0.04);
+  --shadow-xs: 0 1px 2px 0 rgb(15 23 42 / 0.05);
+  --shadow-sm: 0 4px 6px -1px rgb(15 23 42 / 0.07), 0 2px 4px -2px rgb(15 23 42 / 0.07);
+  --shadow-md: 0 10px 15px -3px rgb(15 23 42 / 0.08), 0 4px 6px -4px rgb(15 23 42 / 0.04);
+  --shadow-lg: 0 20px 25px -5px rgb(15 23 42 / 0.1), 0 8px 10px -6px rgb(15 23 42 / 0.1);
+
+  /* Layering */
+  --z-sticky: 20;
+  --z-header: 30;
+  --z-dropdown: 40;
+  --z-drawer: 80;
+  --z-modal: 100;
+  --z-toast: 120;
+
+  /* Glass（玻璃拟态） */
+  --glass-bg: rgba(255, 255, 255, 0.82);
+  --glass-bg-hover: rgba(255, 255, 255, 0.94);
+  --glass-border: rgba(15, 23, 42, 0.08);
+  --glass-blur: 12px;
+
   color-scheme: light;
 }
 
@@ -64,21 +121,29 @@
   --surface-strong: #243250;
   --surface-elevated: #1e2a47;
   --text: #f8fafc;
-  --text-secondary: #94a3b8;
-  --text-muted: #64748b;
+  --text-secondary: #cbd5e1;      /* 面板底 11:1 */
+  --text-muted: #94a3b8;          /* 面板底 6.7:1（原 #64748b 仅 3.6:1 不达标） */
   --border: #243250;
   --border-strong: #334466;
-  --accent: #10b981;
-  --accent-hover: #34d399;
-  --accent-strong: #059669;
+  --accent: #34d399;             /* accent-soft 底上 5.1:1（#10b981 只有 3.8:1） */
+  --accent-hover: #6ee7b7;
+  --accent-strong: #10b981;
   --accent-soft: #064e3b;
   --accent-softer: #022c22;
   --danger: #fb7185;
+  --danger-text: #fda4af;
   --danger-soft: #4c0519;
   --warning: #fbbf24;
   --warning-soft: #451a03;
   --info: #60a5fa;
   --info-soft: #172554;
+  --success: #34d399;
+  --neutral-dot: #64748b;
+
+  --on-accent: #052e21;
+  --on-danger: #4c0519;
+  --on-warning: #451a03;
+  --on-info: #101a33;
 
   --effect-read: #94a3b8;
   --effect-read-soft: #1e293b;
@@ -91,10 +156,16 @@
   --effect-external: #a78bfa;
   --effect-external-soft: #2e1065;
 
+  --shadow-2xs: 0 1px 1px 0 rgb(0 0 0 / 0.24);
   --shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.3);
   --shadow-sm: 0 4px 6px -1px rgb(0 0 0 / 0.4), 0 2px 4px -2px rgb(0 0 0 / 0.4);
   --shadow-md: 0 10px 15px -3px rgb(0 0 0 / 0.5), 0 4px 6px -4px rgb(0 0 0 / 0.5);
   --shadow-lg: 0 20px 25px -5px rgb(0 0 0 / 0.6), 0 8px 10px -6px rgb(0 0 0 / 0.6);
+
+  --glass-bg: rgba(19, 27, 46, 0.82);
+  --glass-bg-hover: rgba(26, 36, 59, 0.94);
+  --glass-border: rgba(148, 163, 184, 0.14);
+
   color-scheme: dark;
 }
 
@@ -110,16 +181,19 @@ body {
   text-rendering: optimizeLegibility;
 }
 button, input, select, textarea { font: inherit; }
+input[type="date"], input[type="number"] { min-width: 0; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .48; }
 button, input, select, textarea { outline: none; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible,
-summary:focus-visible {
+a:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 code, pre, .mono { font-family: var(--mono); }
-code { font-size: .92em; }
+/* 11px 字号硬下限：small/code 不再按 0.8em/0.92em 缩到 8.8–10.1px */
+small { font-size: inherit; }
+code { font-size: 1em; }
 ::selection { background: var(--accent-soft); }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -130,19 +204,37 @@ code { font-size: .92em; }
   background-clip: padding-box;
 }
 
+/* 等宽数字：所有金额/数量/时间对齐不跳动 */
+.tnum, .font-mono, [class*="proc-stat-number"] { font-variant-numeric: tabular-nums; }
+
+/* 过渡基调：150–200ms */
+.proc-transition,
+.proc-button, .proc-icon-button, .proc-card, a, button {
+  transition-property: color, background-color, border-color, box-shadow, transform, opacity;
+  transition-duration: var(--dur-fast);
+  transition-timing-function: var(--ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* Glassmorphism utility components */
 .glass-panel {
   background: var(--surface);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--border);
   box-shadow: var(--shadow-sm);
 }
 @supports (backdrop-filter: blur(12px)) or (-webkit-backdrop-filter: blur(12px)) {
   :root .glass-panel {
-    background: rgba(255, 255, 255, 0.78);
-  }
-  :root[data-theme="dark"] .glass-panel {
-    background: rgba(19, 27, 46, 0.78);
+    background: var(--glass-bg);
+    border-color: var(--glass-border);
   }
 }

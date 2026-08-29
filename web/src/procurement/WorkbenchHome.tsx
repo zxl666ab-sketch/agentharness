@@ -4,19 +4,21 @@ import {
   ArrowRight,
   Bot,
   CheckCircle2,
+  ChevronDown,
   Clock3,
-  FileSpreadsheet,
-  FileWarning,
   ListTodo,
   PackageCheck,
   Plus,
   ShieldAlert,
+  ShieldCheck,
   Sparkles,
 } from "lucide-react";
 
 import { procurementApi } from "./api";
 import { AgentOfflineNotice } from "./AgentOfflineNotice";
+import { Button, EmptyState, StatusPill, formatShortDateTime, unitLabel } from "../components/ui";
 import { isViewVisible, type DemoRole } from "./roles";
+import type { ReactNode } from "react";
 import type { AiTaskView, ProcurementRequestSummary, ReviewView } from "./types";
 import type { TaskFilter, WorkbenchView } from "./workbenchUrl";
 import { actionablePendingReviewCount, statusLabel, statusTone } from "./viewModel";
@@ -37,8 +39,13 @@ type Props = {
 };
 
 const ATTENTION = new Set(["waiting_human", "review", "ready", "analyzed", "approval_pending"]);
-function shortDate(value: string) {
-  return new Date(value).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+
+function quantityText(request: ProcurementRequestSummary) {
+  if (request.quantity == null || String(request.quantity).trim() === "") return null;
+  const value = typeof request.quantity === "number"
+    ? request.quantity.toLocaleString("zh-CN")
+    : String(request.quantity);
+  return `${value} ${unitLabel(request.unit)}`.trim();
 }
 
 export function WorkbenchHome({
@@ -68,6 +75,7 @@ export function WorkbenchHome({
   });
 
   const attention = requests.filter((item) => ATTENTION.has(item.status)).length;
+  const inFlight = requests.filter((item) => item.status !== "approved" && item.status !== "no_award" && item.status !== "cancelled").length;
   const aiIssues = aiTasks.filter((item) => item.status === "FAILED" || item.stale).length;
   const pendingReviews = actionablePendingReviewCount(reviews, requests);
   const recent = requests.slice(0, 8);
@@ -86,284 +94,268 @@ export function WorkbenchHome({
   const canOpenOrders = isViewVisible(role, "orders");
   const canOpenInvoices = isViewVisible(role, "invoices");
   const canOpenReviews = isViewVisible(role, "reviews");
-  const actionableExceptionCount = (canOpenAi ? aiIssues : 0) + (canOpenOrders ? overdueTotal : 0) + (canOpenReviews ? pendingReviews : 0);
+  const riskItems = [
+    canOpenAi && aiIssues > 0 ? {
+      key: "ai", tone: "danger" as const, icon: <AlertTriangle size={16} />,
+      title: `${aiIssues} 个 AI 任务需处理`,
+      detail: "失败、取消或输入已过期，支持一键重试与人工干预",
+      go: () => onOpenView("ai"),
+    } : null,
+    canOpenOrders && overdueTotal > 0 ? {
+      key: "overdue", tone: "warning" as const, icon: <Clock3 size={16} />,
+      title: `${overdueTotal} 项履约逾期`,
+      detail: `发货逾期 ${counts?.overdue_orders ?? 0} · 付款逾期 ${counts?.overdue_payments ?? 0}`,
+      go: onOpenOrders,
+    } : null,
+    canOpenReviews && pendingReviews > 0 ? {
+      key: "reviews", tone: "warning" as const, icon: <ShieldCheck size={16} />,
+      title: `${pendingReviews} 项等待高风险确认`,
+      detail: "采购方案必须由人工核对确认，系统不会盲目自动执行",
+      go: () => onOpenView("reviews"),
+    } : null,
+    canOpenInvoices && invoiceHolds > 0 ? {
+      key: "invoice-diff", tone: "danger" as const, icon: <AlertTriangle size={16} />,
+      title: `${invoiceHolds} 张发票差异挂起`,
+      detail: "存在未核销差异时付款会被拦截，请前往发票中心处理",
+      go: () => onOpenView("invoices"),
+    } : null,
+  ].filter(Boolean) as Array<{ key: string; tone: "danger" | "warning"; icon: ReactNode; title: string; detail: string; go: () => void }>;
+  const riskTotal = riskItems.reduce((sum, item) => sum + Number(item.title.match(/^\d+/)?.[0] || 0), 0);
   const hasQuickLinks = (canOpenTasks && humanAttention > 0) ||
     (canOpenReviews && (planConfirmations > 0 || pendingReviews > 0)) ||
     (canOpenOrders && (pendingReceipts > 0 || paymentBlocks > 0)) ||
     (canOpenInvoices && invoiceHolds > 0);
 
   return (
-    <div className="proc-home flex flex-col gap-6 p-6 max-w-7xl mx-auto w-full">
+    <div className="proc-home" aria-label="采购驾驶舱">
       {/* LIVE-1：Agent 离线降级提示（可关闭），避免用户只看到"处理中"。 */}
       {agentDown ? <AgentOfflineNotice /> : null}
-      {/* 顶部驾驶舱 KPI 指标看板 */}
-      <section className="proc-cockpit-stats grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" aria-label="核心指标看板">
-        <button
-          type="button"
-          className="proc-stat-card glass-panel bg-surface/80 hover:bg-surface border border-border/70 hover:border-accent/40 rounded-xl p-4 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all duration-150 flex flex-col justify-between text-left group"
-          onClick={() => canOpenTasks && onOpenTasks("all")}
-        >
-          <div className="proc-stat-header flex items-center justify-between gap-2">
-            <span className="proc-stat-title text-xs font-medium text-text-muted group-hover:text-text transition-colors">采购总任务</span>
-            <span className="proc-stat-icon-wrap primary w-8 h-8 rounded-lg flex items-center justify-center bg-accent-soft text-accent group-hover:scale-105 transition-transform"><ListTodo size={18} /></span>
-          </div>
-          <div className="proc-stat-body flex flex-col gap-0.5 mt-2">
-            <strong className="proc-stat-number text-2xl font-bold font-mono text-text tracking-tight">{requests.length}</strong>
-            <span className="proc-stat-sub text-xs text-text-muted">进行中 {requests.filter(r => r.status !== 'approved' && r.status !== 'no_award' && r.status !== 'cancelled').length} 项</span>
-          </div>
-        </button>
 
-        <button
-          type="button"
-          className={`proc-stat-card glass-panel bg-surface/80 hover:bg-surface border border-border/70 hover:border-warning/40 rounded-xl p-4 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all duration-150 flex flex-col justify-between text-left group ${attention > 0 ? "highlight-attention ring-1 ring-warning/30" : ""}`}
-          onClick={() => canOpenTasks && onOpenTasks("attention")}
-        >
-          <div className="proc-stat-header flex items-center justify-between gap-2">
-            <span className="proc-stat-title text-xs font-medium text-text-muted group-hover:text-text transition-colors">待办决策</span>
-            <span className="proc-stat-icon-wrap warning w-8 h-8 rounded-lg flex items-center justify-center bg-warning-soft text-warning group-hover:scale-105 transition-transform"><Clock3 size={18} /></span>
-          </div>
-          <div className="proc-stat-body flex flex-col gap-0.5 mt-2">
-            <strong className="proc-stat-number text-2xl font-bold font-mono text-text tracking-tight">{attention}</strong>
-            <span className="proc-stat-sub text-xs text-text-muted">待复核与方案确认</span>
-          </div>
-        </button>
-
-        {canOpenOrders ? (
-          <button
-            type="button"
-            className="proc-stat-card glass-panel bg-surface/80 hover:bg-surface border border-border/70 hover:border-info/40 rounded-xl p-4 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all duration-150 flex flex-col justify-between text-left group"
-            onClick={onOpenOrders}
-          >
-            <div className="proc-stat-header flex items-center justify-between gap-2">
-              <span className="proc-stat-title text-xs font-medium text-text-muted group-hover:text-text transition-colors">履约中订单</span>
-              <span className="proc-stat-icon-wrap info w-8 h-8 rounded-lg flex items-center justify-center bg-info-soft text-info group-hover:scale-105 transition-transform"><PackageCheck size={18} /></span>
-            </div>
-            <div className="proc-stat-body flex flex-col gap-0.5 mt-2">
-              <strong className="proc-stat-number text-2xl font-bold font-mono text-text tracking-tight">{pendingReceipts}</strong>
-              <span className="proc-stat-sub text-xs text-text-muted">待发货 / 运输收货中</span>
-            </div>
-          </button>
-        ) : null}
-
-        <button
-          type="button"
-          className={`proc-stat-card glass-panel bg-surface/80 hover:bg-surface border border-border/70 hover:border-danger/40 rounded-xl p-4 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all duration-150 flex flex-col justify-between text-left group ${aiIssues + invoiceHolds + overdueTotal > 0 ? "highlight-danger ring-1 ring-danger/30" : ""}`}
-          onClick={() => aiIssues ? onOpenView("ai") : canOpenInvoices && invoiceHolds ? onOpenView("invoices") : canOpenOrders ? onOpenOrders() : canOpenTasks ? onOpenTasks("attention") : undefined}
-        >
-          <div className="proc-stat-header flex items-center justify-between gap-2">
-            <span className="proc-stat-title text-xs font-medium text-text-muted group-hover:text-text transition-colors">风险与异常预警</span>
-            <span className="proc-stat-icon-wrap danger w-8 h-8 rounded-lg flex items-center justify-center bg-danger-soft text-danger group-hover:scale-105 transition-transform"><ShieldAlert size={18} /></span>
-          </div>
-          <div className="proc-stat-body flex flex-col gap-0.5 mt-2">
-            <strong className="proc-stat-number text-2xl font-bold font-mono text-text tracking-tight">{aiIssues + invoiceHolds + overdueTotal}</strong>
-            <span className="proc-stat-sub text-xs text-text-muted">AI异常 {aiIssues} · 履约逾期 {overdueTotal} · 差异发票 {invoiceHolds}</span>
-          </div>
-        </button>
+      {/* 1️⃣ 核心指标：非零才成卡，零值收敛为徽标（痛点①） */}
+      <section className="proc-cockpit-stats" aria-label="核心指标看板">
+        <div className="proc-cockpit-numbers">
+          {canOpenTasks ? (
+            <button type="button" className="proc-stat-card" onClick={() => onOpenTasks("all")}>
+              <span className="proc-stat-label">采购总任务</span>
+              <strong className="proc-stat-number">{requests.length}</strong>
+              <small className="proc-stat-sub">进行中 {inFlight} 项</small>
+            </button>
+          ) : null}
+          {canOpenTasks && attention > 0 ? (
+            <button type="button" className="proc-stat-card is-warning" onClick={() => onOpenTasks("attention")}>
+              <span className="proc-stat-label">待你决策</span>
+              <strong className="proc-stat-number">{attention}</strong>
+              <small className="proc-stat-sub">待复核与方案确认</small>
+            </button>
+          ) : null}
+          {canOpenOrders && pendingReceipts > 0 ? (
+            <button type="button" className="proc-stat-card is-info" onClick={onOpenOrders}>
+              <span className="proc-stat-label">履约中订单</span>
+              <strong className="proc-stat-number">{pendingReceipts}</strong>
+              <small className="proc-stat-sub">待发货 / 运输收货中</small>
+            </button>
+          ) : null}
+        </div>
+        <div className="proc-cockpit-badges" aria-label="已清零的指标">
+          {canOpenTasks && attention === 0 ? (
+            <span className="proc-zero-badge is-clear"><CheckCircle2 size={13} />{loading ? "正在读取…" : "决策零待办"}</span>
+          ) : null}
+          {canOpenOrders && pendingReceipts === 0 ? (
+            <span className="proc-zero-badge"><PackageCheck size={13} />无在途履约</span>
+          ) : null}
+        </div>
       </section>
 
-      {/* 快捷操作与场景引导横幅 */}
+      {/* 2️⃣ 风险与异常：一行摘要 + 展开明细（痛点②） */}
+      <details className={`proc-risk-strip ${riskTotal > 0 ? (riskItems.some((item) => item.tone === "danger") ? "is-danger" : "is-warning") : "is-clear"}`} aria-label="风险与异常预警">
+        <summary>
+          <span className="proc-risk-strip-icon">
+            {riskTotal > 0 ? <ShieldAlert size={16} /> : <ShieldCheck size={16} />}
+          </span>
+          {riskTotal > 0 ? (
+            <>
+              <strong className="proc-risk-strip-count tnum">{riskTotal}</strong>
+              <span className="proc-risk-strip-label">项风险与异常</span>
+              <span className="proc-risk-strip-sep" aria-hidden>·</span>
+              <span className="proc-risk-strip-summary">
+                {riskItems.map((item) => item.title).join(" · ")}
+              </span>
+            </>
+          ) : (
+            <span className="proc-risk-strip-label">{loading ? "正在核对风险与异常…" : "暂无风险与异常，履约与审批均在正常推进"}</span>
+          )}
+          {riskTotal > 0 ? <ChevronDown size={14} className="proc-risk-strip-chevron" aria-hidden /> : null}
+        </summary>
+        {riskTotal > 0 ? (
+          <ul className="proc-risk-strip-items">
+            {riskItems.map((item) => (
+              <li key={item.key}>
+                <button type="button" className={`proc-alert-item is-${item.tone}`} onClick={item.go}>
+                  <span className="proc-alert-icon">{item.icon}</span>
+                  <span className="proc-alert-content">
+                    <strong>{item.title}</strong>
+                    <small>{item.detail}</small>
+                  </span>
+                  <ArrowRight size={14} aria-hidden />
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </details>
+
+      {/* 3️⃣ 发起入口：常驻一行动作条（原营销横幅默认收起，痛点③） */}
       {canOpenTasks ? (
-        <section className="proc-home-action-banner flex flex-wrap items-center justify-between gap-4 p-4.5 rounded-xl border border-border/80 bg-surface shadow-xs">
-          <div className="flex items-center gap-3.5 min-w-0">
-            <div className="w-10 h-10 rounded-xl bg-accent-soft text-accent flex items-center justify-center flex-shrink-0 shadow-2xs">
-              <Sparkles size={20} />
-            </div>
-            <div className="flex flex-col gap-0.5 min-w-0">
-              <div className="flex items-center gap-2">
-                <strong className="text-sm font-bold text-text">采购智能协同看板</strong>
-                <span className="text-[10px] font-semibold font-mono bg-accent-soft text-accent px-2 py-0.5 rounded-full border border-accent/20">
-                  AI + Java 确定性双引擎
-                </span>
-              </div>
-              <p className="text-xs text-text-muted">
-                实时掌控采购寻源、智能比价、履约跟踪与对账结算全链路。如需发起新寻价，请点击右侧创建任务。
-              </p>
-            </div>
+        <section className="proc-home-action-banner" aria-label="采购智能协同看板">
+          <div className="proc-home-banner-copy">
+            <span className="proc-home-banner-icon"><Sparkles size={16} /></span>
+            <strong>采购智能协同看板</strong>
+            <small>AI + Java 双引擎 · 寻源、比价、履约、对账全链路实时掌控</small>
           </div>
-          <div className="flex items-center gap-2.5 flex-shrink-0">
-            <button
-              className="proc-button primary inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-accent text-white text-xs font-semibold hover:bg-accent-strong shadow-xs transition-colors"
-              type="button"
-              onClick={() => onOpenCreate ? onOpenCreate() : onOpenTasks("all")}
-            >
-              <Plus size={15} />
-              <span>新建采购任务</span>
-            </button>
+          <div className="proc-home-banner-actions">
+            <Button variant="primary" icon={<Plus size={15} />} onClick={() => (onOpenCreate ? onOpenCreate() : onOpenTasks("all"))}>
+              新建采购任务
+            </Button>
           </div>
         </section>
       ) : null}
 
-      {/* 待办中心快捷过滤药丸条：只展示有待处理事项的入口 */}
-      <section className={`proc-todo-quick-strip flex items-center gap-2 overflow-x-auto py-1 scrollbar-none ${hasQuickLinks ? "" : "hidden"}`} aria-label="待办中心">
-          {canOpenTasks && humanAttention > 0 ? (
-            <button type="button" title={`等待回答 ${agentWaiting} · 字段复核 ${fieldReviews}`} className="proc-todo-chip attention inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border border-warning/40 bg-warning-soft/30 text-warning transition-all whitespace-nowrap" onClick={() => onOpenTasks("attention")}>
-              <span className="proc-todo-chip-icon"><Bot size={15} /></span>
-              <span className="proc-todo-chip-label">待人工处理</span>
-              <span className="proc-todo-chip-count font-mono font-bold px-1.5 py-0.2 rounded-full bg-surface-subtle text-[11px]">{humanAttention}</span>
-            </button>
-          ) : null}
-          {canOpenReviews && (planConfirmations > 0 || pendingReviews > 0) ? (
-            <button type="button" className="proc-todo-chip attention inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border border-accent/40 bg-accent-soft/30 text-accent transition-all whitespace-nowrap" onClick={() => onOpenView("reviews")}>
-              <span className="proc-todo-chip-icon"><CheckCircle2 size={15} /></span>
-              <span className="proc-todo-chip-label">等待确认采购方案</span>
-              <span className="proc-todo-chip-count font-mono font-bold px-1.5 py-0.2 rounded-full bg-surface-subtle text-[11px]">{Math.max(planConfirmations, pendingReviews)}</span>
-            </button>
-          ) : null}
-          {canOpenOrders && pendingReceipts > 0 ? (
-            <button type="button" className="proc-todo-chip attention inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border border-info/40 bg-info-soft/30 text-info transition-all whitespace-nowrap" onClick={onOpenOrders}>
-              <span className="proc-todo-chip-icon"><PackageCheck size={15} /></span>
-              <span className="proc-todo-chip-label">待收货订单</span>
-              <span className="proc-todo-chip-count font-mono font-bold px-1.5 py-0.2 rounded-full bg-surface-subtle text-[11px]">{pendingReceipts}</span>
-            </button>
-          ) : null}
-          {canOpenInvoices && invoiceHolds > 0 ? (
-            <button type="button" className="proc-todo-chip danger inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border border-danger/40 bg-danger-soft/30 text-danger transition-all whitespace-nowrap" onClick={() => onOpenView("invoices")}>
-              <span className="proc-todo-chip-icon"><FileWarning size={15} /></span>
-              <span className="proc-todo-chip-label">发票差异待处理</span>
-              <span className="proc-todo-chip-count font-mono font-bold px-1.5 py-0.2 rounded-full bg-surface-subtle text-[11px]">{invoiceHolds}</span>
-            </button>
-          ) : null}
-          {canOpenOrders && paymentBlocks > 0 ? (
-            <button type="button" className="proc-todo-chip danger inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border border-danger/40 bg-danger-soft/30 text-danger transition-all whitespace-nowrap" onClick={onOpenOrders}>
-              <span className="proc-todo-chip-icon"><ShieldAlert size={15} /></span>
-              <span className="proc-todo-chip-label">付款被拦截</span>
-              <span className="proc-todo-chip-count font-mono font-bold px-1.5 py-0.2 rounded-full bg-surface-subtle text-[11px]">{paymentBlocks}</span>
-            </button>
-          ) : null}
+      {/* 待办快捷入口：只展示有待处理事项的胶囊（零值不占位） */}
+      <section className={`proc-todo-quick-strip${hasQuickLinks ? "" : " is-empty"}`} aria-label="待办中心">
+        {canOpenTasks && humanAttention > 0 ? (
+          <button type="button" title={`等待回答 ${agentWaiting} · 字段复核 ${fieldReviews}`} className="proc-todo-chip is-warning" onClick={() => onOpenTasks("attention")}>
+            <Bot size={14} />
+            <span className="proc-todo-chip-label">待人工处理</span>
+            <b className="proc-todo-chip-count tnum">{humanAttention}</b>
+          </button>
+        ) : null}
+        {canOpenReviews && (planConfirmations > 0 || pendingReviews > 0) ? (
+          <button type="button" className="proc-todo-chip is-accent" onClick={() => onOpenView("reviews")}>
+            <CheckCircle2 size={14} />
+            <span className="proc-todo-chip-label">等待确认采购方案</span>
+            <b className="proc-todo-chip-count tnum">{Math.max(planConfirmations, pendingReviews)}</b>
+          </button>
+        ) : null}
+        {canOpenOrders && pendingReceipts > 0 ? (
+          <button type="button" className="proc-todo-chip is-info" onClick={onOpenOrders}>
+            <PackageCheck size={14} />
+            <span className="proc-todo-chip-label">待收货订单</span>
+            <b className="proc-todo-chip-count tnum">{pendingReceipts}</b>
+          </button>
+        ) : null}
+        {canOpenInvoices && invoiceHolds > 0 ? (
+          <button type="button" className="proc-todo-chip is-danger" onClick={() => onOpenView("invoices")}>
+            <AlertTriangle size={14} />
+            <span className="proc-todo-chip-label">发票差异待处理</span>
+            <b className="proc-todo-chip-count tnum">{invoiceHolds}</b>
+          </button>
+        ) : null}
+        {canOpenOrders && paymentBlocks > 0 ? (
+          <button type="button" className="proc-todo-chip is-danger" onClick={onOpenOrders}>
+            <ShieldAlert size={14} />
+            <span className="proc-todo-chip-label">付款被拦截</span>
+            <b className="proc-todo-chip-count tnum">{paymentBlocks}</b>
+          </button>
+        ) : null}
+        {hasQuickLinks ? null : <span className="proc-todo-strip-hint">当前没有需要你立即处理的待办入口</span>}
       </section>
 
-      {/* 待办任务流与需处理告警 */}
-      <div className="proc-home-grid grid grid-cols-1 lg:grid-cols-2 gap-6">
+      {/* 4️⃣ 待办任务 + 最近任务：行内副字段差异化（痛点④） */}
+      <div className="proc-home-grid">
         {canOpenTasks ? (
-          <section className="proc-home-section glass-panel rounded-xl p-5 border border-border/80 bg-surface/80 flex flex-col gap-4 shadow-sm">
-            <header className="flex items-center justify-between gap-2 pb-2 border-b border-border/40">
-              <div className="flex items-center gap-2.5">
-                <h2 className="text-base font-semibold text-text tracking-tight">待办任务</h2>
-                <span className="proc-pill-count text-xs px-2.5 py-0.5 rounded-full font-medium bg-surface-subtle border border-border text-text-muted">{attention} 项待处理</span>
-              </div>
+          <section className="proc-home-section" aria-label="待办任务">
+            <header className="proc-home-section-head">
+              <h2>待办任务</h2>
+              <span className={`proc-pill-count${attention > 0 ? " is-warning" : ""}`}>{attention} 项待处理</span>
             </header>
             {todo.length ? (
-              <div className="proc-home-list flex flex-col gap-2">
-                {todo.map((request) => (
-                  <button key={request.id} type="button" className="proc-task-row-btn p-3 rounded-lg border border-border/60 bg-surface hover:bg-surface-subtle hover:border-border-strong text-left flex items-center gap-3 transition-all group" onClick={() => onOpenTask(request.id)}>
-                    <span className="proc-home-list-icon w-8 h-8 rounded-lg bg-surface-subtle flex items-center justify-center text-text-muted group-hover:text-accent transition-colors flex-shrink-0"><Clock3 size={16} /></span>
-                    <div className="proc-task-row-info flex-1 min-w-0">
-                      <strong className="block text-xs font-semibold text-text truncate group-hover:text-accent transition-colors">{request.title}</strong>
-                      <small className="block text-[11px] text-text-muted truncate"><code className="font-mono">{request.reference}</code> · {request.quote_count} 家报价</small>
-                    </div>
-                    <span className={`proc-status-tag ${statusTone(request.status)} text-[11px] font-medium px-2 py-0.5 rounded-full border`}>{statusLabel(request.status)}</span>
-                    <time className="proc-task-row-time text-[11px] text-text-muted font-mono whitespace-nowrap">{shortDate(request.updated_at)}</time>
-                    <ArrowRight size={14} className="proc-row-arrow text-text-muted group-hover:text-text group-hover:translate-x-0.5 transition-all flex-shrink-0" />
-                  </button>
-                ))}
+              <div className="proc-home-list">
+                {todo.map((item) => {
+                  const qty = quantityText(item);
+                  return (
+                    <button key={item.id} type="button" className="proc-task-row-btn" onClick={() => onOpenTask(item.id)}>
+                      <span className="proc-task-row-main">
+                        <strong>{item.title}</strong>
+                        <small>
+                          <code>{item.reference}</code>
+                          {item.item_name && !item.title.includes(item.item_name) ? <> · {item.item_name}</> : null}
+                          {qty ? <> · {qty}</> : null}
+                          {" "}· {item.quote_count} 家报价
+                        </small>
+                      </span>
+                      <StatusPill tone={statusTone(item.status)} size="compact">{statusLabel(item.status)}</StatusPill>
+                      <time className="proc-task-row-time" dateTime={item.updated_at}>{formatShortDateTime(item.updated_at)}</time>
+                      <ArrowRight size={14} className="proc-row-arrow" aria-hidden />
+                    </button>
+                  );
+                })}
               </div>
             ) : (
-              <div className="proc-home-empty py-10 flex flex-col items-center justify-center gap-2 text-text-muted text-xs">
-                <CheckCircle2 size={24} className="text-accent" />
-                <span>{loading ? "正在读取任务…" : "当前没有待办任务，所有流程均已推进"}</span>
-              </div>
+              <EmptyState
+                variant="inline"
+                icon={loading ? undefined : <CheckCircle2 size={24} />}
+                title="当前没有待办任务，所有流程均已推进"
+                hint={loading ? "正在读取任务…" : "有新的复核、比价确认或审批请求时会出现在这里"}
+              />
             )}
           </section>
         ) : null}
 
-        {actionableExceptionCount > 0 ? <section className="proc-home-section glass-panel rounded-xl p-5 border border-border/80 bg-surface/80 flex flex-col gap-4 shadow-sm">
-          <header className="flex items-center justify-between gap-2 pb-2 border-b border-border/40">
-            <div className="flex items-center gap-2.5">
-              <h2 className="text-base font-semibold text-text tracking-tight">需要处理</h2>
-              <span className="proc-pill-count danger text-xs px-2.5 py-0.5 rounded-full font-medium bg-danger-soft text-danger border border-danger/20">{actionableExceptionCount} 项异常</span>
-            </div>
-          </header>
-          <div className="proc-home-alerts flex flex-col gap-2.5">
-            {canOpenAi && aiIssues > 0 ? <button type="button" className="proc-alert-item danger p-3.5 rounded-xl border text-left flex items-center gap-3.5 transition-all group bg-danger-soft/20 border-danger/30 hover:border-danger/60" onClick={() => onOpenView("ai")}>
-              <div className={`proc-alert-icon w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${aiIssues ? "bg-danger-soft text-danger" : "bg-surface-subtle text-text-muted"}`}><AlertTriangle size={18} /></div>
-              <div className="proc-alert-content flex-1 min-w-0">
-                <strong className="block text-xs font-semibold text-text truncate group-hover:text-danger transition-colors">{aiIssues} 个 AI 任务需处理</strong>
-                <small className="block text-[11px] text-text-muted truncate mt-0.5">失败、取消或输入已过期，支持一键重试与人工干预</small>
-              </div>
-              <ArrowRight size={15} className="text-text-muted group-hover:text-text group-hover:translate-x-0.5 transition-all flex-shrink-0" />
-            </button> : null}
-            {canOpenOrders && overdueTotal > 0 ? (
-              <button type="button" className="proc-alert-item warning p-3.5 rounded-xl border text-left flex items-center gap-3.5 transition-all group bg-warning-soft/20 border-warning/30 hover:border-warning/60" onClick={onOpenOrders}>
-                <div className={`proc-alert-icon w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${overdueTotal ? "bg-warning-soft text-warning" : "bg-surface-subtle text-text-muted"}`}><Clock3 size={18} /></div>
-                <div className="proc-alert-content flex-1 min-w-0">
-                  <strong className="block text-xs font-semibold text-text truncate group-hover:text-warning transition-colors">{overdueTotal} 项履约逾期</strong>
-                  <small className="block text-[11px] text-text-muted truncate mt-0.5">发货逾期 {counts?.overdue_orders ?? 0} · 付款逾期 {counts?.overdue_payments ?? 0}</small>
-                </div>
-                <ArrowRight size={15} className="text-text-muted group-hover:text-text group-hover:translate-x-0.5 transition-all flex-shrink-0" />
+        {canOpenTasks ? (
+          <section className="proc-home-section recent" aria-label="最近任务">
+            <header className="proc-home-section-head">
+              <h2>最近任务</h2>
+              <button type="button" className="proc-link-btn" onClick={() => onOpenTasks("all")}>
+                查看全部任务 <ArrowRight size={13} />
               </button>
-            ) : null}
-            {canOpenReviews && pendingReviews > 0 ? <button type="button" className="proc-alert-item warning p-3.5 rounded-xl border text-left flex items-center gap-3.5 transition-all group bg-warning-soft/20 border-warning/30 hover:border-warning/60" onClick={() => onOpenView("reviews")}>
-              <div className={`proc-alert-icon w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${pendingReviews ? "bg-warning-soft text-warning" : "bg-surface-subtle text-text-muted"}`}><CheckCircle2 size={18} /></div>
-              <div className="proc-alert-content flex-1 min-w-0">
-                <strong className="block text-xs font-semibold text-text truncate group-hover:text-warning transition-colors">{pendingReviews} 项等待高风险确认</strong>
-                <small className="block text-[11px] text-text-muted truncate mt-0.5">采购方案必须由人工核对确认，系统不会盲目自动执行</small>
-              </div>
-              <ArrowRight size={15} className="text-text-muted group-hover:text-text group-hover:translate-x-0.5 transition-all flex-shrink-0" />
-            </button> : null}
-          </div>
-        </section> : null}
-      </div>
-
-      {/* 最近采购任务高密度数据表 */}
-      {canOpenTasks ? (
-        <section className="proc-home-section recent glass-panel rounded-xl p-5 border border-border/80 bg-surface/80 flex flex-col gap-4 shadow-sm">
-          <header className="flex items-center justify-between gap-2 pb-2 border-b border-border/40">
-            <div className="flex items-center gap-2.5">
-              <h2 className="text-base font-semibold text-text tracking-tight">最近任务</h2>
-              <span className="proc-pill-count text-xs px-2.5 py-0.5 rounded-full font-medium bg-surface-subtle border border-border text-text-muted">{recent.length} 条记录</span>
-            </div>
-            <button type="button" className="proc-link-btn text-xs font-medium text-accent hover:text-accent-strong flex items-center gap-1 transition-colors" onClick={() => onOpenTasks("all")}>
-              查看全部任务<ArrowRight size={14} />
-            </button>
-          </header>
-          {recent.length ? (
-            <div className="proc-pro-table-wrap overflow-x-auto rounded-lg border border-border/60">
-              <table className="proc-pro-table w-full text-left text-xs border-collapse" role="table" aria-label="最近采购任务">
-                <thead>
-                  <tr role="row" className="bg-surface-subtle/80 border-b border-border text-text-muted font-medium">
-                    <th className="py-2.5 px-3">采购编号</th>
-                    <th className="py-2.5 px-3">物料与需求标题</th>
-                    <th className="py-2.5 px-3">报价数量</th>
-                    <th className="py-2.5 px-3">当前阶段</th>
-                    <th className="py-2.5 px-3 text-right">最近更新</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border/40">
-                  {recent.map((request) => (
-                    <tr key={request.id} role="row" className="proc-pro-tr hover:bg-surface-subtle/60 transition-colors cursor-pointer group" onClick={() => onOpenTask(request.id)}>
-                      <td className="py-3 px-3"><code className="font-mono text-xs font-semibold text-accent">{request.reference}</code></td>
-                      <td className="py-3 px-3">
-                        <div className="proc-table-title-cell flex flex-col gap-0.5">
-                          <strong className="text-xs font-semibold text-text group-hover:text-accent transition-colors">{request.title}</strong>
-                          <small className="text-[11px] text-text-muted">{request.item_name} · {request.quantity ? `${request.quantity.toLocaleString()} ${request.unit || ""}` : "规格自适应"}</small>
-                        </div>
-                      </td>
-                      <td className="py-3 px-3">
-                        <span className="proc-quote-count-badge inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-surface-subtle border border-border text-[11px] font-medium text-text-secondary">
-                          <FileSpreadsheet size={13} className="text-accent" />
-                          {request.quote_count} 家
-                        </span>
-                      </td>
-                      <td className="py-3 px-3">
-                        <span className={`proc-status-chip ${statusTone(request.status)} inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border`}>
-                          <i className="w-1.5 h-1.5 rounded-full bg-current" />
-                          {statusLabel(request.status)}
-                        </span>
-                      </td>
-                      <td className="py-3 px-3 text-right"><time className="proc-table-time text-[11px] text-text-muted font-mono">{shortDate(request.updated_at)}</time></td>
+            </header>
+            {recent.length ? (
+              <div className="proc-pro-table-wrap">
+                <table className="proc-pro-table" role="table" aria-label="最近采购任务">
+                  <thead>
+                    <tr>
+                      <th>采购编号</th>
+                      <th>物料与需求标题</th>
+                      <th>当前阶段</th>
+                      <th className="is-end">最近更新</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="proc-home-empty py-10 flex flex-col items-center justify-center gap-2 text-text-muted text-xs">
-              <ListTodo size={24} className="text-accent" />
-              <span>{loading ? "正在读取任务…" : "尚无采购任务"}</span>
-            </div>
-          )}
-        </section>
-      ) : null}
+                  </thead>
+                  <tbody>
+                    {recent.map((item) => {
+                      const qty = quantityText(item);
+                      return (
+                        <tr key={item.id} className="proc-pro-tr" onClick={() => onOpenTask(item.id)}>
+                          <td><code>{item.reference}</code></td>
+                          <td>
+                            <div className="proc-table-title-cell">
+                              <strong>{item.title}</strong>
+                              <small>
+                                {item.item_name && !item.title.includes(item.item_name) ? `${item.item_name} · ` : ""}
+                                {qty ? `${qty} · ` : ""}
+                                {`${item.quote_count} 家报价`}
+                              </small>
+                            </div>
+                          </td>
+                          <td><StatusPill tone={statusTone(item.status)} size="compact">{statusLabel(item.status)}</StatusPill></td>
+                          <td className="is-end"><time className="proc-table-time" dateTime={item.updated_at}>{formatShortDateTime(item.updated_at)}</time></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <EmptyState
+                variant="inline"
+                icon={loading ? undefined : <ListTodo size={24} />}
+                title="尚无采购任务"
+                hint={loading ? "正在读取任务…" : "发起第一次询价后，任务进展会实时汇总在这里"}
+                action={onOpenCreate ? <Button variant="primary" size="sm" icon={<Plus size={14} />} onClick={onOpenCreate}>新建采购任务</Button> : undefined}
+              />
+            )}
+          </section>
+        ) : null}
+      </div>
     </div>
   );
 }

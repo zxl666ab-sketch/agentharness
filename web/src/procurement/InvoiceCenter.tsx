@@ -1,6 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AlertTriangle,
   Archive,
   BadgeCheck,
   CheckCircle2,
@@ -15,8 +14,24 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { POLL_FETCH_CAP, pollFetchCount, procurementApi } from "./api";
+import {
+  Button,
+  CenterPage,
+  Card,
+  CountBadge,
+  EmptyState,
+  ErrorState,
+  Fact,
+  FilterChips,
+  ListRow,
+  MasterDetail,
+  Modal,
+  NoticeBar,
+  PageHeader,
+  StatusPill,
+  formatMoney,
+} from "../components/ui";
 import type { InvoiceStatus, InvoiceView } from "./types";
-import { useEscape } from "./useEscape";
 
 const STATUS_FILTERS: Array<{ value: InvoiceStatus | ""; label: string }> = [
   { value: "", label: "全部" },
@@ -27,12 +42,20 @@ const STATUS_FILTERS: Array<{ value: InvoiceStatus | ""; label: string }> = [
   { value: "VOIDED", label: "已作废" },
 ];
 
-const STATUS_LABELS: Record<InvoiceStatus, { label: string; tone: string }> = {
-  REGISTERED: { label: "已登记", tone: "info" },
-  MATCHED: { label: "已匹配", tone: "success" },
-  DIFF_HOLD: { label: "差异挂起", tone: "danger" },
-  VOIDED: { label: "已作废", tone: "neutral" },
-  RECONCILED: { label: "已核销", tone: "accent" },
+const STATUS_TONES: Record<InvoiceStatus, string> = {
+  REGISTERED: "info",
+  MATCHED: "success",
+  DIFF_HOLD: "danger",
+  VOIDED: "neutral",
+  RECONCILED: "success",
+};
+
+const STATUS_LABELS: Record<InvoiceStatus, string> = {
+  REGISTERED: "已登记",
+  MATCHED: "已匹配",
+  DIFF_HOLD: "差异挂起",
+  VOIDED: "已作废",
+  RECONCILED: "已核销",
 };
 
 const DIFF_LABELS: Record<string, string> = {
@@ -42,13 +65,14 @@ const DIFF_LABELS: Record<string, string> = {
   tax_rate: "税率",
 };
 
-function money(value: string | null | undefined) {
-  if (value == null || value === "") return "—";
-  const parsed = Number(value);
-  return Number.isFinite(parsed)
-    ? new Intl.NumberFormat("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 6 }).format(parsed)
-    : String(value);
-}
+/** 订单状态中文化（下拉选项展示用，避免英文枚举泄漏）。 */
+const ORDER_STATUS_LABELS: Record<string, string> = {
+  PENDING_SHIPMENT: "待发货",
+  SHIPPED: "已发货",
+  PARTIALLY_RECEIVED: "部分收货",
+  RECEIVED: "已收货",
+  CLOSED: "已关闭",
+};
 
 /**
  * P-UX⑧：focusOrderId 来自订单卡的「上传发票 / 处理发票」跳转
@@ -70,10 +94,6 @@ export function InvoiceCenter({ focusOrderId = null }: { focusOrderId?: string |
   const [forceConfirmed, setForceConfirmed] = useState(false);
   const [correctTarget, setCorrectTarget] = useState<InvoiceView | null>(null);
   const [correctForm, setCorrectForm] = useState({ quantity: "", unit_price: "", amount_excluding_tax: "", tax_amount: "", total_amount: "", tax_rate: "" });
-
-  useEscape(!!voidTarget, () => setVoidTarget(null), busy?.startsWith("void:") ?? false);
-  useEscape(!!forceTarget, () => setForceTarget(null), busy?.startsWith("force:") ?? false);
-  useEscape(!!correctTarget, () => setCorrectTarget(null), busy?.startsWith("correct:") ?? false);
 
   const invoicesQuery = useQuery({
     queryKey: ["procurement-invoices", status],
@@ -216,261 +236,286 @@ export function InvoiceCenter({ focusOrderId = null }: { focusOrderId?: string |
   };
 
   return (
-    <div className="proc-center-page flex flex-col gap-6 p-6 max-w-7xl mx-auto w-full">
-      <header className="proc-page-head flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-border">
-        <div>
-          <h1 className="text-xl font-bold text-text tracking-tight flex items-center gap-2">
-            <Receipt className="w-5 h-5 text-accent" />
-            发票中心
-          </h1>
-          <p className="text-xs text-text-muted mt-1">上传发票 → 解析 → 三单匹配（PO/收货/发票）→ 差异挂起处理 → 核销 → 付款</p>
-        </div>
-        <span className="proc-page-count text-xs font-medium text-text-secondary bg-surface-subtle px-3 py-1 rounded-full border border-border">共 {invoicesQuery.data?.total ?? 0} 张</span>
-      </header>
+    <CenterPage
+      header={
+        <PageHeader
+          icon={<Receipt size={18} />}
+          title="发票中心"
+          subtitle="上传发票 → 解析 → 三单匹配（PO/收货/发票）→ 差异挂起处理 → 核销 → 付款"
+          aside={<CountBadge>共 {invoicesQuery.data?.total ?? 0} 张</CountBadge>}
+        />
+      }
+      toolbar={
+        <>
+          <div className="proc-action-bar">
+            <select className="proc-input is-grow" aria-label="选择采购订单" value={orderId} onChange={(event) => setOrderId(event.target.value)}>
+              <option value="">选择采购订单（优先已收货）…</option>
+              {(ordersQuery.data?.items || []).map((order) => (
+                <option key={order.id} value={order.id}>
+                  {order.order_no} · {order.supplier_name} · {order.item_name}（{ORDER_STATUS_LABELS[order.status] || order.status}）
+                </option>
+              ))}
+            </select>
+            <label className={`proc-upload-button ${busy?.startsWith("upload") ? "disabled" : ""}`}>
+              {busy?.startsWith("upload") ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}
+              <span>{busy?.startsWith("upload") ? "上传解析中" : "上传发票"}</span>
+              <input
+                data-testid="invoice-upload"
+                type="file"
+                accept=".xlsx,.pdf"
+                disabled={busy?.startsWith("upload")}
+                onChange={(event) => {
+                  void upload(event.target.files?.[0]);
+                  event.target.value = "";
+                }}
+              />
+            </label>
+          </div>
+          <FilterChips options={STATUS_FILTERS} value={status} onChange={setStatus} />
+        </>
+      }
+    >
+      <NoticeBar error={error} notice={notice} />
+      <MasterDetail
+        list={
+          <>
+            <header className="proc-master-list-head">
+              <strong>发票列表</strong>
+              <small>点击行查看详情</small>
+            </header>
+            {invoicesQuery.isPending ? (
+              <div className="proc-loading-state"><LoaderCircle className="spin" size={18} />正在加载发票…</div>
+            ) : null}
+            {invoicesQuery.isError ? (
+              <ErrorState title="发票加载失败" detail={invoicesQuery.error instanceof Error ? invoicesQuery.error.message : "未知错误"} onRetry={() => void invoicesQuery.refetch()} />
+            ) : null}
+            {!invoicesQuery.isPending && !invoicesQuery.isError && !invoices.length ? (
+              <EmptyState
+                variant="inline"
+                icon={<Archive size={24} />}
+                title={status ? "该状态下没有发票" : "还没有发票"}
+                hint="选择已收货订单上传发票，Agent 解析后自动执行三单匹配。"
+              />
+            ) : null}
+            {invoices.map((invoice) => {
+              const diffCount = invoice.match_result?.diffs?.length || 0;
+              return (
+                <ListRow key={invoice.id} selected={selectedId === invoice.id} onClick={() => setSelectedId(invoice.id)}>
+                  <span className="proc-list-row-head">
+                    <code>{invoice.invoice_no}</code>
+                    <StatusPill tone={STATUS_TONES[invoice.status]} size="compact">{STATUS_LABELS[invoice.status]}</StatusPill>
+                  </span>
+                  <strong className="proc-list-row-title">{invoice.supplier_name}</strong>
+                  <span className="proc-list-row-meta">
+                    <small className="mono">{invoice.order_no || "—"}</small>
+                    <small className="tnum">价税合计 {formatMoney(invoice.total_amount)}</small>
+                    {invoice.status === "DIFF_HOLD" ? <em className="proc-risk-chip">{diffCount} 项差异</em> : null}
+                  </span>
+                </ListRow>
+              );
+            })}
+          </>
+        }
+        detail={
+          <>
+            {detailQuery.isError && selectedId ? (
+              <ErrorState title="发票详情加载失败" detail={detailQuery.error instanceof Error ? detailQuery.error.message : "未知错误"} onRetry={() => { void detailQuery.refetch(); }} />
+            ) : detail ? (
+              <>
+                <header className="proc-detail-head">
+                  <div>
+                    <h2><Receipt size={16} /> <code>{detail.invoice_no}</code></h2>
+                    <p>{detail.supplier_name}</p>
+                  </div>
+                  <StatusPill tone={STATUS_TONES[detail.status]}>{STATUS_LABELS[detail.status]}</StatusPill>
+                </header>
 
-      <div className="proc-invoice-upload glass-panel bg-surface/80 p-4 rounded-xl border border-border/80 flex flex-wrap items-center gap-3 shadow-sm">
-        <select
-          aria-label="选择采购订单"
-          className="flex-1 min-w-[240px] px-3 py-2 rounded-lg border border-border bg-surface-subtle text-xs text-text focus:outline-accent"
-          value={orderId}
-          onChange={(event) => setOrderId(event.target.value)}
-        >
-          <option value="">选择采购订单（优先已收货）…</option>
-          {(ordersQuery.data?.items || []).map((order) => (
-            <option key={order.id} value={order.id}>
-              {order.order_no} · {order.supplier_name} · {order.item_name}（{order.status}）
-            </option>
-          ))}
-        </select>
-        <label className={`proc-upload-button inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold bg-accent text-white hover:bg-accent-strong transition-all shadow-xs cursor-pointer ${busy?.startsWith("upload") ? "disabled opacity-60 pointer-events-none" : ""}`}>
-          {busy?.startsWith("upload") ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}
-          <span>{busy?.startsWith("upload") ? "上传解析中" : "上传发票"}</span>
-          <input
-            data-testid="invoice-upload"
-            className="sr-only"
-            type="file"
-            accept=".xlsx,.pdf"
-            disabled={busy?.startsWith("upload")}
-            onChange={(event) => {
-              void upload(event.target.files?.[0]);
-              event.target.value = "";
-            }}
-          />
-        </label>
-      </div>
-      {error ? <p className="proc-toolbar-error text-xs text-danger font-medium p-2.5 rounded-lg bg-danger-soft border border-danger/30" role="alert">{error}</p> : null}
-      {notice ? <p className="proc-toolbar-success text-xs text-accent font-medium p-2.5 rounded-lg bg-accent-soft border border-accent/30" role="status">{notice}</p> : null}
+                {detailQuery.isPending ? <span className="proc-muted">列表快照 — 正在加载完整三单对比…</span> : null}
 
-      <div className="proc-toolbar flex flex-wrap items-center gap-2" role="toolbar">
-        {STATUS_FILTERS.map((option) => (
-          <button
-            key={option.value}
-            type="button"
-            className={`proc-filter-chip px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${status === option.value ? "active bg-accent text-white border-accent shadow-xs" : "bg-surface text-text-secondary border-border hover:border-border-strong hover:bg-surface-subtle"}`}
-            onClick={() => setStatus(option.value)}
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
+                <div className="proc-fact-grid">
+                  <Fact label="发票代码" mono>{detail.invoice_code || "—"}</Fact>
+                  <Fact label="开票日期" mono>{detail.issue_date || "—"}</Fact>
+                  <Fact label="数量" mono>{formatMoney(detail.quantity)} {detail.unit || ""}</Fact>
+                  <Fact label="单价" mono>{formatMoney(detail.unit_price)}</Fact>
+                  <Fact label="不含税金额" mono>{formatMoney(detail.amount_excluding_tax)}</Fact>
+                  <Fact label="税额" mono>{formatMoney(detail.tax_amount)}</Fact>
+                  <Fact label="价税合计" mono>{formatMoney(detail.total_amount)}</Fact>
+                  <Fact label="税率" mono>{detail.tax_rate ? `${(Number(detail.tax_rate) * 100).toFixed(2)}%` : "—"}</Fact>
+                </div>
 
-      <div className="proc-invoice-layout grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        <div className="proc-invoice-list lg:col-span-4 flex flex-col gap-3" aria-busy={invoicesQuery.isPending}>
-          {invoicesQuery.isPending ? (
-            <div className="proc-loading-state py-12 flex items-center justify-center gap-2 text-text-muted text-xs"><LoaderCircle className="spin" size={18} />正在加载发票…</div>
-          ) : null}
-          {invoicesQuery.isError ? (
-            <section className="proc-empty-state compact py-10 flex flex-col items-center justify-center gap-2 text-center text-xs" role="alert">
-              <AlertTriangle size={26} className="text-danger" />
-              <h2 className="text-sm font-semibold text-text">发票加载失败</h2>
-              <p className="text-text-muted">{invoicesQuery.error instanceof Error ? invoicesQuery.error.message : "未知错误"}</p>
-            </section>
-          ) : null}
-          {!invoicesQuery.isPending && !invoicesQuery.isError && !invoices.length ? (
-            <div className="proc-empty-state py-16 flex flex-col items-center justify-center gap-2 text-center text-xs text-text-muted">
-              <Archive size={30} className="text-text-muted" />
-              <h2 className="text-sm font-semibold text-text">{status ? "该状态下没有发票" : "还没有发票"}</h2>
-              <p>选择已收货订单上传发票，Agent 解析后自动执行三单匹配。</p>
-            </div>
-          ) : null}
-          {invoices.map((invoice) => {
-            const state = STATUS_LABELS[invoice.status];
-            const diffCount = invoice.match_result?.diffs?.length || 0;
-            return (
-              <button
-                type="button"
-                key={invoice.id}
-                className={`proc-invoice-card glass-panel text-left p-4 rounded-xl border transition-all duration-150 flex flex-col gap-2 ${selectedId === invoice.id ? "selected border-accent bg-accent-soft/30 shadow-xs ring-1 ring-accent/30" : "bg-surface/80 border-border/80 hover:border-border-strong hover:bg-surface"}`}
-                onClick={() => setSelectedId(invoice.id)}
-              >
-                <span className="proc-invoice-card-head flex items-center justify-between gap-2">
-                  <code className="font-mono text-xs font-semibold text-accent">{invoice.invoice_no}</code>
-                  <i className={`proc-status ${state.tone} not-italic text-[11px] font-medium px-2 py-0.5 rounded-full border inline-flex items-center gap-1.5`}><span className="w-1.5 h-1.5 rounded-full bg-current" />{state.label}</i>
-                </span>
-                <strong className="text-xs font-semibold text-text truncate">{invoice.supplier_name}</strong>
-                <span className="proc-invoice-card-facts flex items-center justify-between gap-2 text-[11px] text-text-muted">
-                  <small className="font-mono">{invoice.order_no || "—"}</small>
-                  <small className="font-mono font-medium">价税合计 {money(invoice.total_amount)}</small>
-                  {invoice.status === "DIFF_HOLD" ? <small className="proc-invoice-diff text-danger font-medium bg-danger-soft px-1.5 py-0.5 rounded border border-danger/20">{diffCount} 项差异</small> : null}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="proc-invoice-detail lg:col-span-8 glass-panel rounded-xl p-6 border border-border/80 bg-surface/80 shadow-sm flex flex-col gap-5">
-          {detailQuery.isError && selectedId ? (
-            <section className="proc-empty-state compact py-10 flex flex-col items-center justify-center gap-2 text-center text-xs" role="alert">
-              <AlertTriangle size={26} className="text-danger" />
-              <h2 className="text-sm font-semibold text-text">发票详情加载失败</h2>
-              <p className="text-text-muted">{detailQuery.error instanceof Error ? detailQuery.error.message : "未知错误"}</p>
-              <button type="button" className="proc-button px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" onClick={() => { void detailQuery.refetch(); }}>重试</button>
-            </section>
-          ) : detail ? (
-            <>
-              <header className="proc-panel-head flex items-start justify-between gap-3 pb-3 border-b border-border/60">
-                <div className="flex items-center gap-2"><Receipt size={18} className="text-accent" /><div><h2 className="text-base font-bold text-text font-mono">{detail.invoice_no}</h2><span className="text-xs text-text-muted">{detail.supplier_name}</span></div></div>
-                <span className={`proc-status ${STATUS_LABELS[detail.status].tone} text-xs font-medium px-2.5 py-0.5 rounded-full border inline-flex items-center gap-1.5`}><i className="w-1.5 h-1.5 rounded-full bg-current" />{STATUS_LABELS[detail.status].label}</span>
-              </header>
-
-              {detailQuery.isPending ? (
-                <span className="proc-muted text-xs text-text-muted">列表快照 — 正在加载完整三单对比…</span>
-              ) : null}
-
-              <div className="proc-invoice-facts grid grid-cols-2 sm:grid-cols-4 gap-3 bg-surface-subtle/60 p-3.5 rounded-lg border border-border/40 text-xs">
-                <span className="flex flex-col"><small className="text-[11px] text-text-muted">发票代码</small><strong className="font-mono text-text mt-0.5">{detail.invoice_code || "—"}</strong></span>
-                <span className="flex flex-col"><small className="text-[11px] text-text-muted">开票日期</small><strong className="font-mono text-text mt-0.5">{detail.issue_date || "—"}</strong></span>
-                <span className="flex flex-col"><small className="text-[11px] text-text-muted">数量</small><strong className="font-mono font-bold text-text mt-0.5">{money(detail.quantity)} {detail.unit || ""}</strong></span>
-                <span className="flex flex-col"><small className="text-[11px] text-text-muted">单价</small><strong className="font-mono font-bold text-text mt-0.5">{money(detail.unit_price)}</strong></span>
-                <span className="flex flex-col"><small className="text-[11px] text-text-muted">不含税金额</small><strong className="font-mono font-bold text-text mt-0.5">{money(detail.amount_excluding_tax)}</strong></span>
-                <span className="flex flex-col"><small className="text-[11px] text-text-muted">税额</small><strong className="font-mono font-bold text-text mt-0.5">{money(detail.tax_amount)}</strong></span>
-                <span className="flex flex-col"><small className="text-[11px] text-text-muted">价税合计</small><strong className="font-mono font-bold text-text mt-0.5">{money(detail.total_amount)}</strong></span>
-                <span className="flex flex-col"><small className="text-[11px] text-text-muted">税率</small><strong className="font-mono font-bold text-text mt-0.5">{detail.tax_rate ? `${(Number(detail.tax_rate) * 100).toFixed(2)}%` : "—"}</strong></span>
-              </div>
-
-              {detail.three_way ? (
-                <section className="proc-report-section glass-panel rounded-xl p-4 border border-border/60 bg-surface/60 flex flex-col gap-3">
-                  <header className="flex items-center gap-2 pb-1 border-b border-border/30"><ShieldCheck size={16} className="text-accent" /><h3 className="text-xs font-bold text-text">三单匹配对比（PO / 收货 GRN / 发票）</h3></header>
-                  <table className="proc-comparison-table w-full text-left text-xs border-collapse rounded-lg overflow-hidden border border-border/60">
-                    <thead><tr className="bg-surface-subtle/80 border-b border-border text-text-muted"><th className="p-2.5">字段</th><th className="p-2.5">订单（PO）</th><th className="p-2.5">收货（GRN）</th><th className="p-2.5">发票</th><th className="p-2.5">期望</th></tr></thead>
-                    <tbody className="divide-y divide-border/40 font-mono">
-                      <tr><td className="p-2.5 font-sans font-medium text-text">数量</td><td className="p-2.5">{money(detail.order_quantity)}</td><td className="p-2.5">{money(detail.order_received_quantity)}</td><td className="p-2.5">{money(detail.quantity)}</td><td className="p-2.5">{detail.match_result?.matched ? <CheckCircle2 size={14} className="text-accent inline" /> : <XCircle size={14} className="text-danger inline" />}</td></tr>
-                      <tr><td className="p-2.5 font-sans font-medium text-text">到货总价</td><td className="p-2.5">{money(detail.order_landed_total)}</td><td className="p-2.5">—</td><td className="p-2.5">{money(detail.total_amount)}</td><td className="p-2.5">{detail.match_result?.matched ? <CheckCircle2 size={14} className="text-accent inline" /> : <XCircle size={14} className="text-danger inline" />}</td></tr>
-                      <tr><td className="p-2.5 font-sans font-medium text-text">税率</td><td className="p-2.5">{detail.expected_tax_rate ? `${(Number(detail.expected_tax_rate) * 100).toFixed(2)}%` : "—"}</td><td className="p-2.5">—</td><td className="p-2.5">{detail.tax_rate ? `${(Number(detail.tax_rate) * 100).toFixed(2)}%` : "—"}</td><td className="p-2.5">{detail.match_result?.matched ? <CheckCircle2 size={14} className="text-accent inline" /> : <XCircle size={14} className="text-danger inline" />}</td></tr>
-                    </tbody>
-                  </table>
-                  {detail.match_result?.diffs?.length ? (
-                    <ul className="proc-invoice-diffs flex flex-col gap-2 text-xs">
-                      {detail.match_result.diffs.map((diff) => (
-                        <li className="flex items-center gap-3 p-2.5 rounded-lg bg-danger-soft/30 border border-danger/30 text-danger" key={diff.field}>
-                          <strong className="font-semibold">{DIFF_LABELS[diff.field] || diff.field}</strong>
-                          <span className="font-mono text-text-muted">期望 {diff.expected}</span>
-                          <span className="font-mono text-text-muted">实际 {diff.actual}</span>
-                          <i className="not-italic font-mono font-bold ml-auto">差异 {diff.diff}</i>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : detail.match_result?.matched ? (
-                    <p className="proc-invoice-matched flex items-center gap-2 text-xs font-medium text-accent p-3 rounded-lg bg-accent-soft border border-accent/30"><BadgeCheck size={15} />三单匹配通过：数量、单价、总价、税率全部在容差内（Java 确定性规则）。</p>
-                  ) : null}
-                  {detail.match_explanation ? (
-                    <div className="proc-invoice-explanation p-4 rounded-xl bg-surface-subtle/80 border border-border/60 flex flex-col gap-2 text-xs">
-                      <strong className="font-semibold text-text flex items-center gap-1.5"><BadgeCheck size={14} className="text-accent" />Agent 差异解释</strong>
-                      <p className="text-text-secondary leading-relaxed">{detail.match_explanation.reason}</p>
-                      <ul className="list-disc list-inside space-y-1 text-text-muted pl-1">
-                        {(detail.match_explanation.suggestions || []).map((suggestion) => <li key={suggestion}>{suggestion}</li>)}
-                      </ul>
-                      <small className="text-text-muted mt-1 font-mono">来源：{detail.match_explanation.source}</small>
+                {detail.three_way ? (
+                  <Card head={{ icon: <ShieldCheck size={15} />, title: "三单匹配对比（PO / 收货 GRN / 发票）" }}>
+                    <div className="proc-table-scroll">
+                      <table className="proc-data-table">
+                        <thead>
+                          <tr>
+                            <th>字段</th><th>订单（PO）</th><th>收货（GRN）</th><th>发票</th><th>结果</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr>
+                            <td>数量</td>
+                            <td className="mono">{formatMoney(detail.order_quantity)}</td>
+                            <td className="mono">{formatMoney(detail.order_received_quantity)}</td>
+                            <td className="mono">{formatMoney(detail.quantity)}</td>
+                            <td>{detail.match_result?.matched ? <CheckCircle2 size={14} className="ok" /> : <XCircle size={14} className="bad" />}</td>
+                          </tr>
+                          <tr>
+                            <td>到货总价</td>
+                            <td className="mono">{formatMoney(detail.order_landed_total)}</td>
+                            <td className="mono">—</td>
+                            <td className="mono">{formatMoney(detail.total_amount)}</td>
+                            <td>{detail.match_result?.matched ? <CheckCircle2 size={14} className="ok" /> : <XCircle size={14} className="bad" />}</td>
+                          </tr>
+                          <tr>
+                            <td>税率</td>
+                            <td className="mono">{detail.expected_tax_rate ? `${(Number(detail.expected_tax_rate) * 100).toFixed(2)}%` : "—"}</td>
+                            <td className="mono">—</td>
+                            <td className="mono">{detail.tax_rate ? `${(Number(detail.tax_rate) * 100).toFixed(2)}%` : "—"}</td>
+                            <td>{detail.match_result?.matched ? <CheckCircle2 size={14} className="ok" /> : <XCircle size={14} className="bad" />}</td>
+                          </tr>
+                        </tbody>
+                      </table>
                     </div>
-                  ) : null}
-                </section>
-              ) : null}
+                    {detail.match_result?.diffs?.length ? (
+                      <ul className="proc-invoice-diffs">
+                        {detail.match_result.diffs.map((diff) => (
+                          <li key={diff.field}>
+                            <strong>{DIFF_LABELS[diff.field] || diff.field}</strong>
+                            <span className="mono">期望 {diff.expected}</span>
+                            <span className="mono">实际 {diff.actual}</span>
+                            <b className="mono">差异 {diff.diff}</b>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : detail.match_result?.matched ? (
+                      <p className="proc-invoice-matched"><BadgeCheck size={15} />三单匹配通过：数量、单价、总价、税率全部在容差内（Java 确定性规则）。</p>
+                    ) : null}
+                    {detail.match_explanation ? (
+                      <div className="proc-invoice-explanation">
+                        <strong><BadgeCheck size={14} />Agent 差异解释</strong>
+                        <p>{detail.match_explanation.reason}</p>
+                        <ul>
+                          {(detail.match_explanation.suggestions || []).map((suggestion) => <li key={suggestion}>{suggestion}</li>)}
+                        </ul>
+                        <small className="mono">来源：{detail.match_explanation.source}</small>
+                      </div>
+                    ) : null}
+                  </Card>
+                ) : null}
 
-              <div className="proc-invoice-actions flex flex-wrap items-center gap-2.5 pt-3 border-t border-border/60">
-                {detail.status === "DIFF_HOLD" ? (
-                  <>
-                    <button className="proc-button inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium border border-border bg-surface hover:bg-surface-subtle transition-all" type="button" onClick={() => openCorrect(detail)}><RotateCcw size={14} />手工改单</button>
-                    <button className="proc-button inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold bg-warning text-white hover:bg-amber-600 transition-all shadow-xs" type="button" onClick={() => { setForceTarget(detail); setForceNotes(""); setForceConfirmed(false); setError(null); }}><ShieldCheck size={14} />强制通过</button>
-                    <button className="proc-button danger inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold bg-danger text-white hover:bg-rose-700 transition-all shadow-xs" type="button" onClick={() => { setVoidTarget(detail); setVoidNotes(""); setError(null); }}><XCircle size={14} />作废（退回重开）</button>
-                  </>
-                ) : null}
-                {detail.status === "MATCHED" ? (
-                  <button className="proc-button primary inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-accent text-white hover:bg-accent-strong transition-all shadow-xs" type="button" disabled={busy === `reconcile:${detail.id}`} onClick={() => void reconcile(detail)}>
-                    {busy === `reconcile:${detail.id}` ? <LoaderCircle className="spin" size={14} /> : <CheckCircle2 size={14} />}核销
-                  </button>
-                ) : null}
-                {detail.status === "REGISTERED" ? (
-                  <span className="proc-muted text-xs text-text-muted">Agent 匹配中…（解析结果到达后自动匹配）</span>
-                ) : null}
-              </div>
-            </>
-          ) : (
-            <div className="proc-empty-panel py-16 flex flex-col items-center justify-center gap-2 text-center text-xs text-text-muted">
-              <FileSpreadsheet size={30} className="text-text-muted" />
-              <h2 className="text-sm font-semibold text-text">发票详情</h2>
-              <p>选择一张发票查看三单匹配对比与差异处理。</p>
-            </div>
-          )}
-        </div>
-      </div>
+                <div className="proc-invoice-actions">
+                  {detail.status === "DIFF_HOLD" ? (
+                    <>
+                      <Button variant="secondary" icon={<RotateCcw size={14} />} onClick={() => openCorrect(detail)}>手工改单</Button>
+                      <Button variant="warning" icon={<ShieldCheck size={14} />} onClick={() => { setForceTarget(detail); setForceNotes(""); setForceConfirmed(false); setError(null); }}>强制通过</Button>
+                      <Button variant="danger" icon={<XCircle size={14} />} onClick={() => { setVoidTarget(detail); setVoidNotes(""); setError(null); }}>作废（退回重开）</Button>
+                    </>
+                  ) : null}
+                  {detail.status === "MATCHED" ? (
+                    <Button variant="primary" icon={<CheckCircle2 size={14} />} loading={busy === `reconcile:${detail.id}`} onClick={() => void reconcile(detail)}>核销</Button>
+                  ) : null}
+                  {detail.status === "REGISTERED" ? (
+                    <span className="proc-muted">Agent 匹配中…（解析结果到达后自动匹配）</span>
+                  ) : null}
+                </div>
+              </>
+            ) : (
+              <EmptyState
+                variant="inline"
+                icon={<FileSpreadsheet size={24} />}
+                title="选择一张发票"
+                hint="查看三单匹配对比与差异处理；差异挂起的发票需要先修正、核销或强制通过后才能付款。"
+              />
+            )}
+          </>
+        }
+      />
 
       {voidTarget ? (
-        <div className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && busy !== `void:${voidTarget.id}`) setVoidTarget(null); }}>
-          <section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="void-invoice-title">
-            <header className="flex items-center justify-between pb-3 border-b border-border/60"><div className="flex items-center gap-2 text-text font-bold text-base"><XCircle size={18} className="text-danger" /><h2 id="void-invoice-title">作废发票（退回重开）</h2></div></header>
-            <div className="proc-delete-target p-3 rounded-lg bg-surface-subtle border border-border flex flex-col gap-0.5 text-xs"><strong className="font-mono text-sm font-bold text-text">{voidTarget.invoice_no}</strong><span className="text-text-muted">{voidTarget.supplier_name} · {money(voidTarget.total_amount)}</span></div>
-            <label className="proc-field flex flex-col gap-1 text-xs font-medium text-text"><span>作废原因 <b>*</b></span><input className="px-3 py-2 rounded-lg border border-border bg-surface-subtle text-text focus:outline-accent text-sm" autoFocus value={voidNotes} onChange={(event) => setVoidNotes(event.target.value)} placeholder="例如：发票开具错误，重新开具" /></label>
-            {error ? <p className="proc-form-error text-xs text-danger font-medium p-2.5 rounded-lg bg-danger-soft border border-danger/30" role="alert">{error}</p> : null}
-            <footer className="flex items-center justify-end gap-2 pt-3 border-t border-border/60">
-              <button className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" type="button" onClick={() => setVoidTarget(null)} disabled={busy === `void:${voidTarget.id}`}>取消</button>
-              <button className="proc-button danger px-4 py-1.5 rounded-lg text-xs font-semibold bg-danger text-white hover:bg-rose-700 inline-flex items-center gap-1.5 shadow-xs" type="button" disabled={busy === `void:${voidTarget.id}`} onClick={() => void voidInvoice()}>
-                {busy === `void:${voidTarget.id}` ? <LoaderCircle className="spin" size={15} /> : <XCircle size={15} />}确认作废
-              </button>
-            </footer>
-          </section>
-        </div>
+        <Modal
+          titleId="void-invoice-title"
+          title="作废发票（退回重开）"
+          icon={<XCircle size={18} />}
+          tone="danger"
+          busy={busy === `void:${voidTarget.id}`}
+          onClose={() => setVoidTarget(null)}
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setVoidTarget(null)} disabled={busy === `void:${voidTarget.id}`}>取消</Button>
+              <Button variant="danger" icon={<XCircle size={15} />} loading={busy === `void:${voidTarget.id}`} onClick={() => void voidInvoice()}>确认作废</Button>
+            </>
+          }
+        >
+          <div className="proc-dialog-target">
+            <strong className="mono">{voidTarget.invoice_no}</strong>
+            <span>{voidTarget.supplier_name} · {formatMoney(voidTarget.total_amount)}</span>
+          </div>
+          <label className="proc-field">
+            <span>作废原因 <b>*</b></span>
+            <input className="proc-input" autoFocus value={voidNotes} onChange={(event) => setVoidNotes(event.target.value)} placeholder="例如：发票开具错误，重新开具" />
+          </label>
+          {error ? <p className="proc-dialog-error" role="alert">{error}</p> : null}
+        </Modal>
       ) : null}
 
       {forceTarget ? (
-        <div className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && busy !== `force:${forceTarget.id}`) setForceTarget(null); }}>
-          <section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="force-invoice-title">
-            <header className="flex items-center justify-between pb-3 border-b border-border/60"><div className="flex items-center gap-2 text-text font-bold text-base"><ShieldCheck size={18} className="text-warning" /><h2 id="force-invoice-title">强制通过（allow-once 审批）</h2></div></header>
-            <div className="proc-delete-target p-3 rounded-lg bg-surface-subtle border border-border flex flex-col gap-0.5 text-xs"><strong className="font-mono text-sm font-bold text-text">{forceTarget.invoice_no}</strong><span className="text-text-muted">差异 {forceTarget.match_result?.diffs?.length || 0} 项</span></div>
-            <label className="proc-field flex flex-col gap-1 text-xs font-medium text-text"><span>人工备注 <b>*</b></span><input className="px-3 py-2 rounded-lg border border-border bg-surface-subtle text-text focus:outline-accent text-sm" autoFocus value={forceNotes} onChange={(event) => setForceNotes(event.target.value)} placeholder="强制通过原因（写入审计）" /></label>
-            <label className="proc-invoice-confirm flex items-center gap-2 text-xs text-text cursor-pointer"><input type="checkbox" className="rounded border-border text-accent focus:ring-accent" checked={forceConfirmed} onChange={(event) => setForceConfirmed(event.target.checked)} /><span>我已核对差异并确认强制通过（一次性，不能撤销）</span></label>
-            {error ? <p className="proc-form-error text-xs text-danger font-medium p-2.5 rounded-lg bg-danger-soft border border-danger/30" role="alert">{error}</p> : null}
-            <footer className="flex items-center justify-end gap-2 pt-3 border-t border-border/60">
-              <button className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" type="button" onClick={() => setForceTarget(null)} disabled={busy === `force:${forceTarget.id}`}>取消</button>
-              <button className="proc-button px-4 py-1.5 rounded-lg text-xs font-semibold bg-warning text-white hover:bg-amber-600 inline-flex items-center gap-1.5 shadow-xs" type="button" disabled={busy === `force:${forceTarget.id}`} onClick={() => void forceMatch()}>
-                {busy === `force:${forceTarget.id}` ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={15} />}确认强制通过
-              </button>
-            </footer>
-          </section>
-        </div>
+        <Modal
+          titleId="force-invoice-title"
+          title="强制通过（allow-once 审批）"
+          icon={<ShieldCheck size={18} />}
+          tone="warning"
+          busy={busy === `force:${forceTarget.id}`}
+          onClose={() => setForceTarget(null)}
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setForceTarget(null)} disabled={busy === `force:${forceTarget.id}`}>取消</Button>
+              <Button variant="warning" icon={<ShieldCheck size={15} />} loading={busy === `force:${forceTarget.id}`} onClick={() => void forceMatch()}>确认强制通过</Button>
+            </>
+          }
+        >
+          <div className="proc-dialog-target">
+            <strong className="mono">{forceTarget.invoice_no}</strong>
+            <span>差异 {forceTarget.match_result?.diffs?.length || 0} 项</span>
+          </div>
+          <label className="proc-field">
+            <span>人工备注 <b>*</b></span>
+            <input className="proc-input" autoFocus value={forceNotes} onChange={(event) => setForceNotes(event.target.value)} placeholder="强制通过原因（写入审计）" />
+          </label>
+          <label className="proc-confirm-check">
+            <input type="checkbox" checked={forceConfirmed} onChange={(event) => setForceConfirmed(event.target.checked)} />
+            <span>我已核对差异并确认强制通过（一次性，不能撤销）</span>
+          </label>
+          {error ? <p className="proc-dialog-error" role="alert">{error}</p> : null}
+        </Modal>
       ) : null}
 
       {correctTarget ? (
-        <div className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && busy !== `correct:${correctTarget.id}`) setCorrectTarget(null); }}>
-          <section className="proc-confirm-dialog wide glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-xl w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="correct-invoice-title">
-            <header className="flex items-center justify-between pb-3 border-b border-border/60"><div className="flex items-center gap-2 text-text font-bold text-base"><RotateCcw size={18} className="text-accent" /><h2 id="correct-invoice-title">手工改单（重新三单匹配）</h2></div></header>
-            <div className="proc-supplier-form grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {([["quantity", "数量"], ["unit_price", "单价"], ["amount_excluding_tax", "不含税金额"], ["tax_amount", "税额"], ["total_amount", "价税合计"], ["tax_rate", "税率（小数，如 0.13）"]] as const).map(([key, label], index) => (
-                <label className="proc-field flex flex-col gap-1 text-xs font-medium text-text" key={key}>
-                  <span>{label}</span>
-                  <input className="px-3 py-2 rounded-lg border border-border bg-surface-subtle text-text focus:outline-accent text-sm font-mono" autoFocus={index === 0} type="number" step="any" value={correctForm[key]} onChange={(event) => setCorrectForm((current) => ({ ...current, [key]: event.target.value }))} placeholder={String(correctTarget[key] ?? "")} />
-                </label>
-              ))}
-              {error ? <p className="proc-form-error proc-span-2 col-span-full text-xs text-danger font-medium p-2.5 rounded-lg bg-danger-soft border border-danger/30" role="alert">{error}</p> : null}
-            </div>
-            <footer className="flex items-center justify-end gap-2 pt-3 border-t border-border/60">
-              <button className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" type="button" onClick={() => setCorrectTarget(null)} disabled={busy === `correct:${correctTarget.id}`}>取消</button>
-              <button className="proc-button px-4 py-1.5 rounded-lg text-xs font-semibold bg-accent text-white hover:bg-accent-strong inline-flex items-center gap-1.5 shadow-xs" type="button" disabled={busy === `correct:${correctTarget.id}`} onClick={() => void correctInvoice()}>
-                {busy === `correct:${correctTarget.id}` ? <LoaderCircle className="spin" size={15} /> : <RotateCcw size={15} />}保存并重新匹配
-              </button>
-            </footer>
-          </section>
-        </div>
+        <Modal
+          titleId="correct-invoice-title"
+          title="手工改单（重新三单匹配）"
+          icon={<RotateCcw size={18} />}
+          size="lg"
+          busy={busy === `correct:${correctTarget.id}`}
+          onClose={() => setCorrectTarget(null)}
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setCorrectTarget(null)} disabled={busy === `correct:${correctTarget.id}`}>取消</Button>
+              <Button variant="primary" icon={<RotateCcw size={15} />} loading={busy === `correct:${correctTarget.id}`} onClick={() => void correctInvoice()}>保存并重新匹配</Button>
+            </>
+          }
+        >
+          <div className="proc-dialog-form">
+            {([["quantity", "数量"], ["unit_price", "单价"], ["amount_excluding_tax", "不含税金额"], ["tax_amount", "税额"], ["total_amount", "价税合计"], ["tax_rate", "税率（小数，如 0.13）"]] as const).map(([key, label], index) => (
+              <label className="proc-field" key={key}>
+                <span>{label}</span>
+                <input className="proc-input mono" autoFocus={index === 0} type="number" step="any" value={correctForm[key]} onChange={(event) => setCorrectForm((current) => ({ ...current, [key]: event.target.value }))} placeholder={String(correctTarget[key] ?? "")} />
+              </label>
+            ))}
+          </div>
+          {error ? <p className="proc-dialog-error" role="alert">{error}</p> : null}
+        </Modal>
       ) : null}
-    </div>
+    </CenterPage>
   );
 }

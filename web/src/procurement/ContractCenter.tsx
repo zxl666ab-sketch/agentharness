@@ -6,16 +6,34 @@ import {
   CheckCircle2,
   FileSignature,
   LoaderCircle,
+  Play,
   RotateCcw,
   Send,
   ShieldAlert,
+  ShieldCheck,
   X,
 } from "lucide-react";
 import { useState } from "react";
 
 import { POLL_FETCH_CAP, pollFetchCount, procurementApi } from "./api";
+import {
+  Button,
+  CenterPage,
+  Card,
+  CountBadge,
+  EmptyState,
+  ErrorState,
+  Fact,
+  FilterChips,
+  ListRow,
+  MasterDetail,
+  Modal,
+  NoticeBar,
+  PageHeader,
+  StatusPill,
+  formatMoney,
+} from "../components/ui";
 import type { ContractStatus, ContractView } from "./types";
-import { useEscape } from "./useEscape";
 import { CONTRACT_STATUS_LABELS } from "./viewModel";
 
 const STATUS_FILTERS: Array<{ value: ContractStatus | ""; label: string }> = [
@@ -29,13 +47,13 @@ const STATUS_FILTERS: Array<{ value: ContractStatus | ""; label: string }> = [
 ];
 
 // 文案唯一来源在 viewModel（工作台任务详情同源引用，避免内联重复）
-const STATUS_LABELS: Record<ContractStatus, { label: string; tone: string }> = {
-  DRAFT: { label: CONTRACT_STATUS_LABELS.DRAFT, tone: "info" },
-  PENDING_APPROVAL: { label: CONTRACT_STATUS_LABELS.PENDING_APPROVAL, tone: "warning" },
-  EFFECTIVE: { label: CONTRACT_STATUS_LABELS.EFFECTIVE, tone: "success" },
-  EXECUTING: { label: CONTRACT_STATUS_LABELS.EXECUTING, tone: "info" },
-  CHANGE_REQUEST: { label: CONTRACT_STATUS_LABELS.CHANGE_REQUEST, tone: "warning" },
-  CLOSED: { label: CONTRACT_STATUS_LABELS.CLOSED, tone: "neutral" },
+const STATUS_TONES: Record<ContractStatus, string> = {
+  DRAFT: "info",
+  PENDING_APPROVAL: "warning",
+  EFFECTIVE: "success",
+  EXECUTING: "info",
+  CHANGE_REQUEST: "warning",
+  CLOSED: "neutral",
 };
 
 const RISK_TONES: Record<string, string> = {
@@ -43,14 +61,6 @@ const RISK_TONES: Record<string, string> = {
   提示: "warning",
   低: "success",
 };
-
-function money(value: string | null | undefined) {
-  if (value == null || value === "") return "—";
-  const parsed = Number(value);
-  return Number.isFinite(parsed)
-    ? new Intl.NumberFormat("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 6 }).format(parsed)
-    : String(value);
-}
 
 export function ContractCenter() {
   const queryClient = useQueryClient();
@@ -67,9 +77,6 @@ export function ContractCenter() {
   const [changeNotes, setChangeNotes] = useState("");
   const [changeAmount, setChangeAmount] = useState("");
   const [changeLeadDays, setChangeLeadDays] = useState("");
-
-  useEscape(!!approveTarget, () => setApproveTarget(null), busy?.startsWith("approve:") ?? false);
-  useEscape(!!changeTarget, () => setChangeTarget(null), busy?.startsWith("change:") ?? false);
 
   const contractsQuery = useQuery({
     queryKey: ["procurement-contracts", status],
@@ -202,275 +209,272 @@ export function ContractCenter() {
   const approvedTasks = (tasksQuery.data || []).filter((task) => task.status === "approved");
 
   return (
-    <div className="proc-center-page flex flex-col gap-6 p-6 max-w-7xl mx-auto w-full">
-      <header className="proc-page-head flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-border">
-        <div>
-          <h1 className="text-xl font-bold text-text tracking-tight flex items-center gap-2">
-            <FileSignature className="w-5 h-5 text-accent" />
-            合同中心
-          </h1>
-          <p className="text-xs text-text-muted mt-1">定标 → 草拟（AI）→ 风险提示（AI）→ 人工审批 → 生效 → 关联订单 → 执行/变更/关闭</p>
-        </div>
-        <span className="proc-page-count text-xs font-medium text-text-secondary bg-surface-subtle px-3 py-1 rounded-full border border-border">共 {contractsQuery.data?.total ?? 0} 份</span>
-      </header>
+    <CenterPage
+      header={
+        <PageHeader
+          icon={<FileSignature size={18} />}
+          title="合同中心"
+          subtitle="定标 → 草拟（AI）→ 风险提示（AI）→ 人工审批 → 生效 → 关联订单 → 执行/变更/关闭"
+          aside={<CountBadge>共 {contractsQuery.data?.total ?? 0} 份</CountBadge>}
+        />
+      }
+      toolbar={
+        <>
+          <div className="proc-action-bar">
+            <select className="proc-input is-grow" aria-label="选择已定标任务" value={taskId} onChange={(event) => setTaskId(event.target.value)}>
+              <option value="">选择已批准（定标）任务生成合同…</option>
+              {approvedTasks.map((task) => (
+                <option key={task.id} value={task.id}>{task.reference} · {task.title}</option>
+              ))}
+            </select>
+            <Button
+              variant="primary"
+              icon={<FileSignature size={15} />}
+              loading={busy?.startsWith("draft:") ?? false}
+              onClick={() => void createDraft()}
+            >
+              生成合同（AI 草拟）
+            </Button>
+          </div>
+          <FilterChips options={STATUS_FILTERS} value={status} onChange={setStatus} />
+        </>
+      }
+    >
+      <NoticeBar error={error} notice={notice} />
+      <MasterDetail
+        list={
+          <>
+            <header className="proc-master-list-head">
+              <strong>合同列表</strong>
+              <small>点击行查看详情</small>
+            </header>
+            {contractsQuery.isPending ? (
+              <div className="proc-loading-state"><LoaderCircle className="spin" size={18} />正在加载合同…</div>
+            ) : null}
+            {contractsQuery.isError ? (
+              <ErrorState title="合同加载失败" detail={contractsQuery.error instanceof Error ? contractsQuery.error.message : "未知错误"} onRetry={() => void contractsQuery.refetch()} />
+            ) : null}
+            {!contractsQuery.isPending && !contractsQuery.isError && !contracts.length ? (
+              <EmptyState
+                variant="inline"
+                icon={<Archive size={24} />}
+                title={status ? "该状态下没有合同" : "还没有合同"}
+                hint="在上方选择已批准任务，AI 草拟后提交人工审批。"
+              />
+            ) : null}
+            {contracts.map((contract) => {
+              const riskCount = (contract.clauses || []).filter((clause) => clause.risk_level === "高风险").length;
+              return (
+                <ListRow key={contract.id} selected={selectedId === contract.id} onClick={() => setSelectedId(contract.id)}>
+                  <span className="proc-list-row-head">
+                    <code>{contract.contract_no}</code>
+                    <StatusPill tone={STATUS_TONES[contract.status]} size="compact">{CONTRACT_STATUS_LABELS[contract.status]}</StatusPill>
+                  </span>
+                  <strong className="proc-list-row-title">{contract.supplier_name} · {contract.item_name}</strong>
+                  <span className="proc-list-row-meta">
+                    <small className="tnum">金额 {formatMoney(contract.amount)} · 交期 {contract.lead_days} 天</small>
+                    {riskCount ? <em className="proc-risk-chip">{riskCount} 项高风险条款</em> : null}
+                  </span>
+                </ListRow>
+              );
+            })}
+          </>
+        }
+        detail={
+          <>
+            {detailQuery.isError && selectedId ? (
+              <ErrorState title="合同详情加载失败" detail={detailQuery.error instanceof Error ? detailQuery.error.message : "未知错误"} onRetry={() => { void detailQuery.refetch(); }} />
+            ) : detail ? (
+              <>
+                <header className="proc-detail-head">
+                  <div>
+                    <h2><FileSignature size={16} /> <code>{detail.contract_no}</code></h2>
+                    <p>{detail.supplier_name} · {detail.item_name}</p>
+                  </div>
+                  <StatusPill tone={STATUS_TONES[detail.status]}>{CONTRACT_STATUS_LABELS[detail.status]}</StatusPill>
+                </header>
 
-      <div className="proc-invoice-upload glass-panel bg-surface/80 p-4 rounded-xl border border-border/80 flex flex-wrap items-center gap-3 shadow-sm">
-        <select aria-label="选择已定标任务" className="flex-1 min-w-[240px] px-3 py-2 rounded-lg border border-border bg-surface-subtle text-xs text-text focus:outline-accent" value={taskId} onChange={(event) => setTaskId(event.target.value)}>
-          <option value="">选择已批准（定标）任务生成合同…</option>
-          {approvedTasks.map((task) => (
-            <option key={task.id} value={task.id}>{task.reference} · {task.title}</option>
-          ))}
-        </select>
-        <button className="proc-button inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-accent text-white hover:bg-accent-strong transition-all shadow-xs" type="button" disabled={busy?.startsWith("draft:")} onClick={() => void createDraft()}>
-          {busy?.startsWith("draft:") ? <LoaderCircle className="spin" size={15} /> : <FileSignature size={15} />}
-          生成合同（AI 草拟）
-        </button>
-      </div>
-      {error ? <p className="proc-toolbar-error text-xs text-danger font-medium p-2.5 rounded-lg bg-danger-soft border border-danger/30" role="alert">{error}</p> : null}
-      {notice ? <p className="proc-toolbar-success text-xs text-accent font-medium p-2.5 rounded-lg bg-accent-soft border border-accent/30" role="status">{notice}</p> : null}
+                {detailQuery.isPending ? (
+                  <span className="proc-muted">列表快照 — 正在加载完整草拟与条款…</span>
+                ) : null}
 
-      <div className="proc-toolbar flex flex-wrap items-center gap-2" role="toolbar">
-        {STATUS_FILTERS.map((option) => (
-          <button
-            key={option.value}
-            type="button"
-            className={`proc-filter-chip px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${status === option.value ? "active bg-accent text-white border-accent shadow-xs" : "bg-surface text-text-secondary border-border hover:border-border-strong hover:bg-surface-subtle"}`}
-            onClick={() => setStatus(option.value)}
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
+                <div className="proc-fact-grid">
+                  <Fact label="合同金额" mono>{formatMoney(detail.amount)}</Fact>
+                  <Fact label="交期" mono>{detail.lead_days} 天</Fact>
+                  <Fact label="关联任务" mono>{detail.task_reference || "—"}</Fact>
+                  <Fact label="关联订单" mono>{detail.order_no || "—"}</Fact>
+                </div>
 
-      <div className="proc-invoice-layout grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        <div className="proc-invoice-list lg:col-span-4 flex flex-col gap-3" aria-busy={contractsQuery.isPending}>
-          {contractsQuery.isPending ? (
-            <div className="proc-loading-state py-12 flex items-center justify-center gap-2 text-text-muted text-xs"><LoaderCircle className="spin" size={18} />正在加载合同…</div>
-          ) : null}
-          {contractsQuery.isError ? (
-            <section className="proc-empty-state compact py-10 flex flex-col items-center justify-center gap-2 text-center text-xs" role="alert">
-              <AlertTriangle size={26} className="text-danger" />
-              <h2 className="text-sm font-semibold text-text">合同加载失败</h2>
-              <p className="text-text-muted">{contractsQuery.error instanceof Error ? contractsQuery.error.message : "未知错误"}</p>
-            </section>
-          ) : null}
-          {!contractsQuery.isPending && !contractsQuery.isError && !contracts.length ? (
-            <div className="proc-empty-state py-16 flex flex-col items-center justify-center gap-2 text-center text-xs text-text-muted">
-              <Archive size={30} className="text-text-muted" />
-              <h2 className="text-sm font-semibold text-text">{status ? "该状态下没有合同" : "还没有合同"}</h2>
-              <p>选择已批准任务，AI 草拟后提交人工审批。</p>
-            </div>
-          ) : null}
-          {contracts.map((contract) => {
-            const state = STATUS_LABELS[contract.status];
-            const riskCount = (contract.clauses || []).filter((clause) => clause.risk_level === "高风险").length;
-            return (
-              <button
-                type="button"
-                key={contract.id}
-                className={`proc-invoice-card glass-panel text-left p-4 rounded-xl border transition-all duration-150 flex flex-col gap-2 ${selectedId === contract.id ? "selected border-accent bg-accent-soft/30 shadow-xs ring-1 ring-accent/30" : "bg-surface/80 border-border/80 hover:border-border-strong hover:bg-surface"}`}
-                onClick={() => setSelectedId(contract.id)}
-              >
-                <span className="proc-invoice-card-head flex items-center justify-between gap-2">
-                  <code className="font-mono text-xs font-semibold text-accent">{contract.contract_no}</code>
-                  <i className={`proc-status ${state.tone} not-italic text-[11px] font-medium px-2 py-0.5 rounded-full border inline-flex items-center gap-1.5`}><span className="w-1.5 h-1.5 rounded-full bg-current" />{state.label}</i>
-                </span>
-                <strong className="text-xs font-semibold text-text truncate">{contract.supplier_name} · {contract.item_name}</strong>
-                <span className="proc-invoice-card-facts flex items-center justify-between gap-2 text-[11px] text-text-muted">
-                  <small>金额 {money(contract.amount)} · 交期 {contract.lead_days} 天</small>
-                  {riskCount ? <small className="proc-invoice-diff text-danger font-medium bg-danger-soft px-1.5 py-0.5 rounded border border-danger/20">{riskCount} 项高风险条款</small> : null}
-                </span>
-              </button>
-            );
-          })}
-        </div>
+                {detail.consistency ? (
+                  <Card head={{ icon: <ShieldAlert size={15} />, title: "草拟一致性校验（Java 权威）" }}>
+                    <p className="proc-contract-consistency">
+                      金额：文本 {detail.consistency.amount_in_text || "未识别"} {detail.consistency.amount_matches ? <BadgeCheck size={14} className="ok" /> : <X size={14} className="bad" />}
+                      ；交期：文本 {detail.consistency.lead_days_in_text || "未识别"} {detail.consistency.lead_days_matches ? <BadgeCheck size={14} className="ok" /> : <X size={14} className="bad" />}
+                    </p>
+                    {detail.consistency.consistent ? null : (
+                      <p className="proc-contract-warning" role="alert">草拟文本金额/交期与定标结果不一致，审批被拦截，需人工确认或重新草拟。</p>
+                    )}
+                  </Card>
+                ) : null}
 
-        <div className="proc-invoice-detail lg:col-span-8 glass-panel rounded-xl p-6 border border-border/80 bg-surface/80 shadow-sm flex flex-col gap-5">
-          {detailQuery.isError && selectedId ? (
-            <section className="proc-empty-state compact py-10 flex flex-col items-center justify-center gap-2 text-center text-xs" role="alert">
-              <AlertTriangle size={26} className="text-danger" />
-              <h2 className="text-sm font-semibold text-text">合同详情加载失败</h2>
-              <p className="text-text-muted">{detailQuery.error instanceof Error ? detailQuery.error.message : "未知错误"}</p>
-              <button type="button" className="proc-button px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" onClick={() => { void detailQuery.refetch(); }}>重试</button>
-            </section>
-          ) : detail ? (
-            <>
-              <header className="proc-panel-head flex items-start justify-between gap-3 pb-3 border-b border-border/60">
-                <div className="flex items-center gap-2"><FileSignature size={18} className="text-accent" /><div><h2 className="text-base font-bold text-text font-mono">{detail.contract_no}</h2><span className="text-xs text-text-muted">{detail.supplier_name} · {detail.item_name}</span></div></div>
-                <span className={`proc-status ${STATUS_LABELS[detail.status].tone} text-xs font-medium px-2.5 py-0.5 rounded-full border inline-flex items-center gap-1.5`}><i className="w-1.5 h-1.5 rounded-full bg-current" />{STATUS_LABELS[detail.status].label}</span>
-              </header>
+                {detail.clauses?.length ? (
+                  <Card head={{ icon: <ShieldCheck size={15} />, title: "条款与风险识别（AI，结构化）" }}>
+                    <div className="proc-contract-clauses">
+                      {detail.clauses.map((clause) => (
+                        <div className="proc-contract-clause" key={clause.title}>
+                          <span className="proc-contract-clause-head">
+                            <strong>{clause.title}</strong>
+                            <StatusPill tone={RISK_TONES[clause.risk_level] || "neutral"} size="compact">{clause.risk_level}</StatusPill>
+                          </span>
+                          <p>{clause.content}</p>
+                          <small>{clause.risk_reason}</small>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                ) : null}
 
-              {detailQuery.isPending ? (
-                <span className="proc-muted text-xs text-text-muted">列表快照 — 正在加载完整草拟与条款…</span>
-              ) : null}
+                {detail.draft_text ? (
+                  <Card head={{ icon: <FileSignature size={15} />, title: "草拟文本" }}>
+                    <pre className="proc-contract-draft">{detail.draft_text}</pre>
+                  </Card>
+                ) : null}
 
-              <div className="proc-invoice-facts grid grid-cols-2 sm:grid-cols-4 gap-3 bg-surface-subtle/60 p-3.5 rounded-lg border border-border/40 text-xs">
-                <span className="flex flex-col"><small className="text-[11px] text-text-muted">合同金额（注入）</small><strong className="font-mono font-bold text-text mt-0.5">{money(detail.amount)}</strong></span>
-                <span className="flex flex-col"><small className="text-[11px] text-text-muted">交期（注入）</small><strong className="font-mono font-bold text-text mt-0.5">{detail.lead_days} 天</strong></span>
-                <span className="flex flex-col"><small className="text-[11px] text-text-muted">关联任务</small><strong className="font-mono text-text mt-0.5">{detail.task_reference || "—"}</strong></span>
-                <span className="flex flex-col"><small className="text-[11px] text-text-muted">关联订单</small><strong className="font-mono text-text mt-0.5">{detail.order_no || "—"}</strong></span>
-              </div>
-
-              {detail.consistency ? (
-                <section className="proc-report-section glass-panel rounded-xl p-4 border border-border/60 bg-surface/60 flex flex-col gap-2.5">
-                  <header className="flex items-center gap-2 pb-1 border-b border-border/30"><ShieldAlert size={16} className="text-warning" /><h3 className="text-xs font-bold text-text">草拟一致性校验（Java 权威）</h3></header>
-                  <p className="proc-contract-consistency text-xs text-text-secondary flex flex-wrap items-center gap-1.5">
-                    金额：文本 {detail.consistency.amount_in_text || "未识别"} {detail.consistency.amount_matches ? <BadgeCheck size={14} className="text-accent" /> : <X size={14} className="text-danger" />}
-                    ；交期：文本 {detail.consistency.lead_days_in_text || "未识别"} {detail.consistency.lead_days_matches ? <BadgeCheck size={14} className="text-accent" /> : <X size={14} className="text-danger" />}
-                  </p>
-                  {detail.consistency.consistent ? null : (
-                    <p className="proc-contract-warning text-xs text-danger font-medium p-2 rounded-lg bg-danger-soft border border-danger/30" role="alert">草拟文本金额/交期与定标结果不一致，审批被拦截，需人工确认或重新草拟。</p>
-                  )}
-                </section>
-              ) : null}
-
-              {detail.clauses?.length ? (
-                <section className="proc-report-section glass-panel rounded-xl p-4 border border-border/60 bg-surface/60 flex flex-col gap-3">
-                  <header className="flex items-center gap-2 pb-1 border-b border-border/30"><ShieldAlert size={16} className="text-accent" /><h3 className="text-xs font-bold text-text">条款与风险识别（AI，结构化）</h3></header>
-                  <div className="proc-contract-clauses grid grid-cols-1 gap-2.5">
-                    {detail.clauses.map((clause) => (
-                      <div className="proc-contract-clause p-3 rounded-lg border border-border/60 bg-surface/80 flex flex-col gap-1.5 text-xs" key={clause.title}>
-                        <span className="proc-contract-clause-head flex items-center justify-between gap-2">
-                          <strong className="font-semibold text-text">{clause.title}</strong>
-                          <i className={`proc-status ${RISK_TONES[clause.risk_level] || "neutral"} not-italic text-[11px] font-medium px-2 py-0.5 rounded-full border inline-flex items-center gap-1`}><span className="w-1.5 h-1.5 rounded-full bg-current" />{clause.risk_level}</i>
+                {detail.change_history?.length ? (
+                  <Card head={{ icon: <RotateCcw size={15} />, title: "变更留痕（旧条款快照）" }}>
+                    {detail.change_history.map((entry, index) => (
+                      <div className="proc-contract-clause" key={`${entry.captured_at}-${index}`}>
+                        <span className="proc-contract-clause-head">
+                          <strong>变更 {index + 1} · {entry.reason}</strong>
+                          <small className="mono">{entry.captured_at}</small>
                         </span>
-                        <p className="text-text-secondary leading-relaxed">{clause.content}</p>
-                        <small className="text-text-muted">{clause.risk_reason}</small>
+                        {entry.new_amount || entry.new_lead_days ? (
+                          <span className="proc-muted">
+                            修订：金额 {formatMoney(entry.new_amount)} · 交期 {entry.new_lead_days} 天
+                            {entry.applied ? "（已批准落定）" : "（待审批）"}
+                          </span>
+                        ) : null}
                       </div>
                     ))}
-                  </div>
-                </section>
-              ) : null}
+                  </Card>
+                ) : null}
 
-              {detail.draft_text ? (
-                <section className="proc-report-section glass-panel rounded-xl p-4 border border-border/60 bg-surface/60 flex flex-col gap-2.5">
-                  <header className="flex items-center gap-2 pb-1 border-b border-border/30"><FileSignature size={16} className="text-accent" /><h3 className="text-xs font-bold text-text">草拟文本</h3></header>
-                  <pre className="proc-contract-draft font-mono text-xs p-4 rounded-lg bg-surface-subtle border border-border/60 overflow-x-auto whitespace-pre-wrap leading-relaxed text-text">{detail.draft_text}</pre>
-                </section>
-              ) : null}
-
-              {detail.change_history?.length ? (
-                <section className="proc-report-section glass-panel rounded-xl p-4 border border-border/60 bg-surface/60 flex flex-col gap-2.5">
-                  <header className="flex items-center gap-2 pb-1 border-b border-border/30"><RotateCcw size={16} className="text-info" /><h3 className="text-xs font-bold text-text">变更留痕（旧条款快照）</h3></header>
-                  {detail.change_history.map((entry, index) => (
-                    <div className="proc-contract-clause p-3 rounded-lg border border-border/60 bg-surface/80 flex flex-col gap-1 text-xs" key={`${entry.captured_at}-${index}`}>
-                      <strong className="font-semibold text-text">变更 {index + 1} · {entry.reason}</strong>
-                      <small className="text-text-muted font-mono">{entry.captured_at}</small>
-                      {entry.new_amount || entry.new_lead_days ? (
-                        <span className="proc-muted text-text-secondary mt-0.5">
-                          修订：金额 {money(entry.new_amount)} · 交期 {entry.new_lead_days} 天
-                          {entry.applied ? "（已批准落定）" : "（待审批）"}
-                        </span>
+                <div className="proc-detail-actions">
+                  {detail.status === "DRAFT" ? (
+                    <>
+                      {detail.draft_text ? (
+                        <Button variant="primary" icon={<Send size={14} />} onClick={() => void submitForApproval(detail)}>提交审批</Button>
+                      ) : (
+                        <span className="proc-muted">AI 草拟中…（完成后自动填充条款与风险）</span>
+                      )}
+                      <Button variant="secondary" icon={<RotateCcw size={14} />} loading={busy === `regen:${detail.id}`} onClick={() => void regenDraft(detail)}>重新草拟</Button>
+                    </>
+                  ) : null}
+                  {(detail.status === "PENDING_APPROVAL" || detail.status === "CHANGE_REQUEST") ? (
+                    <>
+                      <Button variant="primary" icon={<CheckCircle2 size={14} />} onClick={() => { setApproveTarget(detail); setApproveNotes(""); setApproveConfirmed(false); setError(null); }}>批准</Button>
+                      <Button variant="secondary" icon={<X size={14} />} loading={busy === `reject:${detail.id}`} onClick={() => void reject(detail)}>驳回</Button>
+                      {detail.status === "CHANGE_REQUEST" ? (
+                        <Button variant="secondary" icon={<RotateCcw size={14} />} loading={busy === `regen:${detail.id}`} onClick={() => void regenDraft(detail)}>按修订值重新草拟</Button>
                       ) : null}
-                    </div>
-                  ))}
-                </section>
-              ) : null}
-
-              <div className="proc-invoice-actions flex flex-wrap items-center gap-2.5 pt-3 border-t border-border/60">
-                {detail.status === "DRAFT" ? (
-                  <>
-                    {detail.draft_text ? (
-                      <button className="proc-button primary inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-accent text-white hover:bg-accent-strong transition-all shadow-xs" type="button" onClick={() => void submitForApproval(detail)}>
-                        <Send size={14} />提交审批
-                      </button>
-                    ) : (
-                      <span className="proc-muted text-xs text-text-muted">AI 草拟中…（完成后自动填充条款与风险）</span>
-                    )}
-                    <button className="proc-button secondary inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium border border-border bg-surface hover:bg-surface-subtle transition-all" type="button" onClick={() => void regenDraft(detail)} disabled={busy === `regen:${detail.id}`}>
-                      <RotateCcw size={14} />重新草拟
-                    </button>
-                  </>
-                ) : null}
-                {(detail.status === "PENDING_APPROVAL" || detail.status === "CHANGE_REQUEST") ? (
-                  <>
-                    <button className="proc-button primary inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-accent text-white hover:bg-accent-strong transition-all shadow-xs" type="button" onClick={() => { setApproveTarget(detail); setApproveNotes(""); setApproveConfirmed(false); setError(null); }}>
-                      <CheckCircle2 size={14} />批准
-                    </button>
-                    <button className="proc-button secondary inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium border border-border bg-surface hover:bg-surface-subtle transition-all" type="button" onClick={() => void reject(detail)} disabled={busy === `reject:${detail.id}`}>
-                      <X size={14} />驳回
-                    </button>
-                    {detail.status === "CHANGE_REQUEST" ? (
-                      <button className="proc-button secondary inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium border border-border bg-surface hover:bg-surface-subtle transition-all" type="button" onClick={() => void regenDraft(detail)} disabled={busy === `regen:${detail.id}`}>
-                        <RotateCcw size={14} />按修订值重新草拟
-                      </button>
-                    ) : null}
-                  </>
-                ) : null}
-                {detail.status === "EFFECTIVE" ? (
-                  <>
-                    <button className="proc-button inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-accent text-white hover:bg-accent-strong transition-all shadow-xs" type="button" onClick={() => void executeOrClose(detail, "execute")} disabled={busy === `execute:${detail.id}`}>
-                      <RotateCcw size={14} />开始执行
-                    </button>
-                    <button className="proc-button secondary inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium border border-border bg-surface hover:bg-surface-subtle transition-all" type="button" onClick={() => openChange(detail)}>
-                      <RotateCcw size={14} />发起变更
-                    </button>
-                  </>
-                ) : null}
-                {detail.status === "EXECUTING" ? (
-                  <>
-                    <button className="proc-button inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-accent text-white hover:bg-accent-strong transition-all shadow-xs" type="button" onClick={() => void executeOrClose(detail, "close")} disabled={busy === `close:${detail.id}`}>
-                      <CheckCircle2 size={14} />完成关闭
-                    </button>
-                    <button className="proc-button secondary inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium border border-border bg-surface hover:bg-surface-subtle transition-all" type="button" onClick={() => openChange(detail)}>
-                      <RotateCcw size={14} />发起变更
-                    </button>
-                  </>
-                ) : null}
-              </div>
-            </>
-          ) : (
-            <div className="proc-empty-panel py-16 flex flex-col items-center justify-center gap-2 text-center text-xs text-text-muted">
-              <FileSignature size={30} className="text-text-muted" />
-              <h2 className="text-sm font-semibold text-text">合同详情</h2>
-              <p>选择一份合同查看草拟文本、条款风险与审批操作。</p>
-            </div>
-          )}
-        </div>
-      </div>
+                    </>
+                  ) : null}
+                  {detail.status === "EFFECTIVE" ? (
+                    <>
+                      <Button variant="primary" icon={<Play size={14} />} loading={busy === `execute:${detail.id}`} onClick={() => void executeOrClose(detail, "execute")}>开始执行</Button>
+                      <Button variant="secondary" icon={<RotateCcw size={14} />} onClick={() => openChange(detail)}>发起变更</Button>
+                    </>
+                  ) : null}
+                  {detail.status === "EXECUTING" ? (
+                    <>
+                      <Button variant="primary" icon={<CheckCircle2 size={14} />} loading={busy === `close:${detail.id}`} onClick={() => void executeOrClose(detail, "close")}>完成关闭</Button>
+                      <Button variant="secondary" icon={<RotateCcw size={14} />} onClick={() => openChange(detail)}>发起变更</Button>
+                    </>
+                  ) : null}
+                </div>
+              </>
+            ) : (
+              <EmptyState
+                variant="inline"
+                icon={<FileSignature size={24} />}
+                title="选择一份合同"
+                hint="查看草拟文本、条款风险与审批操作；定标后的任务可在上方一键 AI 草拟。"
+              />
+            )}
+          </>
+        }
+      />
 
       {approveTarget ? (
-        <div className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && busy !== `approve:${approveTarget.id}`) setApproveTarget(null); }}>
-          <section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="approve-contract-title">
-            <header className="flex items-center justify-between pb-3 border-b border-border/60"><div className="flex items-center gap-2 text-text font-bold text-base"><CheckCircle2 size={18} className="text-accent" /><h2 id="approve-contract-title">{approveTarget.status === "CHANGE_REQUEST" ? "批准合同变更（重新审批）" : "批准合同（allow-once）"}</h2></div></header>
-            <div className="proc-delete-target p-3 rounded-lg bg-surface-subtle border border-border flex flex-col gap-0.5 text-xs"><strong className="font-mono text-sm font-bold text-text">{approveTarget.contract_no}</strong><span className="text-text-muted">{approveTarget.supplier_name} · 金额 {money(approveTarget.amount)}</span></div>
-            {approveTarget.status === "CHANGE_REQUEST" ? (
-              <p className="proc-contract-warning text-xs text-warning font-medium p-2.5 rounded-lg bg-warning-soft border border-warning/30" role="alert">批准后修订金额/交期将落定为正式合同值（旧快照留痕）。</p>
-            ) : null}
-            <label className="proc-field flex flex-col gap-1 text-xs font-medium text-text"><span>人工备注 <b>*</b></span><input className="px-3 py-2 rounded-lg border border-border bg-surface-subtle text-text focus:outline-accent text-sm" autoFocus value={approveNotes} onChange={(event) => setApproveNotes(event.target.value)} placeholder="批准意见（写入审计）" /></label>
-            <label className="proc-invoice-confirm flex items-center gap-2 text-xs text-text cursor-pointer"><input type="checkbox" className="rounded border-border text-accent focus:ring-accent" checked={approveConfirmed} onChange={(event) => setApproveConfirmed(event.target.checked)} /><span>我已核对草拟文本与条款风险，确认批准（一次性）</span></label>
-            {error ? <p className="proc-form-error text-xs text-danger font-medium p-2.5 rounded-lg bg-danger-soft border border-danger/30" role="alert">{error}</p> : null}
-            <footer className="flex items-center justify-end gap-2 pt-3 border-t border-border/60">
-              <button className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" type="button" onClick={() => setApproveTarget(null)} disabled={busy === `approve:${approveTarget.id}`}>取消</button>
-              <button className="proc-button px-4 py-1.5 rounded-lg text-xs font-semibold bg-accent text-white hover:bg-accent-strong inline-flex items-center gap-1.5 shadow-xs" type="button" disabled={busy === `approve:${approveTarget.id}`} onClick={() => void approve()}>
-                {busy === `approve:${approveTarget.id}` ? <LoaderCircle className="spin" size={15} /> : <CheckCircle2 size={15} />}确认批准
-              </button>
-            </footer>
-          </section>
-        </div>
+        <Modal
+          titleId="approve-contract-title"
+          title={approveTarget.status === "CHANGE_REQUEST" ? "批准合同变更（重新审批）" : "批准合同（allow-once）"}
+          icon={<CheckCircle2 size={18} />}
+          busy={busy === `approve:${approveTarget.id}`}
+          onClose={() => setApproveTarget(null)}
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setApproveTarget(null)} disabled={busy === `approve:${approveTarget.id}`}>取消</Button>
+              <Button variant="primary" icon={<CheckCircle2 size={15} />} loading={busy === `approve:${approveTarget.id}`} onClick={() => void approve()}>确认批准</Button>
+            </>
+          }
+        >
+          <div className="proc-dialog-target">
+            <strong className="mono">{approveTarget.contract_no}</strong>
+            <span>{approveTarget.supplier_name} · 金额 {formatMoney(approveTarget.amount)}</span>
+          </div>
+          {approveTarget.status === "CHANGE_REQUEST" ? (
+            <p className="proc-contract-warning" role="alert">批准后修订金额/交期将落定为正式合同值（旧快照留痕）。</p>
+          ) : null}
+          <label className="proc-field">
+            <span>人工备注 <b>*</b></span>
+            <input className="proc-input" autoFocus value={approveNotes} onChange={(event) => setApproveNotes(event.target.value)} placeholder="批准意见（写入审计）" />
+          </label>
+          <label className="proc-confirm-check">
+            <input type="checkbox" checked={approveConfirmed} onChange={(event) => setApproveConfirmed(event.target.checked)} />
+            <span>我已核对草拟文本与条款风险，确认批准（一次性）</span>
+          </label>
+          {error ? <p className="proc-dialog-error" role="alert">{error}</p> : null}
+        </Modal>
       ) : null}
 
       {changeTarget ? (
-        <div className="proc-modal-backdrop fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && busy !== `change:${changeTarget.id}`) setChangeTarget(null); }}>
-          <section className="proc-confirm-dialog glass-panel bg-surface border border-border/80 rounded-2xl p-6 shadow-2xl max-w-md w-full mx-4 space-y-4 animate-in fade-in zoom-in-95 duration-150" role="dialog" aria-modal="true" aria-labelledby="change-contract-title">
-            <header className="flex items-center justify-between pb-3 border-b border-border/60"><div className="flex items-center gap-2 text-text font-bold text-base"><RotateCcw size={18} className="text-warning" /><h2 id="change-contract-title">发起合同变更（修订金额/交期，需重新审批）</h2></div></header>
-            <div className="proc-delete-target p-3 rounded-lg bg-surface-subtle border border-border flex flex-col gap-0.5 text-xs"><strong className="font-mono text-sm font-bold text-text">{changeTarget.contract_no}</strong><span className="text-text-muted">当前金额 {money(changeTarget.amount)} · 交期 {changeTarget.lead_days} 天；变更后旧条款快照留痕</span></div>
-            <div className="proc-supplier-form flex flex-col gap-3">
-              <label className="proc-field flex flex-col gap-1 text-xs font-medium text-text"><span>变更原因 <b>*</b></span><input className="px-3 py-2 rounded-lg border border-border bg-surface-subtle text-text focus:outline-accent text-sm" autoFocus value={changeNotes} onChange={(event) => setChangeNotes(event.target.value)} placeholder="例如：供应商调价，金额 8000、交期 20 天" /></label>
-              <label className="proc-field flex flex-col gap-1 text-xs font-medium text-text"><span>修订后金额（元）<b>*</b></span><input className="px-3 py-2 rounded-lg border border-border bg-surface-subtle text-text focus:outline-accent text-sm font-mono" type="number" step="any" min="0" value={changeAmount} onChange={(event) => setChangeAmount(event.target.value)} placeholder={String(changeTarget.amount)} /></label>
-              <label className="proc-field flex flex-col gap-1 text-xs font-medium text-text"><span>修订后交期（天）<b>*</b></span><input className="px-3 py-2 rounded-lg border border-border bg-surface-subtle text-text focus:outline-accent text-sm font-mono" type="number" step="1" min="1" value={changeLeadDays} onChange={(event) => setChangeLeadDays(event.target.value)} placeholder={String(changeTarget.lead_days)} /></label>
-            </div>
-            <p className="proc-muted text-xs text-text-muted">变更提交后需「按修订值重新草拟」→ 一致性/条款校验 → 人工批准才生效。</p>
-            {error ? <p className="proc-form-error text-xs text-danger font-medium p-2.5 rounded-lg bg-danger-soft border border-danger/30" role="alert">{error}</p> : null}
-            <footer className="flex items-center justify-end gap-2 pt-3 border-t border-border/60">
-              <button className="proc-button secondary px-3.5 py-1.5 rounded-lg border border-border text-xs font-medium text-text hover:bg-surface-subtle" type="button" onClick={() => setChangeTarget(null)} disabled={busy === `change:${changeTarget.id}`}>取消</button>
-              <button className="proc-button px-4 py-1.5 rounded-lg text-xs font-semibold bg-warning text-white hover:bg-amber-600 inline-flex items-center gap-1.5 shadow-xs" type="button" disabled={busy === `change:${changeTarget.id}`} onClick={() => void requestChange()}>
-                {busy === `change:${changeTarget.id}` ? <LoaderCircle className="spin" size={15} /> : <RotateCcw size={15} />}确认发起变更
-              </button>
-            </footer>
-          </section>
-        </div>
+        <Modal
+          titleId="change-contract-title"
+          title="发起合同变更（修订金额/交期，需重新审批）"
+          icon={<RotateCcw size={18} />}
+          tone="warning"
+          busy={busy === `change:${changeTarget.id}`}
+          onClose={() => setChangeTarget(null)}
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setChangeTarget(null)} disabled={busy === `change:${changeTarget.id}`}>取消</Button>
+              <Button variant="warning" icon={<AlertTriangle size={15} />} loading={busy === `change:${changeTarget.id}`} onClick={() => void requestChange()}>确认发起变更</Button>
+            </>
+          }
+        >
+          <div className="proc-dialog-target">
+            <strong className="mono">{changeTarget.contract_no}</strong>
+            <span>当前金额 {formatMoney(changeTarget.amount)} · 交期 {changeTarget.lead_days} 天；变更后旧条款快照留痕</span>
+          </div>
+          <div className="proc-dialog-form">
+            <label className="proc-field proc-field-wide">
+              <span>变更原因 <b>*</b></span>
+              <input className="proc-input" autoFocus value={changeNotes} onChange={(event) => setChangeNotes(event.target.value)} placeholder="例如：供应商调价，金额 8000、交期 20 天" />
+            </label>
+            <label className="proc-field">
+              <span>修订后金额（元）<b>*</b></span>
+              <input className="proc-input mono" type="number" step="any" min="0" value={changeAmount} onChange={(event) => setChangeAmount(event.target.value)} placeholder={String(changeTarget.amount)} />
+            </label>
+            <label className="proc-field">
+              <span>修订后交期（天）<b>*</b></span>
+              <input className="proc-input mono" type="number" step="1" min="1" value={changeLeadDays} onChange={(event) => setChangeLeadDays(event.target.value)} placeholder={String(changeTarget.lead_days)} />
+            </label>
+          </div>
+          <p className="proc-muted">变更提交后需「按修订值重新草拟」→ 一致性/条款校验 → 人工批准才生效。</p>
+          {error ? <p className="proc-dialog-error" role="alert">{error}</p> : null}
+        </Modal>
       ) : null}
-    </div>
+    </CenterPage>
   );
 }

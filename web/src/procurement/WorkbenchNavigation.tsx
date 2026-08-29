@@ -93,11 +93,7 @@ export function WorkbenchNavigation({ active, role, aiAttention, reviewAttention
         </span>
         <span className="proc-nav-label truncate">{label}</span>
         {count ? (
-          <span className={`proc-nav-badge ml-auto font-mono text-[10px] font-bold px-1.5 py-0.2 rounded-full border ${
-            isAiOrReview
-              ? "danger bg-danger-soft text-danger border-danger/30"
-              : "warning bg-warning-soft text-warning border-warning/30"
-          }`}>
+          <span className={`proc-nav-badge ${isAiOrReview ? "is-danger" : "is-warning"}`}>
             {count > 99 ? "99+" : count}
           </span>
         ) : null}
