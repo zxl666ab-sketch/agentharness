@@ -23,6 +23,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -115,6 +116,14 @@ public class ApprovalService {
                     decisions.findByTaskId(taskId).orElse(null));
         }
         var task = tasks.lockById(taskId).orElseThrow(() -> notFound("task_not_found", "未找到采购任务"));
+        // Race guard: an in-flight analyze will publish a NEW comparison snapshot, which
+        // immediately stales the pending decision created below — the agent then records
+        // evidence for a run that can never be replayed. Reject early with actionable text.
+        if (commands.existsByAggregateIdAndOperationTypeAndStatusIn(
+                taskId, "analyze", List.of("pending", "dispatching", "accepted", "published"))) {
+            throw new ApiException(HttpStatus.CONFLICT, "analysis_in_flight",
+                    "比价分析进行中，请等待分析完成后再提交选定");
+        }
         var existing = decisions.findByTaskId(taskId);
         if (existing.isPresent()) {
             return new RequestResult(null, null, existing.get());

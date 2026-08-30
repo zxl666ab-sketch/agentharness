@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { useAgentStream } from "../useAgentStream";
 import { operationRefetchInterval, POLL_FETCH_CAP, pollFetchCount, procurementApi } from "./api";
+import { humanizeEngineError } from "./engineErrors";
 import type {
   AiTaskDetail,
   ProcurementRequest,
@@ -191,7 +192,7 @@ export function useRequestQueries(state: WorkbenchState) {
       return;
     }
     if (operation.status === "failed" && selectedId === pendingOperation.taskId) {
-      setActionError(operation.last_error || "异步操作执行失败");
+      setActionError(humanizeEngineError(operation.last_error) || "异步操作执行失败");
     }
     setPendingOperation(null);
     void Promise.all([

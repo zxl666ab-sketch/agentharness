@@ -46,6 +46,7 @@ import type {
   SupplierStatus,
   SupplierView,
 } from "./types";
+import { humanizeEngineError } from "./engineErrors";
 
 const FIELD_LABELS: Record<string, string> = {
   title: "任务名称",
@@ -192,7 +193,7 @@ async function waitForOperation(operationId: string, timeoutMs = 30_000) {
     );
     if (operation.status === "completed") return operation;
     if (operation.status === "failed") {
-      throw new Error(operation.last_error || "异步操作执行失败");
+      throw new Error(humanizeEngineError(operation.last_error) || "异步操作执行失败");
     }
     if (operation.status === "cancelled") {
       throw new Error("异步操作已取消");
