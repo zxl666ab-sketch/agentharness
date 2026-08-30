@@ -22,7 +22,7 @@ import {
   X,
   ChevronUp,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
 
 import { Fact, StatusPill, unitLabel } from "../components/ui";
 import { AuditView } from "./AuditView";
@@ -30,6 +30,7 @@ import { AiTaskRecovery } from "./AiTaskRecovery";
 import { AgentOfflineNotice } from "./AgentOfflineNotice";
 import { ComparisonView } from "./ComparisonView";
 import { ConfigDrawer } from "./ConfigDrawer";
+import { ConversationResizer, CONV_DEFAULT_WIDTH, CONV_MAX_WIDTH, CONV_MIN_WIDTH } from "./ConversationResizer";
 import { DeleteDialog } from "./DeleteDialog";
 import { HumanInteractionPanel } from "./HumanInteractionPanel";
 import { NextStepBar } from "./NextStepBar";
@@ -140,6 +141,22 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
   const actions = useWorkbenchActions(state, queries);
   const [role, setRole] = useState<DemoRole>(() => readRole());
   const [taskListCollapsed, setTaskListCollapsed] = useState(false);
+  // 会话面板宽度（痛点⑤分级宽度的进阶）：拖拽可调，localStorage 持久化
+  const [convWidth, setConvWidth] = useState<number>(() => {
+    try {
+      const stored = Number(localStorage.getItem("procurement.conv-width"));
+      return Number.isFinite(stored) && stored >= CONV_MIN_WIDTH && stored <= CONV_MAX_WIDTH
+        ? Math.round(stored)
+        : CONV_DEFAULT_WIDTH;
+    } catch {
+      return CONV_DEFAULT_WIDTH;
+    }
+  });
+  const [convResizing, setConvResizing] = useState(false);
+  const commitConvWidth = useCallback((width: number) => {
+    setConvWidth(width);
+    try { localStorage.setItem("procurement.conv-width", String(width)); } catch { /* 隐私模式忽略 */ }
+  }, []);
   const {
     view, selectedId, selectedAiId, selectedReviewId, activeTab, taskFilter, taskPage,
     search, showCreate, orderTask, invoiceOrder, actionError,
@@ -223,7 +240,7 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
               ))}
             </select>
           </label>
-          <span className="proc-runtime-state inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-accent-soft text-accent border border-accent/20"><Wifi size={14} />采购服务 {backendVersion}</span>
+          {/* 服务状态只保留左栏底部一处（含 Agent 离线语义）；顶栏仅在实时流断开时提示，避免双胶囊重复 */}
           {queries.streamStatus !== "live" ? (
             <span
               className="proc-stream-state inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-warning-soft text-warning border border-warning/30"
@@ -512,7 +529,10 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
                 />
               ) : null}
 
-              <div className={`proc-task-body ${conversationOpen ? "conv-open" : "conv-collapsed"}`}>
+              <div
+                className={`proc-task-body ${conversationOpen ? "conv-open" : "conv-collapsed"} ${convResizing ? "is-resizing" : ""}`}
+                style={{ "--proc-conv-width": `${convWidth}px` } as CSSProperties}
+              >
                 <div className={`proc-conversation-shell ${conversationOpen ? "open" : "collapsed"}`}>
                   <button
                     type="button"
@@ -539,6 +559,14 @@ export function ProcurementWorkbench({ theme, backendVersion, agentDown = false,
                     </div>
                   ) : null}
                 </div>
+                {conversationOpen ? (
+                  <ConversationResizer
+                    width={convWidth}
+                    onChange={setConvWidth}
+                    onCommit={commitConvWidth}
+                    onDraggingChange={setConvResizing}
+                  />
+                ) : null}
                 <section className="proc-structured-workspace">
                   <nav className="proc-tabs" aria-label="采购任务视图">
                     <button className={activeTab === "quotes" ? "active" : ""} type="button" onClick={() => navigate({ tab: "quotes" })}><Files size={16} />报价与复核{detail.unresolved_field_count ? <span>{detail.unresolved_field_count}</span> : null}</button>

@@ -273,7 +273,12 @@ export function ContractCenter() {
                   <strong className="proc-list-row-title">{contract.supplier_name} · {contract.item_name}</strong>
                   <span className="proc-list-row-meta">
                     <small className="tnum">金额 {formatMoney(contract.amount)} · 交期 {contract.lead_days} 天</small>
-                    {riskCount ? <em className="proc-risk-chip">{riskCount} 项高风险条款</em> : null}
+                    {/* 高风险条款警示只在合同仍可操作时保持红色；已关闭合同降为中性存档信息，消除满屏红 */}
+                    {riskCount ? (
+                      contract.status === "CLOSED"
+                        ? <em className="proc-risk-chip is-muted" title="合同已关闭，风险条款仅作存档参考">{riskCount} 项风险条款</em>
+                        : <em className="proc-risk-chip">{riskCount} 项高风险条款</em>
+                    ) : null}
                   </span>
                 </ListRow>
               );

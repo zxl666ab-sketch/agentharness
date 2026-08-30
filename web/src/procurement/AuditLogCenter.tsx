@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Activity, ChevronLeft, ChevronRight, LoaderCircle, Search } from "lucide-react";
+import { Activity, ChevronLeft, ChevronRight, LoaderCircle } from "lucide-react";
 import { useState } from "react";
 
 import { procurementApi } from "./api";
@@ -85,10 +85,13 @@ export function AuditLogCenter() {
       }
       toolbar={
         <div className="proc-action-bar is-filters">
-          <label className="proc-search">
-            <Search size={15} />
-            <input aria-label="事件类型" value={type} onChange={(event) => { setType(event.target.value); setPage(0); }} placeholder="事件类型，如 order_created" />
-          </label>
+          {/* 事件类型用中文下拉而非要求记住英文枚举；类型全集即 EVENT_TYPE_LABELS */}
+          <select className="proc-select" aria-label="事件类型" value={type} onChange={(event) => { setType(event.target.value); setPage(0); }}>
+            <option value="">全部事件</option>
+            {Object.entries(EVENT_TYPE_LABELS).map(([value, label]) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
+          </select>
           <input className="proc-input proc-filter-input" aria-label="操作人" value={actor} onChange={(event) => { setActor(event.target.value); setPage(0); }} placeholder="操作人" />
           <select className="proc-select" aria-label="业务对象类型" value={businessType} onChange={(event) => { setBusinessType(event.target.value); setPage(0); }}>
             <option value="">全部业务对象</option>
@@ -118,7 +121,8 @@ export function AuditLogCenter() {
         {items.map((event) => (
           <article className="proc-audit-row" key={event.id}>
             <span className="proc-audit-type"><i aria-hidden />{eventLabel(event.event_type)}</span>
-            <code>{event.event_type}</code>
+            {/* 原始类型弱化为技术参考：中文事件名是主文案，英文枚举降级为次要色 */}
+            <code className="proc-audit-raw-type" title={event.event_type}>{event.event_type}</code>
             <span className="proc-audit-scope">
               {event.business_type ? <small>{businessTypeLabel(event.business_type)} {event.business_id?.slice(0, 8)}</small> : null}
               {event.task_reference ? <small>{event.task_reference}</small> : event.task_id ? <small>任务 {event.task_id.slice(0, 8)}</small> : null}

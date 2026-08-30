@@ -128,7 +128,7 @@ export function SystemInfo() {
               ) : (
                 <p className="proc-muted">暂无网关状态（Agent 心跳未上报）</p>
               )}
-              <p className="proc-eval-note">熔断/限流/降级事件来自 Python Agent，状态脱敏。</p>
+              <p className="proc-eval-note">熔断/限流/降级事件来自 Python Agent 事件上报（非实时探活）；模型端点连通性以解析任务的实际结果为准。</p>
             </section>
 
             <section className="proc-report-block">

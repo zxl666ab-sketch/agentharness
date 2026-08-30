@@ -20,6 +20,7 @@ import { DragEvent, FormEvent, useMemo, useState } from "react";
 import { api, type ToolInvocationRow } from "../api/client";
 import { Button } from "../components/ui";
 import type { ProcurementRequest } from "./types";
+import { isSupersededTaskStatus } from "./viewModel";
 
 const TOOL_LABELS: Record<string, string> = {
   procurement_read_request: "读取采购任务",
@@ -500,6 +501,15 @@ export function ProcurementConversation({
         ))}
         {active && !chatItems.some((item) => item.role === "assistant") ? (
           <div className="proc-agent-working"><LoaderCircle className="spin" size={15} />Agent 正在分析报价</div>
+        ) : null}
+        {/* 运行会话尚未建立（Agent 还没接单）：留一个可见的排队/归因指示，
+            避免「准备中」徽章下面是一整块无解释的空白 */}
+        {!runId && !active && chatItems.length === 0 ? (
+          <div className={`proc-agent-working${isSupersededTaskStatus(request.status) ? " is-muted" : ""}`}>
+            {isSupersededTaskStatus(request.status)
+              ? "Agent 运行未建立，任务已结束；可删除本任务后重新发起询价"
+              : <><LoaderCircle className="spin" size={15} />已受理，正在等待 Agent 建立运行…</>}
+          </div>
         ) : null}
         {visibleTools.length ? (
           <section className="proc-conversation-tools">

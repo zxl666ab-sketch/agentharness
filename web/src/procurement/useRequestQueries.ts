@@ -27,7 +27,11 @@ const TERMINAL_OPERATION_STATUSES = new Set(["completed", "failed", "cancelled"]
 // W-M4：任务订单/合同的兜底轮询受 POLL_FETCH_CAP（api.ts）约束。
 
 function taskRefetchInterval(status: ProcurementRequestSummary["status"] | undefined) {
-  return status && TRANSIENT_TASK_STATUSES.has(status) ? 750 : false;
+  if (!status) return false;
+  if (TRANSIENT_TASK_STATUSES.has(status)) return 750;
+  // 终态任务慢速兜底：任务可能被其他窗口或外部调用删除/变更（SSE 只推当前
+  // run 的 Agent 事件，focus 刷新也已关闭），30s 校验一次避免幽灵详情常驻。
+  return 30_000;
 }
 
 /**

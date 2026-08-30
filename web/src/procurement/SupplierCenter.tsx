@@ -496,7 +496,7 @@ function SupplierProfileBody({ profile, onOpenTask }: { profile: SupplierProfile
             <li key={quote.quote_id}>
               <button className="w-full text-left flex flex-col gap-0.5" type="button" onClick={() => onOpenTask(quote.task_id)} title="打开采购任务">
                 <strong>{quote.item_name || "未知物料"}</strong>
-                <small className="mono">{quote.task_reference || quote.task_id} · {quote.source_filename}</small>
+                <small className="mono">{quote.task_reference || (quote.task_id ? `任务 ${quote.task_id.slice(0, 8)}` : "—")} · {quote.source_filename}</small>
               </button>
             </li>
           )) : <li className="proc-muted">暂无报价记录</li>}

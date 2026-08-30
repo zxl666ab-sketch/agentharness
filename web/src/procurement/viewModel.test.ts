@@ -12,6 +12,7 @@ import {
   fulfillmentNextStep,
   procurementDecisionProgress,
   nextStepGuide,
+  rulesetLabel,
   statusLabel,
   statusLabelFor,
   statusTone,
@@ -157,5 +158,21 @@ describe("procurement view model", () => {
       unresolved_field_count: 3,
     });
     expect(reviewUnresolved.blocker).toContain("3 项报价字段待复核");
+  });
+});
+
+describe("rulesetLabel", () => {
+  it("renders known ruleset families in Chinese with version kept", () => {
+    expect(rulesetLabel("dynamic-spec-v2")).toBe("动态规格规则 v2");
+    expect(rulesetLabel("landed-cost-v1")).toBe("到货成本规则 v1");
+    expect(rulesetLabel("packaging-quote-v3")).toBe("包装报价规则 v3");
+  });
+
+  it("falls back to the raw value for unknown families so nothing is hidden", () => {
+    expect(rulesetLabel("v1")).toBe("v1");
+    expect(rulesetLabel("exotic-rule-9")).toBe("exotic-rule-9");
+    expect(rulesetLabel("")).toBe("——");
+    expect(rulesetLabel(null)).toBe("——");
+    expect(rulesetLabel(undefined)).toBe("——");
   });
 });

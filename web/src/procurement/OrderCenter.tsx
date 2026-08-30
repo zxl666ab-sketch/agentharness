@@ -672,6 +672,7 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask, onOpenInvoic
       ) : null}
 
       <SettlementSection
+        focusTaskId={highlightTaskId}
         onPay={(settlement) => {
           setPayTarget({ orderId: null, settlementId: settlement.id, settlementNo: settlement.settlement_no, orderNo: null });
           setPaidAt(new Date().toISOString().slice(0, 10));
@@ -683,19 +684,21 @@ export function OrderCenter({ highlightTaskId = null, onBackToTask, onOpenInvoic
   );
 }
 
-function SettlementSection({ onPay }: { onPay: (settlement: SettlementView) => void }) {
+function SettlementSection({ focusTaskId, onPay }: { focusTaskId?: string | null; onPay: (settlement: SettlementView) => void }) {
   return (
     <section className="proc-settlement-section">
       <header>
         <h3><CalendarCheck2 size={16} /> 对账单</h3>
-        <small>累计收满自动派生 · 状态机 UNSETTLED → SETTLED → PAID</small>
+        <small>{focusTaskId
+          ? "仅显示聚焦任务的对账单（订单累计收满自动派生）"
+          : "累计收满自动派生 · 状态机 UNSETTLED → SETTLED → PAID"}</small>
       </header>
-      <SettlementTable onPay={onPay} />
+      <SettlementTable focusTaskId={focusTaskId} onPay={onPay} />
     </section>
   );
 }
 
-function SettlementTable({ onPay }: { onPay: (settlement: SettlementView) => void }) {
+function SettlementTable({ focusTaskId, onPay }: { focusTaskId?: string | null; onPay: (settlement: SettlementView) => void }) {
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -704,7 +707,11 @@ function SettlementTable({ onPay }: { onPay: (settlement: SettlementView) => voi
     queryKey: ["procurement-settlements"],
     queryFn: () => procurementApi.settlements(undefined, 0, 100),
   });
-  const settlements = settlementsQuery.data?.items || [];
+  const settlementsAll = settlementsQuery.data?.items || [];
+  // 深链聚焦某任务时，对账单区与上方订单卡保持同一范围（task_id 为空的旧数据在聚焦态隐藏）
+  const settlements = focusTaskId
+    ? settlementsAll.filter((settlement) => settlement.task_id === focusTaskId)
+    : settlementsAll;
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["procurement-settlements"] });
 

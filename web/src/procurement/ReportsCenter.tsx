@@ -93,96 +93,102 @@ export function ReportsCenter() {
         </div>
       </div>
 
+      {/* 两列结构化：左列「任务结构分布」（漏斗+品类，同为条形列表），
+          右列「趋势与供应商」（趋势图+排行），避免 auto-fit 孤块与高度失衡 */}
       <div className="proc-reports-grid">
-        <section className="proc-report-block">
-          <header>
-            <h3><BarChart3 size={15} /> 状态漏斗</h3>
-            <small>按任务状态分组</small>
-          </header>
-          {overviewQuery.isPending ? <div className="proc-loading-line"><BarChart3 size={15} />正在加载…</div> : null}
-          {overviewQuery.isError ? <ErrorState title="概览数据加载失败" detail={overviewQuery.error instanceof Error ? overviewQuery.error.message : "未知错误"} onRetry={() => void overviewQuery.refetch()} /> : null}
-          <div className="proc-funnel">
-            {funnel.map((entry) => (
-              <div key={entry.status} className={`proc-funnel-row ${FUNNEL_TONES[entry.status] || ""}`}>
-                <span>{STATUS_LABELS[entry.status] || entry.status}</span>
-                <div className="proc-bar-track"><i style={{ width: `${(entry.count / Math.max(1, funnel[0].count)) * 100}%` }} /></div>
-                <b className="tnum">{entry.count}</b>
-              </div>
-            ))}
-            {!funnel.length && !overviewQuery.isPending ? (
-              <EmptyState variant="inline" icon={<Bell size={22} />} title="还没有任务数据" hint="创建第一个采购任务后，漏斗会展示各环节的分布。" />
-            ) : null}
-          </div>
-        </section>
-
-        <section className="proc-report-block">
-          <header>
-            <h3><TrendingUp size={15} /> 月度趋势</h3>
-            <small>近 6 个月任务数</small>
-          </header>
-          {trend.length ? (
-            <>
-              <div className="proc-trend-bars">
-                {trend.map((row) => (
-                  <div key={row.month} title={`${row.month}：${row.task_count} 个任务，批准 ${row.approved_amount}`} style={{ height: "100%" }}>
-                    <div className="proc-trend-col">
-                      <em className="tnum">{row.task_count}</em>
-                      <i style={{ height: `${Math.max(6, (row.task_count / trendMax) * 100)}%` }} />
-                    </div>
-                    <small className="mono">{row.month.slice(5)} 月</small>
-                  </div>
-                ))}
-              </div>
-              {trend.length < 3 ? (
-                <p className="proc-sparse-hint">数据月份较少，趋势仅供参考；持续使用两个月以上后趋势更有意义。</p>
-              ) : null}
-            </>
-          ) : (
-            <EmptyState variant="inline" icon={<TrendingUp size={22} />} title="暂无趋势数据" hint="任务按创建月份自动汇入趋势图。" />
-          )}
-          <p className="proc-eval-note">口径：批准金额 = 已批准任务所选报价的到货总价，统一折算为基准币种。</p>
-        </section>
-
-        <section className="proc-report-block">
-          <header>
-            <h3><Trophy size={15} /> 供应商中标排行</h3>
-            <small>按中标次数排序</small>
-          </header>
-          {ranking.length ? (
-            <div className="proc-ranking">
-              {ranking.map((row, index) => (
-                <div className="proc-rank-row" key={row.id}>
-                  <span className={`proc-rank-no${index < 3 ? " is-top" : ""}`}>{index + 1}</span>
-                  <strong>{row.name}</strong>
-                  <small>{row.win_count}/{row.quote_count} 中标 · 绩效 {Number(row.performance.score).toFixed(1)}</small>
-                  <span className={`proc-rank-level is-${row.performance.level === "黑名单" ? "danger" : "accent"}`}>{row.performance.level}</span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <EmptyState variant="inline" icon={<Trophy size={22} />} title="暂无中标记录" hint="供应商档案按名称自动关联报价与中标记录。" />
-          )}
-        </section>
-
-        <section className="proc-report-block">
-          <header>
-            <h3><PieChart size={15} /> 品类分布</h3>
-            <small>按任务品类分组</small>
-          </header>
-          {categories.length ? (
+        <div className="proc-reports-col">
+          <section className="proc-report-block">
+            <header>
+              <h3><BarChart3 size={15} /> 状态漏斗</h3>
+              <small>按任务状态分组</small>
+            </header>
+            {overviewQuery.isPending ? <div className="proc-loading-line"><BarChart3 size={15} />正在加载…</div> : null}
+            {overviewQuery.isError ? <ErrorState title="概览数据加载失败" detail={overviewQuery.error instanceof Error ? overviewQuery.error.message : "未知错误"} onRetry={() => void overviewQuery.refetch()} /> : null}
             <div className="proc-funnel">
-              {categories.map((entry) => (
-                <div className="proc-funnel-row" key={entry.category}>
-                  <span>{categoryLabel(entry.category)}</span>
-                  <div className="proc-bar-track"><i style={{ width: `${(entry.count / Math.max(1, categories[0].count)) * 100}%` }} /></div>
+              {funnel.map((entry) => (
+                <div key={entry.status} className={`proc-funnel-row ${FUNNEL_TONES[entry.status] || ""}`}>
+                  <span>{STATUS_LABELS[entry.status] || entry.status}</span>
+                  <div className="proc-bar-track"><i style={{ width: `${(entry.count / Math.max(1, funnel[0].count)) * 100}%` }} /></div>
                   <b className="tnum">{entry.count}</b>
                 </div>
               ))}
+              {!funnel.length && !overviewQuery.isPending ? (
+                <EmptyState variant="inline" icon={<Bell size={22} />} title="还没有任务数据" hint="创建第一个采购任务后，漏斗会展示各环节的分布。" />
+              ) : null}
             </div>
-          ) : (
-            <EmptyState variant="inline" icon={<PieChart size={22} />} title="暂无品类数据" hint="任务创建后按品类自动分组统计。" />
-          )}
-        </section>
+          </section>
+
+          <section className="proc-report-block">
+            <header>
+              <h3><PieChart size={15} /> 品类分布</h3>
+              <small>按任务品类分组</small>
+            </header>
+            {categories.length ? (
+              <div className="proc-funnel">
+                {categories.map((entry) => (
+                  <div className="proc-funnel-row" key={entry.category}>
+                    <span>{categoryLabel(entry.category)}</span>
+                    <div className="proc-bar-track"><i style={{ width: `${(entry.count / Math.max(1, categories[0].count)) * 100}%` }} /></div>
+                    <b className="tnum">{entry.count}</b>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <EmptyState variant="inline" icon={<PieChart size={22} />} title="暂无品类数据" hint="任务创建后按品类自动分组统计。" />
+            )}
+          </section>
+        </div>
+
+        <div className="proc-reports-col">
+          <section className="proc-report-block">
+            <header>
+              <h3><TrendingUp size={15} /> 月度趋势</h3>
+              <small>近 6 个月任务数</small>
+            </header>
+            {trend.length ? (
+              <>
+                <div className="proc-trend-bars">
+                  {trend.map((row) => (
+                    <div key={row.month} title={`${row.month}：${row.task_count} 个任务，批准 ${row.approved_amount}`} style={{ height: "100%" }}>
+                      <div className="proc-trend-col">
+                        <em className="tnum">{row.task_count}</em>
+                        <i style={{ height: `${Math.max(6, (row.task_count / trendMax) * 100)}%` }} />
+                      </div>
+                      <small className="mono">{row.month.slice(5)} 月</small>
+                    </div>
+                  ))}
+                </div>
+                {trend.length < 3 ? (
+                  <p className="proc-sparse-hint">数据月份较少，趋势仅供参考；持续使用两个月以上后趋势更有意义。</p>
+                ) : null}
+              </>
+            ) : (
+              <EmptyState variant="inline" icon={<TrendingUp size={22} />} title="暂无趋势数据" hint="任务按创建月份自动汇入趋势图。" />
+            )}
+            <p className="proc-eval-note">口径：批准金额 = 已批准任务所选报价的到货总价，统一折算为基准币种。</p>
+          </section>
+
+          <section className="proc-report-block">
+            <header>
+              <h3><Trophy size={15} /> 供应商中标排行</h3>
+              <small>按中标次数排序</small>
+            </header>
+            {ranking.length ? (
+              <div className="proc-ranking">
+                {ranking.map((row, index) => (
+                  <div className="proc-rank-row" key={row.id}>
+                    <span className={`proc-rank-no${index < 3 ? " is-top" : ""}`}>{index + 1}</span>
+                    <strong>{row.name}</strong>
+                    <small>{row.win_count}/{row.quote_count} 中标 · 绩效 {Number(row.performance.score).toFixed(1)}</small>
+                    <span className={`proc-rank-level is-${row.performance.level === "黑名单" ? "danger" : "accent"}`}>{row.performance.level}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <EmptyState variant="inline" icon={<Trophy size={22} />} title="暂无中标记录" hint="供应商档案按名称自动关联报价与中标记录。" />
+            )}
+          </section>
+        </div>
       </div>
 
       <section className="proc-report-block">

@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 
 import type { ProcurementAuditReport, ProcurementRequest } from "./types";
+import { rulesetLabel } from "./viewModel";
 
 type Props = {
   request: ProcurementRequest;
@@ -216,7 +217,7 @@ export function ReportView({ request, report, loading, error = null, onReopen }:
         <div className="proc-hash-grid">
           <span><small>采购报告</small><code title={report?.evidence_sha256 || "-"}>{report?.evidence_sha256 || "-"}</code></span>
           <span><small>比价输入</small><code title={request.comparison.input_sha256}>{request.comparison.input_sha256}</code></span>
-          <span><small>规则版本</small><code title={request.comparison.result.ruleset_version}>{request.comparison.result.ruleset_version}</code></span>
+          <span><small>规则版本</small><code title={request.comparison.result.ruleset_version}>{rulesetLabel(request.comparison.result.ruleset_version)}</code></span>
           <span><small>分析运行 ID</small><code title={request.analysis_run_id || "-"}>{request.analysis_run_id || "-"}</code></span>
         </div>
       </section>

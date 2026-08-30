@@ -832,10 +832,13 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .proc-empty-compact strong { color: var(--text-secondary); }
 .proc-no-review {
   display: flex;
-  min-height: 140px;
   align-items: center;
-  justify-content: center;
   gap: 7px;
+  margin: 12px 14px;
+  padding: 8px 12px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 32%, var(--border));
+  border-radius: var(--radius-xs);
+  background: var(--accent-softer);
   color: var(--accent);
   font-size: var(--text-xs);
   font-weight: 650;
@@ -896,6 +899,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .proc-fact small { color: var(--text-muted); font-size: var(--text-micro); font-weight: 600; }
 .proc-fact strong { overflow-wrap: anywhere; color: var(--text); font-size: var(--text-xs); font-weight: 700; }
 .proc-fact strong.mono { font-family: var(--mono); font-weight: 650; }
+/* 订单卡等紧凑事实格里的"20,000 / 20,000"不允许从斜杠处折行 */
+.proc-order-facts .proc-fact strong { white-space: nowrap; }
 
 /* dl 型事实网格（系统信息） */
 .proc-facts-grid {
@@ -1299,6 +1304,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .proc-pro-table th.is-end, .proc-pro-table td.is-end { text-align: right; }
 .proc-pro-tr { cursor: pointer; transition: background var(--dur-fast) var(--ease); }
 .proc-pro-tr:hover td { background: color-mix(in srgb, var(--surface-subtle) 70%, transparent); }
+/* 行可聚焦（键盘 Enter/Space 打开）：焦点环与按钮一致 */
+.proc-pro-tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .proc-pro-tr td code { color: var(--accent); font-family: var(--mono); font-size: var(--text-micro); font-weight: 700; }
 .proc-table-title-cell { display: flex; min-width: 0; flex-direction: column; gap: 1px; }
 .proc-table-title-cell strong { overflow: hidden; font-size: var(--text-xs); font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
@@ -2136,12 +2143,39 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 
 /* 任务主体（会话栏分级宽度，痛点⑤） */
 .proc-task-body {
+  position: relative;
   display: grid;
   min-height: 0;
   flex: 1;
-  grid-template-columns: 300px minmax(0, 1fr);
-  transition: grid-template-columns var(--dur-base) var(--ease);
+  /* 会话栏实宽 = min(用户偏好, 容器宽 - 工作区最小可用宽 520px - 手柄 8px)。
+     窄窗口下把持久化的偏好宽度钳回可用范围，工作区不再被饿死，
+     因此无需再按断点回退默认宽度；偏好值本身保留，回到宽屏自动生效。 */
+  --proc-conv-effective: min(var(--proc-conv-width, 300px), calc(100% - 528px));
+  grid-template-columns: minmax(220px, var(--proc-conv-effective)) 8px minmax(0, 1fr);
+  /* 不做列宽过渡：var() 驱动的 grid 列过渡在 Chrome 会把布局冻结在起点 */
 }
+/* 拖拽中：关闭过渡避免手柄跟不上指针；禁选文本防止高亮闪烁 */
+.proc-task-body.is-resizing { transition: none; cursor: col-resize; user-select: none; }
+/* 会话面板分隔条：本身是一列网格轨道，天然与列边界对齐（≤1080px 单列布局下隐藏） */
+.proc-conv-resizer {
+  z-index: 6;
+  cursor: col-resize;
+  touch-action: none;
+}
+.proc-conv-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background: transparent;
+  transition: background var(--dur-fast) var(--ease);
+}
+.proc-conv-resizer:hover::before,
+.proc-conv-resizer:focus-visible::before,
+.proc-conv-resizer.is-dragging::before { background: var(--accent); }
+.proc-conv-resizer:focus-visible { outline: none; }
 .proc-task-body.conv-collapsed { grid-template-columns: 44px minmax(0, 1fr); }
 .proc-structured-workspace { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; border-left: 1px solid var(--border); background: var(--surface); }
 
@@ -2291,6 +2325,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .proc-message-files svg { flex: 0 0 auto; color: var(--accent); }
 .proc-message-files span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .proc-agent-working { display: flex; align-items: center; gap: 7px; margin: 0 0 12px 34px; color: var(--info); font-size: var(--text-micro); font-weight: 650; }
+.proc-agent-working.is-muted { color: var(--text-muted); }
 .proc-conversation-tools { overflow: hidden; margin: 5px 0 10px 34px; border: 1px solid var(--border); border-radius: var(--radius-xs); background: var(--surface); }
 .proc-conversation-tools > header { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--surface-subtle); color: var(--text-muted); font-size: var(--text-micro); font-weight: 650; }
 .proc-conversation-tools ol { margin: 0; padding: 0; list-style: none; }
@@ -2415,6 +2450,11 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .proc-tabs button:hover { color: var(--text); background: var(--surface-subtle); }
 .proc-tabs button.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 750; }
 .proc-tabs button svg { width: 15px; height: 15px; }
+/* 窄屏 tab 栏可横向滚动：滚动条可见可拖（与比价表一致），避免"最后一个 tab 被裁掉"的错觉 */
+.proc-tabs { scrollbar-width: thin; }
+.proc-tabs::-webkit-scrollbar { height: 6px; }
+.proc-tabs::-webkit-scrollbar-thumb { border-radius: 6px; background: var(--border-strong); }
+.proc-tabs::-webkit-scrollbar-track { background: transparent; }
 .proc-tabs button span {
   display: inline-grid;
   min-width: 17px;
@@ -2662,7 +2702,9 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .proc-evidence-badge { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); font-size: var(--text-micro); font-weight: 750; }
 .proc-evidence-panel small { color: var(--text-muted); font-size: var(--text-micro); }
 .proc-evidence-panel.compact { border: 1px solid var(--border); border-radius: var(--radius-xs); background: var(--surface); }
-.proc-field-table { min-width: 720px; }
+/* 字段表不再强制 720px 最小宽（窄工作区会无声裁切）；
+   视口较窄时证据列折行到字段行下方，编辑区保持满宽可操作 */
+.proc-field-table { min-width: 0; }
 .proc-field-table-head {
   position: sticky;
   z-index: var(--z-sticky);
@@ -2741,6 +2783,19 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 }
 .proc-conflict-chip:hover, .proc-conflict-chip.selected { border-color: var(--warning); box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning) 25%, transparent); }
 .proc-conflict-chip small { overflow: hidden; color: var(--text-muted); font-size: var(--text-micro); opacity: .8; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 任务详情工作区在 1440px 视口下已不足 720px：字段表降为两列，
+   来源证据折行到行下方（表头第三列同步隐藏） */
+@media (max-width: 1560px) {
+  .proc-field-table-head,
+  .proc-field-row { grid-template-columns: minmax(120px, .8fr) minmax(0, 1.6fr); }
+  .proc-field-table-head > span:nth-child(3) { display: none; }
+  .proc-field-row > .proc-field-evidence {
+    grid-column: 1 / -1;
+    padding-top: 5px;
+    border-top: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+  }
+}
 
 /* -------------------------------------------------------- 6. 弹窗/抽屉 */
 .proc-modal-backdrop {
@@ -3061,7 +3116,17 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .proc-order-card > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .proc-order-title { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .proc-order-title code { color: var(--accent); font-family: var(--mono); font-size: var(--text-micro); font-weight: 750; }
-.proc-order-title strong { overflow: hidden; font-size: var(--text-sm); font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+.proc-order-title strong {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: var(--text-sm);
+  font-weight: 750;
+  /* 两行省略：物料名 × 数量较长，单行中截会丢关键字段 */
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  word-break: break-all;
+}
 .proc-order-title small { overflow: hidden; color: var(--text-muted); font-size: var(--text-micro); text-overflow: ellipsis; white-space: nowrap; }
 .proc-order-facts { display: grid; gap: 1px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-xs); background: var(--border); grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .proc-order-facts .proc-fact { padding: 7px 10px; }
@@ -3239,7 +3304,12 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .proc-kpi-card strong { color: var(--text); font-family: var(--mono); font-size: var(--text-2xl); font-weight: 800; letter-spacing: -0.02em; line-height: 1.15; }
 .proc-kpi-card strong.is-accent { color: var(--accent); }
 .proc-kpi-card small { color: var(--text-secondary); font-size: var(--text-micro); overflow-wrap: anywhere; }
-.proc-reports-grid { display: grid; gap: var(--space-4); grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); align-items: start; }
+.proc-reports-grid { display: grid; gap: var(--space-4); grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+/* 两列内各自堆叠，高度互不牵制；窄屏回落单列 */
+.proc-reports-col { display: grid; min-width: 0; gap: var(--space-4); align-content: start; }
+@media (max-width: 920px) {
+  .proc-reports-grid { grid-template-columns: minmax(0, 1fr); }
+}
 .proc-report-block {
   display: flex;
   flex-direction: column;
@@ -3316,6 +3386,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .proc-audit-type { display: inline-flex; align-items: center; gap: 8px; color: var(--text); font-size: var(--text-xs); font-weight: 700; }
 .proc-audit-type i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .proc-audit-row > code { color: var(--text-muted); font-family: var(--mono); font-size: var(--text-micro); background: var(--surface-subtle); border: 1px solid var(--border); padding: 1px 6px; border-radius: 5px; }
+/* 原始事件类型：中文事件名是主文案，英文枚举降为无框次要文字（全称在 title） */
+.proc-audit-row > code.proc-audit-raw-type { padding: 0; border: 0; background: transparent; opacity: .72; }
 .proc-audit-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .proc-audit-scope small { padding: 1px 7px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-subtle); color: var(--text-muted); font-family: var(--mono); font-size: var(--text-micro); }
 .proc-audit-actor { margin-left: auto; color: var(--text-secondary); font-weight: 650; }
@@ -3348,7 +3420,15 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .proc-comparison-counts span { display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 8px 6px; border-right: 1px solid var(--border); background: var(--surface-subtle); color: var(--text-muted); font-size: var(--text-micro); font-weight: 650; }
 .proc-comparison-counts span:last-child { border-right: 0; }
 .proc-comparison-counts strong { color: var(--text); font-family: var(--mono); font-size: var(--text-base); font-weight: 800; }
-.proc-comparison-table-wrap { overflow: auto; border-bottom: 1px solid var(--border); }
+.proc-comparison-table-wrap {
+  overflow: auto;
+  border-bottom: 1px solid var(--border);
+  /* 宽表在窄工作区横向滚动：让滚动条可见可拖，避免"列被无声裁切"的错觉 */
+  scrollbar-width: thin;
+}
+.proc-comparison-table-wrap::-webkit-scrollbar { height: 8px; }
+.proc-comparison-table-wrap::-webkit-scrollbar-thumb { border-radius: 8px; background: var(--border-strong); }
+.proc-comparison-table-wrap::-webkit-scrollbar-track { background: transparent; }
 .proc-comparison-table-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 16px; border-bottom: 1px solid var(--border); background: var(--surface-subtle); color: var(--text-muted); font-size: var(--text-micro); }
 .proc-comparison-table { min-width: 900px; }
 .proc-comparison-table td strong { color: var(--text); }
@@ -3631,14 +3711,16 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 /* ------------------------------------------------------------- 9. 响应式 */
 @media (max-width: 1240px) {
   .proc-master-detail { grid-template-columns: minmax(260px, 300px) minmax(0, 1fr); }
-  .proc-task-body { grid-template-columns: 268px minmax(0, 1fr); }
-  .proc-task-body.conv-collapsed { grid-template-columns: 44px minmax(0, 1fr); }
 }
 @media (max-width: 1080px) {
   .proc-layout, .proc-layout.with-tasks { grid-template-columns: 188px minmax(0, 1fr); }
   .proc-layout.with-tasks { grid-template-columns: 188px 224px minmax(0, 1fr); }
   .proc-fact-grid, .proc-fact-grid.is-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .proc-eval-metrics, .proc-runtime-links { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* 导航已占 412px，两列会把工作区压到不可用：会话栏改为工作区上方的一条 */
+  .proc-task-body { grid-template-columns: minmax(0, 1fr); }
+  .proc-conv-resizer { display: none; }
+  .proc-conversation-shell { max-height: 260px; }
 }
 @media (max-width: 920px) {
   /* 导航折叠为图标列；任务侧栏保留（任务选择入口不可丢） */
@@ -3650,8 +3732,6 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   .proc-rail-status { justify-content: center; }
   .proc-master-detail { grid-template-columns: minmax(0, 1fr); }
   .proc-master-detail-list { max-height: 320px; }
-  .proc-task-body { grid-template-columns: minmax(0, 1fr); }
-  .proc-conversation-shell { max-height: 260px; }
   .proc-order-list { grid-template-columns: minmax(0, 1fr); }
   .proc-dynamic-spec-main { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .proc-dynamic-spec-main > button { align-self: end; grid-column: 2; }
@@ -3776,3 +3856,35 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 
 /* 状态胶囊不折行、不被压缩 */
 .proc-status { flex-shrink: 0; white-space: nowrap; }
+
+/* ------------------------------------------------- 打印（审批报告留档） */
+/* 打印按钮位于报告页头（window.print()）：打印时只输出报告本体，
+   隐藏导航/会话/动作条等应用骨架；滚动容器展开避免报告被裁成一页。 */
+@media print {
+  .proc-topbar,
+  .proc-rail,
+  .proc-sidebar,
+  .proc-conversation-shell,
+  .proc-conv-resizer,
+  .proc-tabs,
+  .proc-next-step,
+  .proc-ai-recovery,
+  .proc-agent-offline,
+  .proc-interaction-card,
+  .proc-report-actions,
+  .proc-view-redirect { display: none !important; }
+  .proc-app, .proc-layout, .proc-layout.with-tasks { display: block; height: auto; }
+  .proc-main, .proc-task-body, .proc-structured-workspace, .proc-tab-content {
+    display: block;
+    height: auto;
+    max-height: none;
+    overflow: visible !important;
+    border: 0;
+    background: #fff;
+  }
+  .proc-request-head { border: 0; }
+  .proc-report-view { border: 0; }
+  .proc-report-hero { border-bottom: 1px solid #d0d7de; }
+  .proc-report-section { break-inside: avoid; border: 1px solid #d0d7de; }
+  body { background: #fff; }
+}

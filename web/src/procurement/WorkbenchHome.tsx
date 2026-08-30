@@ -262,7 +262,9 @@ export function WorkbenchHome({
 
       {/* 4️⃣ 待办任务 + 最近任务：行内副字段差异化（痛点④） */}
       <div className="proc-home-grid">
-        {canOpenTasks ? (
+        {/* 待办为零时不渲染整块空态卡：下方待办条与顶部零值徽章已表达"没有待办"，
+            避免三处零值文案重复占屏；加载中仍显示以避免布局跳变 */}
+        {canOpenTasks && (loading || attention > 0) ? (
           <section className="proc-home-section" aria-label="待办任务">
             <header className="proc-home-section-head">
               <h2>待办任务</h2>
@@ -324,7 +326,19 @@ export function WorkbenchHome({
                     {recent.map((item) => {
                       const qty = quantityText(item);
                       return (
-                        <tr key={item.id} className="proc-pro-tr" onClick={() => onOpenTask(item.id)}>
+                        <tr
+                          key={item.id}
+                          className="proc-pro-tr"
+                          tabIndex={0}
+                          aria-label={`打开采购任务 ${item.reference}`}
+                          onClick={() => onOpenTask(item.id)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              onOpenTask(item.id);
+                            }
+                          }}
+                        >
                           <td><code>{item.reference}</code></td>
                           <td>
                             <div className="proc-table-title-cell">

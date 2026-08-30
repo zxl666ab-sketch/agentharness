@@ -82,8 +82,44 @@ describe("CHALLENGER 1: Visual Layout & Empty / Extreme Data Resilience", () => 
     expect(html).toContain("proc-home");
     expect(html).toContain("proc-cockpit-stats");
     expect(html).toContain("proc-todo-quick-strip");
-    expect(html).toContain("当前没有待办任务，所有流程均已推进");
+    // 零待办不再渲染空态卡（三处零值文案收敛为待办条一处）；加载态除外
+    expect(html).not.toContain("当前没有待办任务，所有流程均已推进");
+    expect(html).toContain("当前没有需要你立即处理的待办入口");
     expect(html).toContain("尚无采购任务");
+  });
+
+  it("renders the todo section while loading and with pending attention items", () => {
+    const withAttention = renderToString(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <WorkbenchHome
+          role="buyer"
+          requests={[{
+            id: "req-1",
+            reference: "RFQ-20260830-01",
+            title: "等待补充信息的任务",
+            category: "ecommerce_packaging",
+            item_name: "热敏标签",
+            quantity: 100,
+            unit: "piece",
+            quote_count: 2,
+            status: "waiting_human",
+            updated_at: "2026-08-30T00:00:00Z",
+          } as ProcurementRequestSummary]}
+          aiTasks={[]}
+          reviews={[]}
+          loading={false}
+          onOpenCreate={vi.fn()}
+          onOpenTask={vi.fn()}
+          onOpenTasks={vi.fn()}
+          onOpenView={vi.fn()}
+          onOpenOrders={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+    expect(withAttention).toContain("待办任务");
+    // React 会在插值处插入注释节点，断言语义而非全字面
+    expect(withAttention).toContain("项待处理");
+    expect(withAttention).toContain("等待你补充信息");
   });
 
   it("renders WorkbenchHome with extreme data (long strings, high numbers, special chars)", () => {

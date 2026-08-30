@@ -114,6 +114,23 @@ export function contractStatusLabel(status: ContractStatus): string {
   return CONTRACT_STATUS_LABELS[status] ?? status;
 }
 
+/**
+ * 规则集版本中文化（如 dynamic-spec-v2 → 动态规格规则 v2）：
+ * 未知版本回退原值，绝不裸露英文枚举当文案；原始值仍可经 title 查看。
+ */
+export function rulesetLabel(version: string | null | undefined): string {
+  if (!version) return "——";
+  const match = /^(.+?)-v(\d+)$/.exec(version.trim());
+  if (!match) return version;
+  const [, family, edition] = match;
+  const FAMILY_LABELS: Record<string, string> = {
+    "dynamic-spec": "动态规格规则",
+    "landed-cost": "到货成本规则",
+    "packaging-quote": "包装报价规则",
+  };
+  return `${FAMILY_LABELS[family] ?? family} v${edition}`;
+}
+
 export function statusTone(status: ProcurementStatus): string {
   return STATUS_TONES[status] ?? "neutral";
 }
