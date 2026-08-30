@@ -1483,6 +1483,9 @@ class RunEngine:
                         {
                             "step": step,
                             "text_len": len(text),
+                            # 会话面板需要展示 Agent 的真实回复；事件里带上文本
+                            # 本体（截断保护），旧事件无此字段时前端自动回退。
+                            "text": text[:4000],
                             "tool_calls": [tc.name for tc in tool_calls],
                             "usage": turn_usage.model_dump(),
                             "provider": request.provider,

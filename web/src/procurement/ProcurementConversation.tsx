@@ -59,6 +59,17 @@ function working(status?: string | null) {
   return status === "pending" || status === "running" || status === "waiting_approval";
 }
 
+// 模型偶尔会把内部指令（如 "call procurement_request_review again."）复述进回复文本。
+// 面向采购员的展示层过滤掉这类工具名旁白与 markdown 加粗符号。
+function cleanModelText(raw: string) {
+  return raw
+    .split("\n")
+    .filter((line) => !/procurement_[a-z_]+/i.test(line) && !/^call\s+[a-z_]+/i.test(line.trim()))
+    .join("\n")
+    .replace(/\*\*/g, "")
+    .trim();
+}
+
 function toolSucceeded(status?: string | null) {
   return status === "succeeded" || status === "completed";
 }
@@ -354,23 +365,32 @@ export function ProcurementConversation({
     const events = eventsQuery.data || [];
     const toolNames = new Map<string, string>();
     let userPrompt = "";
-    const notes: string[] = [];
-    let lastNote = "";
+    // Agent 发言 = 模型真实文本（model_turn_end.text，新事件才有）+ 阶段提示（run_status.reason），按事件顺序合并。
+    const agentLines: Array<{ text: string; seq: number }> = [];
+    let lastLine = "";
+    let maxSeq = 0;
     for (const event of events) {
+      maxSeq = Math.max(maxSeq, event.global_seq);
       if (event.type === "tool_call_start") {
         const name = String(event.payload.name || "");
         if (name) toolNames.set(event.event_id, name);
       } else if (event.type === "run_started" && !userPrompt) {
         userPrompt = String(event.payload.message || "").trim();
+      } else if (event.type === "model_turn_end") {
+        const text = cleanModelText(String(event.payload.text || ""));
+        if (text && text !== lastLine) {
+          agentLines.push({ text, seq: event.global_seq });
+          lastLine = text;
+        }
       } else if (event.type === "run_status") {
         const reason = String(event.payload.reason || "").trim();
-        if (reason && reason !== lastNote) {
-          notes.push(reason);
-          lastNote = reason;
+        if (reason && reason !== lastLine) {
+          agentLines.push({ text: reason, seq: event.global_seq });
+          lastLine = reason;
         }
       }
     }
-    return { toolNames, userPrompt, notes };
+    return { toolNames, userPrompt, agentLines, maxSeq };
   }, [eventsQuery.data]);
   const finalized = !!request.comparison;
   const messages = useMemo(
@@ -382,27 +402,35 @@ export function ProcurementConversation({
     ),
     [finalized, messagesQuery.data]
   );
-  type ChatItem = { id: string; role: "user" | "assistant"; content: string };
+  type ChatItem = { id: string; role: "user" | "assistant"; content: string; seq: number };
+  // 本会话内发出的留言做本地回显（事件流不回传用户消息），seq 取发送时刻之后保证顺序稳定。
+  const [echoes, setEchoes] = useState<Array<{ id: string; text: string; seq: number }>>([]);
   const chatItems = useMemo<ChatItem[]>(() => {
-    const items: ChatItem[] = messages.map((item) => ({
+    const items: ChatItem[] = messages.map((item, index) => ({
       id: item.id,
       role: item.role as "user" | "assistant",
       content: item.content,
+      seq: index,
     }));
-    if (!items.some((item) => item.role === "user") && transcript.userPrompt) {
-      items.unshift({ id: "synth-user", role: "user", content: transcript.userPrompt });
+    if (!items.some((item) => item.role === "user")) {
+      if (transcript.userPrompt) items.unshift({ id: "synth-user", role: "user", content: transcript.userPrompt, seq: 0 });
+      for (const echo of echoes) {
+        items.push({ id: echo.id, role: "user", content: echo.text, seq: echo.seq });
+      }
     }
     if (!items.some((item) => item.role === "assistant")) {
-      transcript.notes.forEach((note, index) =>
-        items.push({ id: `synth-note-${index}`, role: "assistant", content: note })
-      );
+      for (const line of transcript.agentLines) {
+        items.push({ id: `synth-line-${line.seq}`, role: "assistant", content: line.text, seq: line.seq });
+      }
     }
-    return items;
-  }, [messages, transcript]);
+    return items.sort((a, b) => a.seq - b.seq);
+  }, [messages, transcript, echoes]);
   const status = runQuery.data?.status || (runId ? "pending" : "");
   // A failed requirement capture can leave unresolved_field_count at zero even
   // though the Agent has asked the buyer to confirm or correct an input.
   const needsClarification = status === "require_human" && !structuredInteractionActive && !request.comparison && !request.decision;
+  // Agent 在等人时始终可以留言（结构化复核进行中也不例外，只是留言不能替代字段确认）。
+  const canChat = status === "require_human" && !request.decision;
   const canRecover = status === "failed"
     || status === "cancelled"
     || status === "interrupted"
@@ -424,6 +452,11 @@ export function ProcurementConversation({
     try {
       await onResume(value);
       setReply("");
+      setEchoes((current) => [...current, {
+        id: `echo-${Date.now()}`,
+        text: value,
+        seq: transcript.maxSeq + 1 + current.length,
+      }]);
       await Promise.all([runQuery.refetch(), messagesQuery.refetch(), toolsQuery.refetch(), eventsQuery.refetch()]);
     } catch {
       // The workbench surfaces the failure via the actionError banner; the
@@ -479,8 +512,13 @@ export function ProcurementConversation({
         {canRecover && visibleRunError ? <p className="proc-conversation-error" role="alert">{visibleRunError}</p> : null}
         {actionError ? <p className="proc-conversation-error" role="alert">{actionError}</p> : null}
       </div>
-      {needsClarification ? (
+      {canChat ? (
         <form className="proc-conversation-composer reply" onSubmit={(event) => void submitReply(event)}>
+          {structuredInteractionActive ? (
+            <p className="proc-conversation-reply-hint">
+              报价字段确认请在右侧「报价与复核」完成；这里也可以直接给 Agent 留言补充说明。
+            </p>
+          ) : null}
           <textarea
             aria-label="补充澄清信息"
             value={reply}
@@ -491,12 +529,16 @@ export function ProcurementConversation({
                 void submitReply(event);
               }
             }}
-            placeholder="补充 Agent 请求的信息（Enter 发送，Shift+Enter 换行）"
+            placeholder={structuredInteractionActive
+              ? "给 Agent 留言，如「供应商名就是星河包装」（Enter 发送，Shift+Enter 换行）"
+              : "补充 Agent 请求的信息（Enter 发送，Shift+Enter 换行）"}
             maxLength={20_000}
             disabled={sending}
           />
           <button type="submit" title="提交澄清" aria-label="提交澄清" disabled={sending || !reply.trim()}>{sending ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button>
         </form>
+      ) : status === "completed" ? (
+        <p className="proc-conversation-archived" role="status">采购决策已完成，会话已归档；如需继续询价，请复制重开该任务。</p>
       ) : null}
       {request.comparison && !request.decision ? (
         <button className="proc-conversation-next" type="button" onClick={onOpenComparison}><CheckCircle2 size={15} />查看比价并选择供应商</button>

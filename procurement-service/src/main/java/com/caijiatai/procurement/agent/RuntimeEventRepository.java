@@ -33,6 +33,13 @@ public interface RuntimeEventRepository extends JpaRepository<RuntimeEvent, Long
     /** Dedup key includes occurredAt so a regressed global_seq cannot silently drop a new event. */
     boolean existsByGlobalSeqAndOccurredAt(long globalSeq, Instant occurredAt);
 
+    boolean existsByRunIdAndTypeAndOccurredAt(String runId, String type, Instant occurredAt);
+
+    boolean existsByGlobalSeq(long globalSeq);
+
+    @Query("select coalesce(max(event.globalSeq), 0) from RuntimeEvent event")
+    long maxGlobalSeq();
+
     @Modifying
     @Query("update RuntimeEvent event set event.payload = :payload where event.globalSeq = :globalSeq")
     int updatePayload(@Param("globalSeq") long globalSeq, @Param("payload") java.util.Map<String, Object> payload);

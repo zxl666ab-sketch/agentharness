@@ -222,7 +222,7 @@ describe("HumanInteractionPanel", () => {
 });
 
 describe("structured interaction conversation boundary", () => {
-  it("hides the legacy free-text resume when a structured interaction owns the wait", () => {
+  it("keeps the free-text reply available while a structured interaction owns the wait", () => {
     const queryClient = new QueryClient();
     queryClient.setQueryData(["procurement-run", "run-1"], { status: "require_human" });
     queryClient.setQueryData(["procurement-messages", "run-1"], []);
@@ -260,7 +260,8 @@ describe("structured interaction conversation boundary", () => {
     />, queryClient);
     roots.push(mounted.root);
 
-    expect(mounted.host.querySelector('[aria-label="补充澄清信息"]')).toBeNull();
+    expect(mounted.host.querySelector('[aria-label="补充澄清信息"]')).not.toBeNull();
+    expect(mounted.host.textContent).toContain("报价字段确认请在右侧「报价与复核」完成");
     expect(mounted.host.textContent).not.toContain("恢复采购 Agent");
   });
 });

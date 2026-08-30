@@ -2332,7 +2332,27 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .proc-conversation-next:hover { background: color-mix(in srgb, var(--accent-soft) 60%, var(--surface-strong)); }
 .proc-conversation-next.warning { border-color: color-mix(in srgb, var(--warning) 40%, var(--border)); background: var(--warning-soft); color: var(--warning); }
 .proc-conversation-composer { display: flex; flex: 0 0 auto; gap: 7px; padding: 10px 12px 12px; border-top: 1px solid var(--border); background: var(--surface); }
-.proc-conversation-composer.reply { align-items: flex-end; }
+.proc-conversation-composer.reply { flex-wrap: wrap; align-items: flex-end; }
+.proc-conversation-reply-hint {
+  flex: 1 0 100%;
+  margin: 0;
+  padding: 6px 9px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: var(--text-micro);
+  line-height: 1.5;
+}
+.proc-conversation-archived {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 9px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-subtle);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
 .proc-conversation-composer textarea {
   min-height: 58px;
   max-height: 150px;

@@ -723,7 +723,9 @@ class InternalAgentCommands:
             run_id,
             input=(
                 "阶段：复核恢复。采购员补充的信息如下：\n"
-                f"{message}\n仅调用 procurement_request_review。"
+                f"{message}\n"
+                "请先用一两句中文直接回应采购员（确认收到、说明当前卡点或下一步），"
+                "回复面向采购员、不要提及任何工具名称，然后仅调用 procurement_request_review。"
             ),
         )
         self._require_paused(result, RunStatus.require_human, "采购资料复核")

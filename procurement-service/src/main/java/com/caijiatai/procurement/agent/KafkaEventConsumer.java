@@ -57,12 +57,23 @@ public class KafkaEventConsumer {
         // discard genuinely new events that collide with stale sequence numbers.
         var occurredAt = Instant.parse(
                 text(envelope.getOrDefault("occurred_at", Instant.now().toString())));
-        if (events.existsByGlobalSeqAndOccurredAt(globalSeq, occurredAt)) {
+        if (events.existsByGlobalSeqAndOccurredAt(globalSeq, occurredAt)
+                || (!runId.isBlank() && events.existsByRunIdAndTypeAndOccurredAt(runId, eventType, occurredAt))) {
             log.warn("重复事件已跳过：global_seq={} type={}", globalSeq, eventType);
             return;
         }
+        // The agent-side counter can restart below Java's high-water mark (retention
+        // trims the topic and the durable watermark predates a stale island of old
+        // rows). Re-key such events to the tail instead of poisoning the consumer
+        // with a unique-constraint violation on uq_runtime_event_global_seq.
+        var storedSeq = globalSeq;
+        if (events.existsByGlobalSeq(storedSeq)) {
+            storedSeq = events.maxGlobalSeq() + 1;
+            log.warn("事件序号冲突：global_seq={} 已被历史事件占用，改挂到 {} 入库（type={}）",
+                    globalSeq, storedSeq, eventType);
+        }
         events.save(RuntimeEvent.create(
-                globalSeq,
+                storedSeq,
                 taskId.isBlank() ? null : taskId,
                 runId.isBlank() ? null : runId,
                 eventType,
