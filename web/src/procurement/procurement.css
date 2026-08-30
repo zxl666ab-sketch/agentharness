@@ -2154,6 +2154,9 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   overflow: hidden;
   background: var(--surface-subtle);
 }
+/* 面板容器必须参与 flex 收缩，否则消息变多时 aside 被内容撑高、
+   底部留言框会被 shell 的 overflow:hidden 裁掉 */
+.proc-conversation-shell > #proc-conversation-panel { display: flex; min-width: 0; min-height: 0; flex: 1; }
 .proc-conversation-shell.collapsed .proc-conversation-toggle { flex: 1; writing-mode: vertical-rl; justify-content: flex-start; gap: 12px; padding: 12px 6px; }
 .proc-conversation-shell.collapsed .proc-conversation-toggle-status, .proc-conversation-shell.collapsed svg:last-child { display: none; }
 .proc-conversation-toggle {
