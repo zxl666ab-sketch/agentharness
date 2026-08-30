@@ -220,6 +220,8 @@ export const api = {
     requestJson<Record<string, unknown> | null>(`/api/runs/${runId}/checkpoint`),
   messages: (runId: string) =>
     requestJson<MessageRow[]>(`/api/runs/${runId}/messages`),
+  events: (runId: string) =>
+    requestJson<EventRow[]>(`/api/runs/${runId}/events`),
   toolInvocations: (runId: string) =>
     requestJson<ToolInvocationRow[]>(`/api/runs/${runId}/tool-invocations`),
 };

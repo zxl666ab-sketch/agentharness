@@ -24,7 +24,11 @@ import type { ProcurementRequest } from "./types";
 const TOOL_LABELS: Record<string, string> = {
   procurement_read_request: "读取采购任务",
   procurement_capture_requirement: "结构化采购需求",
+  procurement_parse_uploaded_quotes: "解析供应商报价",
+  procurement_request_review: "提交人工复核",
+  procurement_request_comparison: "请求智能比价",
   procurement_execute_analysis: "解析、匹配、复算并比价",
+  procurement_record_decision_evidence: "记录决策依据",
   procurement_approve_supplier: "写入供应商审批",
 };
 
@@ -83,8 +87,9 @@ function userFacingRunError(error: string | null | undefined, request: Procureme
   return "采购 Agent 已暂停，请点击恢复后继续。";
 }
 
-function ToolState({ invocation }: { invocation: ToolInvocationRow }) {
+function ToolState({ invocation, name }: { invocation: ToolInvocationRow; name?: string }) {
   const tone = toolTone(invocation.status);
+  const label = TOOL_LABELS[name || invocation.tool_name] || name || invocation.tool_name || "工具调用";
   return (
     <li className={tone}>
       <span className="proc-conversation-tool-state">
@@ -94,7 +99,7 @@ function ToolState({ invocation }: { invocation: ToolInvocationRow }) {
         {tone === "active" ? <LoaderCircle className="spin" size={14} /> : null}
       </span>
       <span>
-        <strong>{TOOL_LABELS[invocation.tool_name] || invocation.tool_name || "工具调用"}</strong>
+        <strong>{label}</strong>
         <small>{toolSucceeded(invocation.status) ? "已完成" : invocation.status === "failed" ? "失败" : invocation.status === "indeterminate" ? "结果待确认" : "执行中"}</small>
       </span>
     </li>
@@ -336,7 +341,37 @@ export function ProcurementConversation({
     enabled: !!runId,
     refetchInterval: active ? 750 : false,
   });
+  // 后端 messages 投影目前只产出 role:"tool" 条目，真实对话文本存放在事件流里：
+  // run_started.message = 采购员原始诉求，run_status.reason = Agent 阶段发言。
+  const eventsQuery = useQuery({
+    queryKey: ["procurement-events", runId],
+    queryFn: () => api.events(runId!),
+    enabled: !!runId,
+    refetchInterval: active ? 750 : false,
+  });
   const tools = toolsQuery.data || [];
+  const transcript = useMemo(() => {
+    const events = eventsQuery.data || [];
+    const toolNames = new Map<string, string>();
+    let userPrompt = "";
+    const notes: string[] = [];
+    let lastNote = "";
+    for (const event of events) {
+      if (event.type === "tool_call_start") {
+        const name = String(event.payload.name || "");
+        if (name) toolNames.set(event.event_id, name);
+      } else if (event.type === "run_started" && !userPrompt) {
+        userPrompt = String(event.payload.message || "").trim();
+      } else if (event.type === "run_status") {
+        const reason = String(event.payload.reason || "").trim();
+        if (reason && reason !== lastNote) {
+          notes.push(reason);
+          lastNote = reason;
+        }
+      }
+    }
+    return { toolNames, userPrompt, notes };
+  }, [eventsQuery.data]);
   const finalized = !!request.comparison;
   const messages = useMemo(
     () => (messagesQuery.data || []).filter((item) =>
@@ -347,6 +382,23 @@ export function ProcurementConversation({
     ),
     [finalized, messagesQuery.data]
   );
+  type ChatItem = { id: string; role: "user" | "assistant"; content: string };
+  const chatItems = useMemo<ChatItem[]>(() => {
+    const items: ChatItem[] = messages.map((item) => ({
+      id: item.id,
+      role: item.role as "user" | "assistant",
+      content: item.content,
+    }));
+    if (!items.some((item) => item.role === "user") && transcript.userPrompt) {
+      items.unshift({ id: "synth-user", role: "user", content: transcript.userPrompt });
+    }
+    if (!items.some((item) => item.role === "assistant")) {
+      transcript.notes.forEach((note, index) =>
+        items.push({ id: `synth-note-${index}`, role: "assistant", content: note })
+      );
+    }
+    return items;
+  }, [messages, transcript]);
   const status = runQuery.data?.status || (runId ? "pending" : "");
   // A failed requirement capture can leave unresolved_field_count at zero even
   // though the Agent has asked the buyer to confirm or correct an input.
@@ -372,7 +424,7 @@ export function ProcurementConversation({
     try {
       await onResume(value);
       setReply("");
-      await Promise.all([runQuery.refetch(), messagesQuery.refetch(), toolsQuery.refetch()]);
+      await Promise.all([runQuery.refetch(), messagesQuery.refetch(), toolsQuery.refetch(), eventsQuery.refetch()]);
     } catch {
       // The workbench surfaces the failure via the actionError banner; the
       // reply text is preserved so the user can retry.
@@ -397,7 +449,7 @@ export function ProcurementConversation({
         </div>
       </details>
       <div className="proc-conversation-scroll">
-        {messages.map((item, index) => (
+        {chatItems.map((item, index) => (
           <article className={`proc-chat-message ${item.role}`} key={item.id}>
             <span className="proc-chat-avatar">{item.role === "user" ? <UserRound size={14} /> : <Bot size={14} />}</span>
             <div>
@@ -413,13 +465,13 @@ export function ProcurementConversation({
             </div>
           </article>
         ))}
-        {active && !messages.some((item) => item.role === "assistant") ? (
+        {active && !chatItems.some((item) => item.role === "assistant") ? (
           <div className="proc-agent-working"><LoaderCircle className="spin" size={15} />Agent 正在分析报价</div>
         ) : null}
         {visibleTools.length ? (
           <section className="proc-conversation-tools">
             <header><span>工具进度</span><strong>{visibleTools.filter((item) => toolSucceeded(item.status)).length}/{visibleTools.length}</strong></header>
-            <ol>{visibleTools.map((item) => <ToolState invocation={item} key={item.id} />)}</ol>
+            <ol>{visibleTools.map((item) => <ToolState invocation={item} name={transcript.toolNames.get(item.id)} key={item.id} />)}</ol>
             {foldedToolCount ? <small className="proc-conversation-history-note">已折叠 {foldedToolCount} 次失败尝试，完整记录见运行审计</small> : null}
           </section>
         ) : null}

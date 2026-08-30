@@ -228,6 +228,7 @@ export function useRequestQueries(state: WorkbenchState) {
         queryClient.invalidateQueries({ queryKey: ["procurement-run", currentRunId] }),
         queryClient.invalidateQueries({ queryKey: ["procurement-messages", currentRunId] }),
         queryClient.invalidateQueries({ queryKey: ["procurement-tools", currentRunId] }),
+        queryClient.invalidateQueries({ queryKey: ["procurement-events", currentRunId] }),
         queryClient.invalidateQueries({ queryKey: ["run-report", currentRunId] }),
         queryClient.invalidateQueries({ queryKey: ["run-checkpoint", currentRunId] }),
       ]);
@@ -278,6 +279,7 @@ export function useRequestQueries(state: WorkbenchState) {
       await queryClient.invalidateQueries({ queryKey: ["procurement-run", updated.analysis_run_id] });
       await queryClient.invalidateQueries({ queryKey: ["procurement-messages", updated.analysis_run_id] });
       await queryClient.invalidateQueries({ queryKey: ["procurement-tools", updated.analysis_run_id] });
+      await queryClient.invalidateQueries({ queryKey: ["procurement-events", updated.analysis_run_id] });
       await queryClient.invalidateQueries({ queryKey: ["run-report", updated.analysis_run_id] });
       await queryClient.invalidateQueries({ queryKey: ["run-checkpoint", updated.analysis_run_id] });
     }
