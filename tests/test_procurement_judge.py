@@ -50,6 +50,7 @@ _REQUIREMENT = {
     "unit": "piece",
     "specifications": {"width_mm": "250"},
     "constraints": {"max_lead_days": 15, "invoice_required": True, "max_landed_unit_cost": "0.70"},
+    "analysis_as_of": "2026-07-27T00:00:00+00:00",
 }
 
 
@@ -66,6 +67,8 @@ def test_facts_hide_expected_answers() -> None:
     assert "快递袋" in prompt
     assert "5200.00" in prompt
     assert "max_lead_days" in prompt
+    # 评估基准日必须可见：否则 expired 类排除无法核验，正确结论会被误判为幻觉
+    assert "analysis_as_of" in prompt
     # 期望答案绝不泄漏给 Judge
     assert "expected" not in prompt.lower().replace("output_schema", "")
     for dim in JUDGE_DIMENSIONS:

@@ -48,7 +48,11 @@ class JudgeResponseError(ValueError):
 
 
 def case_to_facts(case: Mapping[str, Any], requirement: Mapping[str, Any]) -> dict[str, Any]:
-    """把冻结评测的 raw case 转成 Judge 可见事实（不含期望答案）。"""
+    """把冻结评测的 raw case 转成 Judge 可见事实（不含期望答案）。
+
+    requirement 必须携带 analysis_as_of（评估基准日）：否则 Judge 无法核验
+    "expired" 类排除的证据，会把正确结论误判为幻觉。
+    """
     return {
         "case_id": str(case["case_id"]),
         "variant": "clean",
@@ -58,6 +62,7 @@ def case_to_facts(case: Mapping[str, Any], requirement: Mapping[str, Any]) -> di
             "unit": requirement.get("unit"),
             "specifications": requirement.get("specifications", {}),
             "constraints": requirement.get("constraints", {}),
+            "analysis_as_of": requirement.get("analysis_as_of"),
         },
         "extracted_fields": {
             str(field["name"]): field.get("final_value") for field in case.get("fields", [])
@@ -94,11 +99,13 @@ def perturb_facts(facts: Mapping[str, Any], kind: str) -> dict[str, Any]:
     elif kind == "exclusion_removed":
         exclusions = list(conclusion.get("exclusions") or [])
         if exclusions:
-            exclusions.pop()
+            # 全量漏检 → 资格判定必然翻转（留一条正确排除会留下
+            # "最终判定未变" 的歧义样本，Judge 判 correct 也说得通）
+            conclusion["exclusions"] = []
+            conclusion["eligible"] = True
         else:
-            exclusions.append("budget")
-        conclusion["exclusions"] = exclusions
-        conclusion["eligible"] = not exclusions
+            conclusion["exclusions"] = ["budget"]
+            conclusion["eligible"] = False
     elif kind == "match_flipped":
         conclusion["item_match"] = not bool(conclusion.get("item_match"))
     else:

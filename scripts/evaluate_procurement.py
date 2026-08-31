@@ -1467,7 +1467,8 @@ def judge_evaluation(args: argparse.Namespace) -> None:
     truth = load_frozen_truth()
     result = evaluate_frozen_cases()
     cases = result["approaches"]["agent_assisted"]["raw"]["cases"]
-    requirement = truth["request"]
+    # analysis_as_of 在 truth 顶层：并入 requirement 供 Judge 核验 expired 类排除
+    requirement = {**truth["request"], "analysis_as_of": truth.get("analysis_as_of")}
     ainvoke, judge_model = _judge_invoke(args)
     if args.provider == "fake":
         print("警告：--provider fake 仅验证接线，报告不构成任何质量证据！", file=sys.stderr)
