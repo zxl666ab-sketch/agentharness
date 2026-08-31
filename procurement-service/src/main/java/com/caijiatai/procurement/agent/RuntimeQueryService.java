@@ -29,18 +29,21 @@ public final class RuntimeQueryService {
     private final RuntimeReportProjectionRepository reports;
     private final ProcurementTaskRepository tasks;
     private final BusinessArtifactRepository artifacts;
+    private final CostService costService;
 
     public RuntimeQueryService(
             RuntimeEventRepository events,
             ProcurementDecisionRepository decisions,
             RuntimeReportProjectionRepository reports,
             ProcurementTaskRepository tasks,
-            BusinessArtifactRepository artifacts) {
+            BusinessArtifactRepository artifacts,
+            CostService costService) {
         this.events = events;
         this.decisions = decisions;
         this.reports = reports;
         this.tasks = tasks;
         this.artifacts = artifacts;
+        this.costService = costService;
     }
 
     public boolean agentAvailable() {
@@ -65,7 +68,7 @@ public final class RuntimeQueryService {
         var rows = new ArrayList<>(events.findByRunId(
                 runId, PageRequest.of(0, 100, Sort.by("globalSeq").descending())));
         java.util.Collections.reverse(rows);
-        var usage = usageOf(rows);
+        var usage = usageOf(rows, runId);
         var first = events.findFirstByRunIdOrderByGlobalSeqAsc(runId)
                 .orElse(rows.isEmpty() ? null : rows.getFirst());
         var eventCount = Math.max(events.countByRunId(runId), rows.size());
@@ -155,7 +158,7 @@ public final class RuntimeQueryService {
         report.put("tools", toolRows);
         report.put("approvals", approvalRows);
         report.put("artifacts", artifactRows);
-        report.put("usage", usageOf(rows));
+        report.put("usage", usageOf(rows, runId));
         report.put("events", eventRows);
         report.put("source", source);
         report.put("evidence_sha256", CanonicalJson.sha256(report));
@@ -284,7 +287,7 @@ public final class RuntimeQueryService {
         return "unknown";
     }
 
-    private Map<String, Object> usageOf(List<RuntimeEvent> rows) {
+    private Map<String, Object> usageOf(List<RuntimeEvent> rows, String runId) {
         for (int index = rows.size() - 1; index >= 0; index--) {
             var row = rows.get(index);
             if (!List.of("run_completed", "run_failed", "run_cancelled", "run_interrupted")
@@ -295,6 +298,7 @@ public final class RuntimeQueryService {
             if (!usage.isEmpty()) {
                 usage.putIfAbsent("total_tokens", 0L);
                 usage.putIfAbsent("model_turns", 0L);
+                costService.applyCost(runId, usage);
                 return usage;
             }
         }
@@ -319,6 +323,7 @@ public final class RuntimeQueryService {
         result.put("model_turns", modelTurns);
         result.put("estimated_cost_usd", null);
         result.put("cost_status", "unknown");
+        costService.applyCost(runId, result);
         return result;
     }
 

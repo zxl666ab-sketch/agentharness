@@ -145,6 +145,8 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-}
+      # 成本面板计价真源（JSON：模型名 → 每百万 token 美元价，"*" 为兜底键）；未设置时如实显示未计价
+      PROCUREMENT_MODEL_PRICING: ${PROCUREMENT_MODEL_PRICING:-}
       APP_REDIS_ENABLED: "true"
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}

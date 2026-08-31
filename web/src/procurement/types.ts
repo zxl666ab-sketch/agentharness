@@ -748,6 +748,44 @@ export type SupplierRankingRow = SupplierView;
 
 export type CategoryDistribution = Array<{ category: string; count: number }>;
 
+/** 成本面板（/api/procurement/costs）：按模型/任务归集的 token 与计价。 */
+export type ModelCostRow = {
+  model: string;
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  model_turns: number;
+  cost_usd: string | number | null;
+  priced: boolean;
+};
+
+export type TaskCostRow = {
+  task_id: string | null;
+  run_id: string | null;
+  model_turns: number;
+  total_tokens: number;
+  cost_usd: string | number | null;
+  priced: boolean;
+};
+
+export type ModelCostSummary = {
+  cost_status: "priced" | "partial" | "unpriced";
+  pricing_configured: boolean;
+  pricing_snapshot: Record<string, Record<string, string | number | null>>;
+  pricing_error?: string;
+  total_cost_usd: string | number;
+  unpriced_tokens: number;
+  totals: {
+    input_tokens: number;
+    cached_input_tokens: number;
+    output_tokens: number;
+    model_turns: number;
+    cache_hit_rate: string | number;
+  };
+  by_model: ModelCostRow[];
+  by_task: TaskCostRow[];
+};
+
 export type AuditEventView = {
   id: string;
   task_id: string | null;

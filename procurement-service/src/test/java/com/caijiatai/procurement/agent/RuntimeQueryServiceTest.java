@@ -29,7 +29,8 @@ class RuntimeQueryServiceTest {
                 mock(ProcurementDecisionRepository.class),
                 mock(RuntimeReportProjectionRepository.class),
                 mock(ProcurementTaskRepository.class),
-                mock(BusinessArtifactRepository.class));
+                mock(BusinessArtifactRepository.class),
+                new CostService(events, new ModelPricingService("")));
         var fresh = RuntimeEvent.create(7L, null, null, "heartbeat.ping", Map.of(),
                 Instant.now().minusSeconds(2));
         when(events.findFirstByTypeOrderByOccurredAtDesc("heartbeat.ping")).thenReturn(Optional.of(fresh));
@@ -69,7 +70,8 @@ class RuntimeQueryServiceTest {
         when(tasks.findFirstByAnalysisRunId(runId)).thenReturn(Optional.empty());
         when(decisions.findByRunIdOrderByCreatedAtAsc(runId)).thenReturn(List.of());
 
-        var report = new RuntimeQueryService(events, decisions, reports, tasks, artifacts).report(runId);
+        var report = new RuntimeQueryService(events, decisions, reports, tasks, artifacts,
+                new CostService(events, new ModelPricingService(""))).report(runId);
 
         assertThat(report).containsKeys(
                 "schema_version", "run_id", "conclusion", "verification", "workspace_changes",
@@ -97,8 +99,9 @@ class RuntimeQueryServiceTest {
         when(events.findByRunId(any(), any(Pageable.class))).thenReturn(List.of());
         when(tasks.findFirstByAnalysisRunId(runId)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> new RuntimeQueryService(events, decisions, reports, tasks, artifacts)
-                .report(runId)).isInstanceOf(ApiException.class)
+        assertThatThrownBy(() -> new RuntimeQueryService(events, decisions, reports, tasks, artifacts,
+                new CostService(events, new ModelPricingService(""))).report(runId))
+                .isInstanceOf(ApiException.class)
                 .satisfies(error -> assertThat(((ApiException) error).code()).isEqualTo("run_not_found"));
     }
 
@@ -125,7 +128,8 @@ class RuntimeQueryServiceTest {
         when(events.countByRunId(runId)).thenReturn(249L);
         when(tasks.findFirstByAnalysisRunId(runId)).thenReturn(Optional.empty());
 
-        var run = new RuntimeQueryService(events, decisions, reports, tasks, artifacts).run(runId);
+        var run = new RuntimeQueryService(events, decisions, reports, tasks, artifacts,
+                new CostService(events, new ModelPricingService(""))).run(runId);
 
         assertThat(run).containsEntry("status", "waiting_approval");
         assertThat(run).containsEntry("event_count", 249L);

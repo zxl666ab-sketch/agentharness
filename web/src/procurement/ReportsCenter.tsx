@@ -1,8 +1,21 @@
 import { useQuery } from "@tanstack/react-query";
-import { BarChart3, Bell, PieChart, TrendingUp, Trophy } from "lucide-react";
+import { BarChart3, Bell, Coins, PieChart, TrendingUp, Trophy } from "lucide-react";
 
 import { procurementApi } from "./api";
 import { CenterPage, EmptyState, ErrorState, PageHeader, categoryLabel } from "../components/ui";
+
+const COST_STATUS_LABELS: Record<string, string> = {
+  priced: "已计价",
+  partial: "部分计价",
+  unpriced: "未计价",
+};
+
+function formatUsd(value: string | number | null): string {
+  if (value == null) return "—";
+  const usd = Number(value);
+  if (!Number.isFinite(usd)) return "—";
+  return `$${usd >= 0.01 ? usd.toFixed(2) : usd.toFixed(4)}`;
+}
 
 const STATUS_LABELS: Record<string, string> = {
   draft: "需求整理中",
@@ -50,6 +63,11 @@ export function ReportsCenter() {
     queryKey: ["procurement-evaluation"],
     queryFn: procurementApi.evaluation,
   });
+  const costQuery = useQuery({
+    queryKey: ["procurement-costs"],
+    queryFn: procurementApi.costSummary,
+    refetchInterval: 30_000,
+  });
 
   const overview = overviewQuery.data;
   const funnel = overview?.status_funnel || [];
@@ -58,6 +76,7 @@ export function ReportsCenter() {
   const ranking = rankingQuery.data || [];
   const categories = categoriesQuery.data || [];
   const evaluation = evaluationQuery.data;
+  const costs = costQuery.data;
   const trendMax = Math.max(1, ...trend.map((row) => row.task_count));
 
   return (
@@ -66,7 +85,7 @@ export function ReportsCenter() {
         <PageHeader
           icon={<BarChart3 size={18} />}
           title="统计报表"
-          subtitle="状态漏斗 / 月度趋势 / 供应商中标排行 / 品类分布 / 成本节约率 / AI 评测"
+          subtitle="状态漏斗 / 月度趋势 / 供应商中标排行 / 品类分布 / 成本节约率 / 模型成本 / AI 评测"
         />
       }
     >
@@ -190,6 +209,85 @@ export function ReportsCenter() {
           </section>
         </div>
       </div>
+
+      <section className="proc-report-block">
+        <header>
+          <h3><Coins size={15} /> 模型成本</h3>
+          <small>按模型与任务归集的 token 用量与计价（未计价不折算为免费）</small>
+        </header>
+        {costQuery.isPending ? <div className="proc-loading-line"><Coins size={15} />正在汇总成本…</div> : null}
+        {costQuery.isError ? <p className="proc-muted" role="alert">成本数据加载失败</p> : null}
+        {costs ? (
+          <>
+            <div className="proc-report-kpis">
+              <div className="proc-kpi-card">
+                <span>已计价成本</span>
+                <strong className="tnum is-accent">{formatUsd(costs.total_cost_usd)}</strong>
+                <small>{COST_STATUS_LABELS[costs.cost_status] || costs.cost_status}
+                  {costs.unpriced_tokens > 0 ? ` · ${costs.unpriced_tokens.toLocaleString()} tokens 未计价` : ""}
+                </small>
+              </div>
+              <div className="proc-kpi-card">
+                <span>Prompt Cache 命中率</span>
+                <strong className="tnum">{(Number(costs.totals.cache_hit_rate) * 100).toFixed(1)}%</strong>
+                <small>缓存命中 {costs.totals.cached_input_tokens.toLocaleString()} / 输入 {costs.totals.input_tokens.toLocaleString()}</small>
+              </div>
+              <div className="proc-kpi-card">
+                <span>模型调用轮次</span>
+                <strong className="tnum">{costs.totals.model_turns.toLocaleString()}</strong>
+                <small>输出 {costs.totals.output_tokens.toLocaleString()} tokens</small>
+              </div>
+              <div className="proc-kpi-card">
+                <span>定价配置</span>
+                <strong className="tnum">{costs.pricing_configured ? `${Object.keys(costs.pricing_snapshot).length} 个模型` : "未配置"}</strong>
+                <small>{costs.pricing_error ? "定价解析失败，已按未计价处理" : "来源 PROCUREMENT_MODEL_PRICING"}</small>
+              </div>
+            </div>
+            {costs.by_model.length ? (
+              <div className="proc-cost-table-wrap">
+                <table className="proc-cost-table">
+                  <thead>
+                    <tr><th>模型</th><th>输入</th><th>缓存命中</th><th>输出</th><th>轮次</th><th>成本</th></tr>
+                  </thead>
+                  <tbody>
+                    {costs.by_model.map((row) => (
+                      <tr key={row.model}>
+                        <td className="mono">{row.model}</td>
+                        <td className="tnum">{row.input_tokens.toLocaleString()}</td>
+                        <td className="tnum">{row.cached_input_tokens.toLocaleString()}</td>
+                        <td className="tnum">{row.output_tokens.toLocaleString()}</td>
+                        <td className="tnum">{row.model_turns.toLocaleString()}</td>
+                        <td className="tnum">{row.priced ? formatUsd(row.cost_usd) : "未计价"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <EmptyState variant="inline" icon={<Coins size={22} />} title="暂无模型调用记录" hint="触发一次 AI 比价分析后，成本会在此按模型与任务归集。" />
+            )}
+            {costs.by_task.length ? (
+              <details className="proc-cost-tasks">
+                <summary>按任务查看（{costs.by_task.length}）</summary>
+                <table className="proc-cost-table">
+                  <thead><tr><th>任务</th><th>轮次</th><th>tokens</th><th>成本</th></tr></thead>
+                  <tbody>
+                    {costs.by_task.slice(0, 20).map((row) => (
+                      <tr key={row.task_id || row.run_id || Math.random()}>
+                        <td className="mono">{(row.task_id || row.run_id || "—").slice(0, 12)}</td>
+                        <td className="tnum">{row.model_turns.toLocaleString()}</td>
+                        <td className="tnum">{row.total_tokens.toLocaleString()}</td>
+                        <td className="tnum">{row.priced ? formatUsd(row.cost_usd) : "未计价"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </details>
+            ) : null}
+            <p className="proc-eval-note">口径：成本 = Σ（各模型 token × 每百万单价），缓存命中部分按缓存单价单独计价；未配置定价的模型如实标记未计价，绝不折算为零成本。</p>
+          </>
+        ) : null}
+      </section>
 
       <section className="proc-report-block">
         <header>

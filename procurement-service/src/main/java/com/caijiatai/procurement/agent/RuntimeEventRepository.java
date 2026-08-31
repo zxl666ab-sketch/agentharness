@@ -20,6 +20,12 @@ public interface RuntimeEventRepository extends JpaRepository<RuntimeEvent, Long
 
     long countByRunIdAndType(String runId, String type);
 
+    /** Full per-run turn scan for cost accounting (not subject to the 100-row read window). */
+    List<RuntimeEvent> findByRunIdAndType(String runId, String type);
+
+    /** Bounded platform-wide turn scan for the cost panel (see CostService). */
+    List<RuntimeEvent> findTop50000ByTypeOrderByGlobalSeqAsc(String type);
+
     // Freshness lookups must order by occurredAt: the agent-side global_seq counter can
     // regress after Kafka retention prunes the topic (LIVE-1), so "highest seq" is not
     // necessarily the "newest" event.

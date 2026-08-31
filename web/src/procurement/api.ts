@@ -19,6 +19,7 @@ import type {
   InvoicePage,
   InvoiceStatus,
   InvoiceView,
+  ModelCostSummary,
   OrderPage,
   OrderStatus,
   OrderView,
@@ -519,6 +520,7 @@ export const procurementApi = {
   insightsSupplierRanking: (limit = 10) =>
     requestJson<SupplierRankingRow[]>(`/api/procurement/insights/supplier-ranking?limit=${limit}`),
   insightsCategories: () => requestJson<CategoryDistribution>("/api/procurement/insights/categories"),
+  costSummary: () => requestJson<ModelCostSummary>("/api/procurement/costs"),
   auditEvents: (filters: {
     type?: string;
     actor?: string;

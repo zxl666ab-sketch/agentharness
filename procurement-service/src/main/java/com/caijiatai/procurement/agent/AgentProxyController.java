@@ -21,16 +21,22 @@ public final class AgentProxyController {
     private final com.caijiatai.procurement.api.EventStreamService eventStream;
     private final RuntimeQueryService runtimeQuery;
     private final AppProperties properties;
+    private final CostService costService;
+    private final ModelPricingService pricing;
     private final byte[] frozenEvaluation;
 
     public AgentProxyController(tools.jackson.databind.ObjectMapper mapper,
             com.caijiatai.procurement.api.EventStreamService eventStream,
             RuntimeQueryService runtimeQuery,
-            AppProperties properties) {
+            AppProperties properties,
+            CostService costService,
+            ModelPricingService pricing) {
         this.mapper = mapper;
         this.eventStream = eventStream;
         this.runtimeQuery = runtimeQuery;
         this.properties = properties;
+        this.costService = costService;
+        this.pricing = pricing;
         try {
             this.frozenEvaluation = new ClassPathResource("frozen/frozen-evaluation.json")
                     .getInputStream().readAllBytes();
@@ -74,11 +80,22 @@ public final class AgentProxyController {
                 "AGENTHARNESS_PROCUREMENT_REASONING_EFFORT", "none"));
         config.put("api_key_configured", provider.equals("openai") && !apiKey.isBlank());
         // J-M6: no key material (not even a 4-char prefix) in GET responses.
-        config.put("input_price_per_million_usd", null);
-        config.put("output_price_per_million_usd", null);
-        config.put("cached_input_price_per_million_usd", null);
+        // 定价来自 PROCUREMENT_MODEL_PRICING（Java 成本面板唯一计价真源）；未配置如实为 null。
+        var activePrice = pricing.priceFor(String.valueOf(config.get("model"))).orElse(null);
+        config.put("input_price_per_million_usd", activePrice == null ? null : activePrice.inputPerMillionUsd());
+        config.put("output_price_per_million_usd", activePrice == null ? null : activePrice.outputPerMillionUsd());
+        config.put("cached_input_price_per_million_usd",
+                activePrice == null ? null : activePrice.cachedInputPerMillionUsd());
         config.put("max_cost_usd", null);
+        config.put("model_pricing", pricing.snapshot());
+        pricing.parseError().ifPresent(error -> config.put("pricing_error", error));
         return config;
+    }
+
+    /** 成本面板数据源：按模型/任务归集的全量 token 与计价（未计价 token 如实单列）。 */
+    @GetMapping("/api/procurement/costs")
+    Object costs() {
+        return costService.platformSummary();
     }
 
     private ResponseEntity<byte[]> json(Object value) {
