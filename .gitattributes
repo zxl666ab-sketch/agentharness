@@ -1,3 +1,24 @@
 
-# Java 托管的 Web 构建产物与 web/dist 逐字节一致，禁止行尾转换
-procurement-service/src/main/resources/static/** eol=lf
+# 全库统一 LF：Windows 检出也拿到 LF，保证 vite/rollup 的 chunk 哈希在
+# 本地 / Docker / CI 三端逐字节一致（此前 autocrlf 把 ts/tsx 转 CRLF，
+# 导致 committed static 与 Linux 构建永远对不上）
+* text=auto eol=lf
+
+# 二进制：禁止任何行尾转换
+*.png binary
+*.jpg binary
+*.gif binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.ttc binary
+*.xlsx binary
+*.xls binary
+*.pdf binary
+*.db binary
+*.zip binary
+*.jar binary
+*.ico binary
+
+# Java 托管的 Web 构建产物与 web/dist 逐字节一致（eol=lf 已由全局覆盖）
+procurement-service/src/main/resources/static/** eol=lf -text
