@@ -6,6 +6,7 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import platform
 import sys
 import time
@@ -26,6 +27,16 @@ from agentharness.procurement.evaluation import (
     load_frozen_truth,
     recompute_approach_metrics,
     recompute_human_trial_metrics,
+)
+from agentharness.procurement.judge import (
+    JUDGE_DIMENSIONS,
+    PERTURBATION_KINDS,
+    case_to_facts,
+    ground_truth_verdict,
+    human_verdicts,
+    judge_cases,
+    perturb_facts,
+    summarize_judge,
 )
 
 PROCUREMENT_TOOL_NAMES = (
@@ -1387,6 +1398,160 @@ def verify_evaluation(args: argparse.Namespace) -> None:
     )
 
 
+def _judge_invoke(args: argparse.Namespace):
+    """构造 (invoke, judge_model_label)。fake 仅用于接线冒烟，不产出证据。"""
+    if args.provider == "fake":
+        def invoke(prompt: str) -> str:  # noqa: ARG001
+            return json.dumps(
+                {"scores": dict.fromkeys(JUDGE_DIMENSIONS, 1.0), "verdict": "correct", "reasons": []}
+            )
+        return invoke, "fake(wiring-check-only)"
+
+    import asyncio
+
+    from agentharness.contracts import Message, MessageRole, ModelRequest, StreamItemType
+    from agentharness.providers.openai_adapter import OpenAIResponsesAdapter
+
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("LLM Judge 需要 OPENAI_API_KEY（离线接线冒烟可用 --provider fake）")
+    model = (
+        args.model
+        or os.environ.get("PROCUREMENT_JUDGE_MODEL")
+        or os.environ.get("OPENAI_MODEL")
+        or ""
+    ).strip()
+    if not model:
+        raise ValueError("未配置 Judge 模型：--model 或 PROCUREMENT_JUDGE_MODEL/OPENAI_MODEL")
+    adapter = OpenAIResponsesAdapter(
+        api_key=api_key,
+        base_url=os.environ.get("OPENAI_BASE_URL") or None,
+        default_model=model,
+        api_mode=os.environ.get("AGENTHARNESS_PROCUREMENT_API_MODE", "auto"),
+        use_env=False,
+    )
+    loop = asyncio.new_event_loop()
+
+    async def _once(prompt: str) -> str:
+        chunks: list[str] = []
+        async for item in adapter.stream(
+            ModelRequest(
+                model=model,
+                system="You are an independent read-only verifier. Return JSON only.",
+                messages=[Message(role=MessageRole.user, content=prompt)],
+                tools=[],
+                temperature=0,
+                max_tokens=1500,
+            )
+        ):
+            if item.type == StreamItemType.text_delta and item.text:
+                chunks.append(item.text)
+            elif item.type == StreamItemType.error:
+                raise RuntimeError(item.error or "judge provider error")
+        return "".join(chunks)
+
+    def invoke(prompt: str) -> str:
+        return loop.run_until_complete(_once(prompt))
+
+    return invoke, model
+
+
+def judge_evaluation(args: argparse.Namespace) -> None:
+    """LLM-as-a-Judge：评审 31 例冻结比价结论 + 注入错误对照组，校准 Judge-真值一致率。
+
+    Judge 只看需求、抽取事实与系统结论（看不到期望答案）；真值裁定来自人工冻结
+    期望逐项比对，注入错误（成本漂移/漏检排除/匹配翻转）提供 incorrect 侧样本。
+    """
+    truth = load_frozen_truth()
+    result = evaluate_frozen_cases()
+    cases = result["approaches"]["agent_assisted"]["raw"]["cases"]
+    requirement = truth["request"]
+    invoke, judge_model = _judge_invoke(args)
+    if args.provider == "fake":
+        print("警告：--provider fake 仅验证接线，报告不构成任何质量证据！", file=sys.stderr)
+
+    facts_clean = [case_to_facts(case, requirement) for case in cases]
+    facts_perturbed: list[dict] = []
+    if args.perturbations != "none":
+        kinds = (
+            PERTURBATION_KINDS
+            if args.perturbations == "all"
+            else PERTURBATION_KINDS[:1]
+        )
+        for index, facts in enumerate(facts_clean):
+            facts_perturbed.append(
+                perturb_facts(facts, kinds[index % len(kinds)])
+            )
+
+    results = judge_cases(facts_clean + facts_perturbed, invoke, retries=args.retries)
+
+    reference: dict[str, bool] = {}
+    for case in cases:
+        reference[f"{case['case_id']}#clean"] = ground_truth_verdict(case)
+    for facts in facts_perturbed:
+        reference[f"{facts['case_id']}#{facts['variant']}"] = False
+    summary = summarize_judge(results, reference=reference)
+
+    # 人工盲测校准仅在数据集版本一致时启用（v2 观察不得校准 v3 结论）
+    human_calibration: dict[str, Any]
+    trial_path = args.manual_trial
+    if trial_path and trial_path.exists():
+        trial = _read_json(trial_path)
+        if trial.get("truth_sha256") != result["truth_sha256"]:
+            human_calibration = {
+                "status": "skipped_dataset_drift",
+                "reason": (
+                    f"盲测记录基于 {trial.get('dataset')}（指纹 {str(trial.get('truth_sha256'))[:12]}…），"
+                    f"与当前冻结集 {result['dataset']} 不一致，不作为校准依据"
+                ),
+            }
+        else:
+            system_by_case = {
+                str(case["case_id"]): {
+                    "landed_total_base": case["actual_landed_total_base"],
+                    "item_match": case["actual_match"],
+                    "exclusion_codes": case["detected_exclusions"],
+                }
+                for case in cases
+            }
+            human = {
+                f"{case_id}#clean": verdict
+                for case_id, verdict in human_verdicts(
+                    trial.get("observations") or [], system_by_case
+                ).items()
+            }
+            human_calibration = {
+                "status": "applied",
+                **summarize_judge(results, reference=human)["calibration"],
+            }
+    else:
+        human_calibration = {"status": "no_trial_record"}
+
+    report = {
+        "schema_version": 2,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "dataset": result["dataset"],
+        "truth_sha256": result["truth_sha256"],
+        "judge_model": judge_model,
+        "independence_note": (
+            "被评审对象为确定性解析器 + Java 比价引擎（全程无 LLM 参与），"
+            "Judge 模型与被评系统天然异源，满足独立评审纪律。"
+        ),
+        "rubric_dimensions": list(JUDGE_DIMENSIONS),
+        "pass_threshold": 0.9,
+        "perturbations": args.perturbations,
+        "results": results,
+        "summary": summary,
+        "human_calibration": human_calibration,
+    }
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    _write_json(output / "judge-report.json", report)
+    print(f"Judge 评审报告已写入：{output / 'judge-report.json'}")
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    print(json.dumps(human_calibration, ensure_ascii=False, indent=2))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="采购冻结评测与人工对照记录")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1489,9 +1654,31 @@ def main() -> None:
     )
     verify.set_defaults(handler=verify_evaluation)
 
+    judge = subparsers.add_parser(
+        "judge",
+        help="LLM-as-a-Judge 四维 rubric 评审比价结论（可用人工盲测校准一致率）",
+    )
+    judge.add_argument("--output", type=Path, default=Path("output/procurement-evaluation"))
+    judge.add_argument(
+        "--manual-trial",
+        type=Path,
+        default=Path("output/procurement-evaluation/manual-trial.json"),
+        help="人工盲测记录；存在则计算 Judge-人工一致率与 Cohen's kappa",
+    )
+    judge.add_argument("--model", default=None, help="Judge 模型名（默认 PROCUREMENT_JUDGE_MODEL/OPENAI_MODEL）")
+    judge.add_argument("--provider", choices=("openai", "fake"), default="openai")
+    judge.add_argument(
+        "--perturbations",
+        choices=("none", "one", "all"),
+        default="one",
+        help="注入错误对照组：none=仅干净结论；one=每例 1 种（成本漂移）；all=每例 3 种",
+    )
+    judge.add_argument("--retries", type=int, default=1)
+    judge.set_defaults(handler=judge_evaluation)
+
     args = parser.parse_args()
     if not hasattr(args, "handler"):
-        parser.error("请选择 run、human-trial、capture-workflow 或 verify")
+        parser.error("请选择 run、human-trial、capture-workflow、verify 或 judge")
     try:
         args.handler(args)
     except (ValueError, FileNotFoundError, OSError) as exc:
