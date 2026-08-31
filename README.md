@@ -88,6 +88,7 @@ flowchart LR
 - **前端闭环（P1）**：任务详情 9 步闭环进度条（创建需求→报价→复核→比价→审批→订单→收货→对账→付款，已批准任务按订单/对账生命周期继续推进）；状态驱动的「下一步」引导条（卡点原因可见，不再只靠 hover）；已批准任务一键直达其订单（`order_task` 聚焦视图，可返回任务）；对话面板默认折叠、字段复核默认仅待复核、比价明细列与证据指纹收进可展开面板；全站状态文案共用 `viewModel.ts` 单一映射（无英文枚举直出）。
 - **供应商档案（K1）**：与报价/中标按名称自动关联；删除保护（有报价历史 409）；绩效评分实时派生（口径见上）。
 - **LLM 网关（P2-1）**：Python Agent 侧按 provider 叠加并发配额（Semaphore）、QPS 令牌桶、失败率熔断（30s 窗口 >50% → 熔断 60s，半开探测恢复）与降级（熔断期间解释类请求返回注明「模型不可用」的确定性摘要，解析类请求结构化失败走 AiTask 恢复）；事件写 Kafka runtime 事件，`/api/procurement/platform` 暴露脱敏网关状态，系统信息页展示熔断/降级标识。
+- **模型路由与成本工程**：配置 `AGENTHARNESS_PROCUREMENT_LIGHT_MODEL` 后，解析类 run（capture 创建点）降档到便宜/小窗口模型并自动收紧 `max_context_tokens`——上下文压缩从"备而不用"成为任务完成的必经路径；light run 失败自动升回主模型重试，仍失败走确定性 planner 兜底（三级链 light→primary→deterministic，全程 run 元数据留痕）。Java 侧成本面板（`/api/procurement/costs` + 统计报表页）按模型/任务归集 token 并计价，定价来自 `PROCUREMENT_MODEL_PRICING`（与 Python `_cost_usd` 同口径的缓存折扣公式）；未配置价格的模型如实显示未计价，绝不折算为零成本。
 - **冲突裁决与修正回灌（P2-2）**：冲突字段在复核界面提供候选值单选（来自字段 `conflicts`），点击即提交修正并在 `quote_correction` 落库 `chosen_from_conflicts` 标记（服务端校验所选值确属候选）；`GET /api/procurement/corrections` 只读接口 + `scripts/export_corrections_to_eval.py` 把人工修正导出为评测扩展候选 `procurement-service/src/main/resources/frozen/frozen-evaluation-corrections.json`（新文件，冻结资源不动，审核后启用；脚本可重跑——同输入下 items 内容幂等，`exported_at` 元数据每次变化；当前演示数据 0 条修正记录，有新修正后重跑生成；README 如实标注 synthetic）。
 - **语义缓存（P2-3）**：Python Agent 直连 Redis（`AGENT_REDIS_URL`，独立 DB），缓存报价解析结果与需求结构化结果；key = `semantic:v1:{scope}:{sha256}:{version}`（原件 SHA-256 + 解析器/schema 版本参与 key，原件更新或版本升级即失效），TTL 默认 24h；只缓存已通过校验的结果（模型产出通过校验后同样入缓存），**需求命中在 run 创建前即前置路由到确定性工具图（零远程调用）**，命中为确定性返回、不产生审计事件，Redis 不可用自动 no-op。
 - **发票三单匹配（P3-1，旗舰）**：发票实体（V14）+ 状态机 `REGISTERED → MATCHED → RECONCILED`（`DIFF_HOLD`/`VOIDED`，注册进 StateMachineRegistry）；Java 确定性三单匹配（数量/单价/总价/税率 vs PO 与收货 GRN——有收货记录时数量与单价口径按实收量比对，无收货记录回退 PO 数量；容差 ±0.01/±0.1%）；差异挂起后支持作废（退回重开）、手工改单（审计）、强制通过（allow-once + 人工备注）；Agent 参与严格受限：Python 只做发票字段解析与差异解释（模式 C，解释中数字必须来自结构化差异）；付款联动：订单存在未匹配/差异挂起发票时付款 409；发票中心页（列表/详情/三单对比/差异挂起队列/处理操作）；任务进度条扩展为 10 步闭环（…审批→订单→收货→发票→对账→付款）；评测 `frozen-evaluation-invoice.json`（synthetic，字段抽取 ≥99% + 数值引用一致性硬校验）。
@@ -140,6 +141,8 @@ docker compose ps
 | `APP_DEMO_SEED_ENABLED` / `APP_DEMO_SEED_ROOT` | `false` / `output/procurement-scenarios` |
 | `APP_REDIS_ENABLED` | `false`（无锁/无缓存回退）/ `true`（分布式锁 + 看板缓存；不可用自动降级） |
 | `AGENTHARNESS_PROCUREMENT_PROVIDER` | `procurement_fake`（离线演示）或 `openai` |
+| `AGENTHARNESS_PROCUREMENT_LIGHT_MODEL` | 模型路由降档模型（留空=不分档）；`..._LIGHT_MAX_CONTEXT_TOKENS` 默认 8000 |
+| `PROCUREMENT_MODEL_PRICING` | Java 成本面板计价真源：JSON `{"模型名":{"input_per_million_usd":…,"output_per_million_usd":…,"cached_input_per_million_usd":…}}`，`"*"` 兜底 |
 
 ## 模型配置
 
@@ -155,7 +158,11 @@ uv run python scripts/generate_procurement_demo.py --output output/procurement-d
 uv run python scripts/generate_procurement_scenarios.py
 uv run python scripts/evaluate_procurement.py run --output output/procurement-evaluation-v3
 uv run python scripts/evaluate_procurement.py verify --input output/procurement-evaluation-v3/raw-results.json
+# LLM-as-a-Judge 离线评审：31 例结论 + 注入错误对照组，校准 Judge-真值一致率与 Cohen's kappa
+uv run python scripts/evaluate_procurement.py judge --perturbations all --output output/procurement-evaluation
 ```
+
+`judge` 子命令用独立 LLM 按四维 rubric（结论正确性/证据一致性/约束遵循/幻觉）评审比价结论，**Judge 只看需求、抽取事实与系统结论，看不到期望答案**；被评对象是确定性解析器 + Java 比价引擎（无 LLM 参与），评审模型与被评系统天然异源。注入错误对照组（成本漂移/漏检排除/匹配翻转）提供 incorrect 侧样本，避免全对数据下一致率虚高。人工盲测记录仅在数据集指纹一致时参与校准（版本漂移自动拒用并在报告注明）。
 
 `output/procurement-demo/` 包含 31 份冻结报价；`output/procurement-scenarios/` 包含标签、纸箱和 BOPP 封箱胶带三套独立场景。真人辅助实验始终连接 Java 入口：
 
@@ -186,6 +193,7 @@ POST /api/procurement/orders/{id}/transition # 必须携带 Idempotency-Key
 GET  /api/procurement/settlements             # K8 对账单（列表/流转 settle/pay）
 POST /api/procurement/settlements/{id}/transition # 必须携带 Idempotency-Key
 GET  /api/procurement/insights/*              # K3 报表：overview/trend/supplier-ranking/categories
+GET  /api/procurement/costs                   # 成本面板：token 用量按模型/任务归集与计价（未计价如实单列）
 GET  /api/procurement/audit-events            # K6 全局审计（类型/操作人/业务对象/任务筛选）
 GET  /api/procurement/platform                # K6 系统信息（版本/组件/解析器/规则集/模型脱敏）
 ```
