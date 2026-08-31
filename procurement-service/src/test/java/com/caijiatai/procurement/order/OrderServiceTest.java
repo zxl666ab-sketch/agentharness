@@ -149,6 +149,30 @@ class OrderServiceTest {
     }
 
     @Test
+    void transitionAuditEventsCarryBusinessLocator() {
+        // 回归：审计中心按「采购订单/对账单」筛选依赖 business_type/business_id（V11 审计写入纪律）
+        var order = pendingOrder();
+        order.ship();
+        when(orders.lockById("o1")).thenReturn(Optional.of(order));
+        when(orders.findById("o1")).thenReturn(Optional.of(order));
+
+        service.transition(
+                "o1", "receive", new BigDecimal("15000"),
+                Instant.parse("2026-08-14T00:00:00Z"), null, "采购员");
+
+        var captor = org.mockito.ArgumentCaptor.forClass(AuditEvent.class);
+        verify(audit, times(2)).save(captor.capture());
+        var transitioned = captor.getAllValues().get(0);
+        assertThat(transitioned.getEventType()).isEqualTo("order_transitioned");
+        assertThat(transitioned.getBusinessType()).isEqualTo("order");
+        assertThat(transitioned.getBusinessId()).isEqualTo("o1");
+        var derived = captor.getAllValues().get(1);
+        assertThat(derived.getEventType()).isEqualTo("settlement_created");
+        assertThat(derived.getBusinessType()).isEqualTo("settlement");
+        assertThat(derived.getBusinessId()).isNotBlank();
+    }
+
+    @Test
     void illegalTransitionFromShippedShipIsRejected() {
         var order = pendingOrder();
         order.ship();

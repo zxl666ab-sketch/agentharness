@@ -41,6 +41,7 @@ public final class AgentResultApplication {
     private final AiTaskService aiTasks;
     private final ReviewService reviews;
     private final TaskContextCache contextCache;
+    private final com.caijiatai.procurement.cache.InsightsCache insightsCache;
     private final InvoiceService invoices;
     private final ContractService contracts;
     private final HumanInteractionService interactions;
@@ -56,6 +57,7 @@ public final class AgentResultApplication {
             AiTaskService aiTasks,
             ReviewService reviews,
             TaskContextCache contextCache,
+            com.caijiatai.procurement.cache.InsightsCache insightsCache,
             InvoiceService invoices,
             ContractService contracts,
             HumanInteractionService interactions) {
@@ -69,6 +71,7 @@ public final class AgentResultApplication {
         this.aiTasks = aiTasks;
         this.reviews = reviews;
         this.contextCache = contextCache;
+        this.insightsCache = insightsCache;
         this.invoices = invoices;
         this.contracts = contracts;
         this.interactions = interactions;
@@ -151,11 +154,17 @@ public final class AgentResultApplication {
 
     private void evictContext(String taskId) {
         contextCache.evict(taskId);
+        // 看板纪律：分析完成/正式决定/报价落库/失败都会改变状态漏斗、订单数、
+        // ai_tasks_failed 与成本节约率，异步结果应用后必须主动失效看板缓存。
+        // apply() 运行在消费者事务内：立即清一次 + afterCommit 再清一次，
+        // 防止「清缓存后、提交前」的并发读把旧数据回填进缓存（TTL 内一直旧）。
+        insightsCache.evictAll();
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
                     contextCache.evict(taskId);
+                    insightsCache.evictAll();
                 }
             });
         }

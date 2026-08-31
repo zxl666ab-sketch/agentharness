@@ -583,7 +583,8 @@ public class DemoSeedRunner implements ApplicationRunner {
         invoice.reconcile();
         invoices.saveAndFlush(invoice);
         audit.save(AuditEvent.create(
-                order.getTaskId(), null, null, "invoice_reconciled", "demo-seed",
+                order.getTaskId(), null, null,
+                "invoice", invoice.getId(), "invoice_reconciled", "demo-seed",
                 Map.of("invoice_id", invoice.getId(), "invoice_no", invoiceNo,
                         "order_id", order.getId(), "synthetic", true)));
     }

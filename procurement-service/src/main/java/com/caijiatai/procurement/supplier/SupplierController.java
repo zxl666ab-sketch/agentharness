@@ -49,6 +49,7 @@ public final class SupplierController {
     }
 
     @DeleteMapping("/{id}")
+    @org.springframework.web.bind.annotation.ResponseStatus(org.springframework.http.HttpStatus.NO_CONTENT)
     public void delete(@PathVariable String id) {
         suppliers.delete(id);
         insightsCache.evictAll();

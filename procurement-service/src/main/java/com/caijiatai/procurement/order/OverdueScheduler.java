@@ -51,7 +51,8 @@ public class OverdueScheduler {
                 continue;
             }
             audit.save(AuditEvent.create(
-                    order.getTaskId(), null, null, "order_shipment_overdue", "system",
+                    order.getTaskId(), null, null,
+                    "order", order.getId(), "order_shipment_overdue", "system",
                     Map.of("order_id", order.getId(), "order_no", order.getOrderNo(),
                             "overdue_days", OVERDUE_DAYS,
                             "last_updated_at", order.getUpdatedAt().toString())));
@@ -75,7 +76,8 @@ public class OverdueScheduler {
                 continue;
             }
             audit.save(AuditEvent.create(
-                    taskId, null, null, "settlement_payment_overdue", "system",
+                    taskId, null, null,
+                    "settlement", settlement.getId(), "settlement_payment_overdue", "system",
                     Map.of("settlement_id", settlement.getId(),
                             "settlement_no", settlement.getSettlementNo(),
                             "order_id", settlement.getOrderId(),

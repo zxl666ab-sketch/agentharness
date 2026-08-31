@@ -44,7 +44,9 @@ public final class ApiExceptionHandler {
     @ExceptionHandler(MissingRequestHeaderException.class)
     ResponseEntity<ErrorResponse> missingHeader(
             MissingRequestHeaderException error, HttpServletRequest request) {
-        return response(HttpStatus.BAD_REQUEST, "missing_header", error.getMessage(), request, List.of());
+        // 中文站不回显 Spring 英文原文（前端会把 message 直接给用户看）。
+        return response(HttpStatus.BAD_REQUEST, "missing_header",
+                "缺少必需的请求头：" + error.getHeaderName(), request, List.of());
     }
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)

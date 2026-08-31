@@ -16,12 +16,14 @@ public interface AuditEventRepository extends JpaRepository<AuditEvent, String> 
 
     long countByEventType(String eventType);
 
-    /** K6 全局审计筛选（类型/操作人/业务对象/任务）。 */
+    /** K6 全局审计筛选（类型/操作人/业务对象/任务）。business_type=task 为查询侧口径：任务上下文事件挂 task_id、不落 business_type（V11 设计）。 */
     @Query("""
             select event from AuditEvent event
             where (:type is null or :type = '' or event.eventType = :type)
               and (:actor is null or :actor = '' or event.actor = :actor)
-              and (:businessType is null or :businessType = '' or event.businessType = :businessType)
+              and (:businessType is null or :businessType = ''
+                   or event.businessType = :businessType
+                   or (:businessType = 'task' and event.businessType is null and event.taskId is not null))
               and (:taskId is null or :taskId = '' or event.taskId = :taskId)
             """)
     Page<AuditEvent> search(

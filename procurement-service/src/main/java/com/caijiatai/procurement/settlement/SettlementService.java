@@ -136,6 +136,7 @@ public class SettlementService {
         payload.put("notes", notes == null ? "" : notes);
         audit.save(AuditEvent.create(
                 order == null ? null : order.getTaskId(), null, null,
+                "settlement", settlement.getId(),
                 SettlementEvent.PAY.equals(event) ? "settlement_paid" : "settlement_settled", actor,
                 payload));
         var response = view(settlement);

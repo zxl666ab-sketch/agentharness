@@ -114,7 +114,8 @@ public class OrderService {
         payload.put("order_no", saved.getOrderNo());
         payload.put("landed_total", landedTotal.toPlainString());
         audit.save(AuditEvent.create(
-                task.getId(), quote.getId(), task.getAnalysisRunId(), "order_created", "system",
+                task.getId(), quote.getId(), task.getAnalysisRunId(),
+                "order", saved.getId(), "order_created", "system",
                 payload));
         return saved;
     }
@@ -297,7 +298,8 @@ public class OrderService {
         transitionPayload.put("arrival_date", arrivalDate == null ? null : arrivalDate.toString());
         transitionPayload.put("notes", notes == null ? "" : notes);
         audit.save(AuditEvent.create(
-                order.getTaskId(), null, null, "order_transitioned", actor, transitionPayload));
+                order.getTaskId(), null, null,
+                "order", id, "order_transitioned", actor, transitionPayload));
         if (event == OrderEvent.RECEIVE_COMPLETE) {
             deriveSettlement(order, actor);
         }
@@ -324,7 +326,8 @@ public class OrderService {
         var settlement = settlements.saveAndFlush(PurchaseSettlement.derive(
                 order.getId(), settlementNo, order.getSupplierName(), order.getLandedTotal()));
         audit.save(AuditEvent.create(
-                order.getTaskId(), null, null, "settlement_created", actor,
+                order.getTaskId(), null, null,
+                "settlement", settlement.getId(), "settlement_created", actor,
                 Map.of("settlement_id", settlement.getId(), "settlement_no", settlement.getSettlementNo(),
                         "order_id", order.getId(), "total_amount", settlement.getTotalAmount().toPlainString())));
         return settlement;

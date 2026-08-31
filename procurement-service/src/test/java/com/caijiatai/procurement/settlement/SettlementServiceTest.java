@@ -50,7 +50,11 @@ class SettlementServiceTest {
         var result = service.transition("s1", "settle", null, null, "采购员");
 
         assertThat(result.get("status")).isEqualTo("SETTLED");
-        verify(audit).save(any(AuditEvent.class));
+        var captor = org.mockito.ArgumentCaptor.forClass(AuditEvent.class);
+        verify(audit).save(captor.capture());
+        // 回归：审计中心「对账单」筛选依赖 business_type/business_id（V11 审计写入纪律）
+        assertThat(captor.getValue().getBusinessType()).isEqualTo("settlement");
+        assertThat(captor.getValue().getBusinessId()).isEqualTo(settlement.getId());
     }
 
     @Test
