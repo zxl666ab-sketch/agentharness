@@ -1409,9 +1409,12 @@ def _judge_invoke(args: argparse.Namespace):
 
     import asyncio
 
+    from agentharness.config import load_project_env
     from agentharness.contracts import Message, MessageRole, ModelRequest, StreamItemType
     from agentharness.providers.openai_adapter import OpenAIResponsesAdapter
 
+    # 与 agent_service 同源：从仓库 .env 回填缺失的环境变量（已有进程环境变量优先）
+    load_project_env()
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise ValueError("LLM Judge 需要 OPENAI_API_KEY（离线接线冒烟可用 --provider fake）")
@@ -1441,7 +1444,7 @@ def _judge_invoke(args: argparse.Namespace):
                 messages=[Message(role=MessageRole.user, content=prompt)],
                 tools=[],
                 temperature=0,
-                max_tokens=1500,
+                max_tokens=4000,
             )
         ):
             if item.type == StreamItemType.text_delta and item.text:
@@ -1451,7 +1454,13 @@ def _judge_invoke(args: argparse.Namespace):
         return "".join(chunks)
 
     def invoke(prompt: str) -> str:
-        return loop.run_until_complete(_once(prompt))
+        try:
+            return loop.run_until_complete(_once(prompt))
+        except RuntimeError as exc:
+            # provider 截断/故障属于响应质量问题 → 转 JudgeResponseError 走重试链
+            from agentharness.procurement.judge import JudgeResponseError
+
+            raise JudgeResponseError(f"judge provider error: {exc}") from exc
 
     return invoke, model
 

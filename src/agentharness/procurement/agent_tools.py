@@ -260,6 +260,15 @@ class ProcurementAgentTools:
                 try:
                     requirement = _validate_model_requirement(proposed)
                     source = "model_tool_call"
+                    # 已通过校验的模型产出同样入缓存（精确消息 SHA + schema 版本）：
+                    # 重复需求消息在 run 创建前即被路由到确定性图，零远程调用复用此结果。
+                    if message:
+                        await asyncio.to_thread(
+                            self.semantic_cache.put_requirement,
+                            hashlib.sha256(message.encode("utf-8")).hexdigest(),
+                            REQUIREMENT_SCHEMA_VERSION,
+                            requirement,
+                        )
                 except RequirementModelError as exc:
                     if not message:
                         raise

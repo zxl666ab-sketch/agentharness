@@ -29,6 +29,7 @@ from agentharness.harness import Harness
 from agentharness.procurement.agent_tools import (
     PROCUREMENT_AGENT_SYSTEM_PROMPT,
     PROCUREMENT_TOOL_NAMES,
+    REQUIREMENT_SCHEMA_VERSION,
     DeterministicProcurementAdapter,
     ProcurementAgentTools,
 )
@@ -823,6 +824,20 @@ class InternalAgentCommands:
             provider, model = self._configure_provider(config)
         primary_model = model
         model, light_window, tier = self._select_run_tier(config, stage, provider, model)
+        # P2-3 语义缓存前置路由：相同需求消息已有"通过校验的模型产出"缓存时，
+        # 本次 run 直接走确定性工具图（capture 工具内从缓存取回该产出），
+        # 全程零远程调用——缓存必须前置才可能省下 LLM 成本。
+        if (
+            provider != "procurement_internal"
+            and stage in self._LIGHT_ROUTABLE_STAGES
+            and message
+            and self.semantic_cache.get_requirement(
+                hashlib.sha256(message.encode("utf-8")).hexdigest(),
+                REQUIREMENT_SCHEMA_VERSION,
+            )
+            is not None
+        ):
+            provider, model, tier = "procurement_internal", "deterministic-procurement", "cache_routed"
         max_cost = _optional_float(config.get("max_cost_usd"))
         pricing = PricingConfig(
             input_per_million_usd=_optional_float(

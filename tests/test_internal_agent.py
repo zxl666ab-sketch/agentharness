@@ -474,6 +474,59 @@ def test_select_run_tier_edge_cases() -> None:
     ) == ("lite", 8000, "light")
 
 
+def test_cached_requirement_routes_run_to_zero_model_calls(tmp_path) -> None:
+    """P2-3 前置路由：相同需求消息已有校验通过的缓存产出 → run 直接走确定性图，零远程调用。"""
+    import hashlib as _hashlib
+
+    from agentharness.procurement.agent_tools import REQUIREMENT_SCHEMA_VERSION
+    from agentharness.procurement.semantic_cache import SemanticCache
+
+    class DictStore:
+        def __init__(self) -> None:
+            self.data: dict[str, str] = {}
+
+        def get(self, key: str):
+            return self.data.get(key)
+
+        def set(self, key: str, value, ex=None):
+            self.data[key] = value
+            return True
+
+    harness = Harness(data_dir=tmp_path / "runtime", providers={"openai": FakeModelAdapter()})
+    (harness.data_dir / "procurement-model-config.json").write_text(
+        json.dumps({"provider": "openai", "model": "hy3", "api_key": "test-key"}),
+        encoding="utf-8",
+    )
+    commands = InternalAgentCommands(harness)
+    store = DictStore()
+    commands.semantic_cache = SemanticCache(store=store)
+    commands.procurement_tools.semantic_cache = commands.semantic_cache
+
+    message = "采购 5000 个纸箱，15 天内交付。"
+    body = _routing_body(message)
+    # 未缓存：正常走模型
+    cold = commands._new_procurement_request(
+        body, message=message, stage="capture",
+        pending_attachments=[], source_message=message,
+    )
+    assert cold.provider == "openai"
+    assert cold.metadata["procurement_model_tier"] == "primary"
+
+    # 缓存一条"已通过校验的模型产出"后：同消息 run 前置路由到确定性图
+    sha = _hashlib.sha256(message.encode("utf-8")).hexdigest()
+    commands.semantic_cache.put_requirement(
+        sha, REQUIREMENT_SCHEMA_VERSION, {"item_name": "纸箱", "quantity": "5000"}
+    )
+    warm = commands._new_procurement_request(
+        body, message=message, stage="capture",
+        pending_attachments=[], source_message=message,
+    )
+    assert warm.provider == "procurement_internal"
+    assert warm.model == "deterministic-procurement"
+    assert warm.metadata["procurement_model_tier"] == "cache_routed"
+    harness.close()
+
+
 @pytest.mark.asyncio
 async def test_failed_light_run_escalates_to_primary_before_deterministic(tmp_path) -> None:
     """失败自动升档：light 失败 → 主模型重试 → 主模型仍协议错误才走确定性 planner 兜底。"""
@@ -641,6 +694,22 @@ async def test_start_conversation_uses_configured_model_and_prefills_usd_rate(tm
         encoding="utf-8",
     )
     commands = InternalAgentCommands(harness)
+    # 换入内存 store 的语义缓存，验证"模型产出通过校验后入缓存"（P2-3 写路径）
+    from agentharness.procurement.semantic_cache import SemanticCache
+
+    class DictStore:
+        def __init__(self) -> None:
+            self.data: dict[str, str] = {}
+
+        def get(self, key: str):
+            return self.data.get(key)
+
+        def set(self, key: str, value, ex=None):
+            self.data[key] = value
+            return True
+
+    commands.semantic_cache = SemanticCache(store=DictStore())
+    commands.procurement_tools.semantic_cache = commands.semantic_cache
     commands.procurement_tools._parse_attachment = AsyncMock(  # type: ignore[method-assign]
         return_value={
             "artifact_id": "jb" + "a" * 30,
@@ -680,6 +749,8 @@ async def test_start_conversation_uses_configured_model_and_prefills_usd_rate(tm
     assert specifications["layers"]["value"] == "5"
     assert "size_tolerance" not in specifications
     assert "thickness_tolerance" not in specifications
+    # 模型产出通过校验后必须入缓存（重复消息才能零成本复用）
+    assert commands.semantic_cache.stats()["puts"] >= 1
     run = harness.storage.get_run(result["run_id"])
     assert run is not None
     assert run["provider"] == "openai"
