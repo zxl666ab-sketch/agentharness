@@ -11,7 +11,8 @@
     "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
     "test": "vitest run",
     "preview": "vite preview",
-    "e2e": "playwright test"
+    "e2e": "playwright test e2e/smoke.spec.ts",
+    "e2e:full": "cross-env E2E_FULL=1 playwright test e2e/full-chain.spec.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.51.0",
@@ -29,6 +30,7 @@
     "@typescript-eslint/parser": "^7.16.0",
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.20",
+    "cross-env": "^10.1.0",
     "eslint": "^8.57.0",
     "eslint-plugin-react-hooks": "^4.6.2",
     "eslint-plugin-react-refresh": "^0.4.8",
