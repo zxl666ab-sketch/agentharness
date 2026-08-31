@@ -4,9 +4,9 @@ AI 智能采购平台是本地、自托管的采购决策工作台。采购员�
 
 浏览器唯一入口是 [http://127.0.0.1:8741](http://127.0.0.1:8741)。
 
-![AI 智能采购平台管理驾驶舱](docs/evidence/dashboard.png)
+![AI 智能采购平台管理员工作台（协同看板）](docs/evidence/workbench-overview.png)
 
-采购任务详情（三家报价比价与人工审批入口）见 [docs/evidence/comparison.png](docs/evidence/comparison.png)。
+采购员视角管理驾驶舱与人工审批入口见 [docs/evidence/dashboard.png](docs/evidence/dashboard.png)，三家报价比价详情见 [docs/evidence/comparison.png](docs/evidence/comparison.png)。
 
 ## 冻结证据
 
@@ -31,7 +31,7 @@ flowchart TB
         Pages["供应商 / 订单 / 对账 / 报表 / 审计 / 系统信息"]
     end
     Web -->|"HTTP/SSE 仅 127.0.0.1:8741"| Java["Java 业务主机（Spring Boot 4.1 / Java 21）"]
-    Java --> MySQL["MySQL 8 caijiatai_business（Flyway V1–V16）"]
+    Java --> MySQL["MySQL 8 caijiatai_business（Flyway V1–V21）"]
     Java <--> Redis["Redis：上下文缓存 · 分布式锁 · 看板缓存"]
     Java <-->|"Kafka（唯一通道）commands/results/rpc/events + DLQ"| Agent["Python Agent 微服务（解析 / 结构化）"]
     Agent --> Provider["LLM API"]
@@ -66,7 +66,7 @@ flowchart LR
 
 - Java 是采购任务、附件、报价、人工修正、比价快照、待决审批、正式决定、供应商档案、采购订单、对账付款、统计报表、业务审计、业务 Artifact、SSE 事件投影的唯一真源；可脱离 Python 独立运行（`APP_AGENT_MODE=demo`）。
 - Python Agent 是 Kafka 传输适配器加唯一 Harness Runtime：负责自然语言需求结构化、XLSX/PDF 文档解析、Provider 调用，以及 Run、Checkpoint、Lease、Tool Invocation 和 Approval 的持久化；通过 Kafka 命令/结果/RPC/事件与 Java 通信。
-- 业务 Schema 只由 Java Flyway 创建（V1–V19：核心任务/报价/审批/审计，供应商 V8、订单 V9、对账 V10、通用业务审计 V11、修正回灌 V13、发票 V14、合同 V15、分批收货 V16、失败审批恢复 V17、Human-in-the-loop V18、草稿需求未知态 V19）。Agent Runtime 数据写入 `AGENTHARNESS_DATA_DIR` 并由 Compose 独立 volume 持久化；金额使用 `DECIMAL`/`BigDecimal`，时间使用 `DATETIME(6)`/`Instant`。
+- 业务 Schema 只由 Java Flyway 创建（V1–V21：核心任务/报价/审批/审计，供应商 V8、订单 V9、对账 V10、通用业务审计 V11、修正回灌 V13、发票 V14、合同 V15、分批收货 V16、失败审批恢复 V17、Human-in-the-loop V18、草稿需求未知态 V19、历史 AI 任务收口 V20、审计业务定位符回填 V21）。Agent Runtime 数据写入 `AGENTHARNESS_DATA_DIR` 并由 Compose 独立 volume 持久化；金额使用 `DECIMAL`/`BigDecimal`，时间使用 `DATETIME(6)`/`Instant`。
 - Kafka 使用 KRaft 单节点：`caijiatai.commands/results/rpc.requests/rpc.responses/events` + 各 `*.dlq`；消息带 HMAC-SHA256 签名与 `payload_sha256`，双侧幂等。
 - Python 读取业务上下文/原件走 Kafka RPC（`get_task_context` / `get_artifact` / `list_events`）。
 - 审计事件全量留痕：任务事件挂 `task_id`，供应商/订单/对账等业务事件挂 `business_type`/`business_id`（V11），全局审计页可按类型/操作人/业务对象筛选。
@@ -143,7 +143,7 @@ docker compose ps
 
 ## 模型配置
 
-Kafka 模式的模型配置以 `.env` / 环境变量为唯一真源，右上角“API / 模型配置”只显示当前脱敏状态。API Key 不进入 MySQL、Run、日志、Artifact 或 GET 响应（v0.5.1 起 config/platform 响应不再含 key 前缀预览）。离线演示使用 `procurement_fake`；真实 Provider 的 429 优先遵守 `Retry-After`，否则执行有界退避。
+Kafka 模式的模型配置以 `.env` / 环境变量为唯一真源，右上角“API / 模型配置”只显示当前脱敏状态。API Key 不进入 MySQL、Run、日志、Artifact 或 GET 响应（0.5.0 起 config/platform 响应不再含 key 前缀预览）。离线演示使用 `procurement_fake`；真实 Provider 的 429 优先遵守 `Retry-After`，否则执行有界退避。
 
 当前真实模型脱敏记录见 [real-model-acceptance.md](docs/evidence/real-model-acceptance.md)。未配置价格时费用只能标记为未计价，不能解释为免费。
 
