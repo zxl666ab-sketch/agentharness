@@ -66,13 +66,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   web:
-    # vite/rollup 产物存在平台字节差异（Windows 与 Linux 各自内部确定、互相不一致），
-    # 而 committed static 由本地 Windows 开发管线生成——web job 必须跑在同平台才能
-    # 逐字节比对 dist 与 static。Docker 镜像在 Linux 自行构建，与本 job 无耦合。
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: bash
+    # 注意：committed static 必须由 `npm ci`（严格按 package-lock）后的构建生成。
+    # 曾用 `npm install --package-lock-only` 更新锁而未重装 node_modules，
+    # 漂移的依赖产出与 CI 逐字节不一致（chunk hash 不同）导致本 job 失败。
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

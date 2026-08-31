@@ -1,7 +1,6 @@
 
-# 全库统一 LF：Windows 检出也拿到 LF，保证 vite/rollup 的 chunk 哈希在
-# 本地 / Docker / CI 三端逐字节一致（此前 autocrlf 把 ts/tsx 转 CRLF，
-# 导致 committed static 与 Linux 构建永远对不上）
+# 全库统一 LF：Windows 检出也拿到 LF，保证 web_build_id 指纹与 git diff 校验
+# 不受行尾噪音干扰（三端本地/Docker/CI 一致）
 * text=auto eol=lf
 
 # 二进制：禁止任何行尾转换
