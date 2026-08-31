@@ -1443,7 +1443,7 @@ def _judge_invoke(args: argparse.Namespace):
                     messages=[Message(role=MessageRole.user, content=prompt)],
                     tools=[],
                     temperature=0,
-                    max_tokens=4000,
+                    max_tokens=8000,
                 )
             ):
                 if item.type == StreamItemType.text_delta and item.text:
@@ -1682,7 +1682,7 @@ def main() -> None:
         default="one",
         help="注入错误对照组：none=仅干净结论；one=每例 1 种（成本漂移）；all=每例 3 种",
     )
-    judge.add_argument("--retries", type=int, default=1)
+    judge.add_argument("--retries", type=int, default=2)
     judge.set_defaults(handler=judge_evaluation)
 
     args = parser.parse_args()

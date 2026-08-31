@@ -197,6 +197,30 @@ async def test_judge_cases_async_preserves_order_and_limits_concurrency() -> Non
     assert active["max"] <= 3
 
 
+@pytest.mark.asyncio
+async def test_judge_async_records_errors_without_sinking_batch() -> None:
+    """单案持续失败不拖垮整批：错误如实记录，指标只算成功样本。"""
+    import asyncio
+
+    from agentharness.procurement.judge import judge_cases_async
+
+    async def half_broken(prompt: str) -> str:
+        await asyncio.sleep(0)
+        if '"case_id": "q-1"' in prompt:
+            return "truncated garbage"
+        return json.dumps({"scores": _scores(), "verdict": "correct", "reasons": []})
+
+    facts = [case_to_facts(_case(case_id=f"q-{i}"), _REQUIREMENT) for i in range(3)]
+    results = await judge_cases_async(facts, half_broken, retries=1)
+    assert "judge_error" in results[1]
+    assert "judge_error" not in results[0] and "judge_error" not in results[2]
+    summary = summarize_judge(results, reference={"q-0#clean": True, "q-2#clean": True})
+    assert summary["cases"] == 2
+    assert summary["judge_errors"] == 1
+    assert summary["error_cases"] == ["q-1#clean"]
+    assert summary["calibration"]["agreement"] == "2/2"
+
+
 def test_verdict_requires_correct_and_all_dims_above_threshold() -> None:
     results = [
         {"case_id": "a", "variant": "clean", "scores": _scores(), "verdict": "correct", "mean_score": 1.0},

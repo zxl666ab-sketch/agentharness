@@ -218,8 +218,13 @@ async def judge_cases_async(
     *,
     retries: int = 1,
     concurrency: int = 4,
+    fail_fast: bool = False,
 ) -> list[dict[str, Any]]:
-    """并发批量评审（信号量限流）；结果顺序与输入一致。"""
+    """并发批量评审（信号量限流）；结果顺序与输入一致。
+
+    默认单案失败不拖垮整批：重试耗尽后记为 ``judge_error`` 结果（不计入指标，
+    计入覆盖率），由 summarize_judge 如实上报。fail_fast=True 恢复旧行为。
+    """
     semaphore = asyncio.Semaphore(concurrency)
 
     async def one(facts: Mapping[str, Any]) -> dict[str, Any]:
@@ -239,9 +244,15 @@ async def judge_cases_async(
                     }
                 except JudgeResponseError as exc:
                     last_error = exc
-            raise JudgeResponseError(
-                f"judge failed for case {facts['case_id']} after {attempts} attempts: {last_error}"
-            )
+            if fail_fast:
+                raise JudgeResponseError(
+                    f"judge failed for case {facts['case_id']} after {attempts} attempts: {last_error}"
+                )
+            return {
+                "case_id": facts["case_id"],
+                "variant": str(facts.get("variant", "clean")),
+                "judge_error": str(last_error),
+            }
 
     return list(await asyncio.gather(*(one(facts) for facts in cases_facts)))
 
@@ -308,20 +319,27 @@ def summarize_judge(
     *,
     reference: Mapping[str, bool] | None = None,
 ) -> dict[str, Any]:
-    """聚合：四维均分、通过率、（可选）与参考裁定（真值/人工）的一致率与 kappa。"""
-    if not results:
+    """聚合：四维均分、通过率、（可选）与参考裁定（真值/人工）的一致率与 kappa。
+
+    judge_error 结果不计入指标，单独如实上报（绝不静默丢样本）。
+    """
+    scored = [r for r in results if "judge_error" not in r]
+    errors = [r for r in results if "judge_error" in r]
+    if not scored:
         raise ValueError("no judge results to summarize")
     per_dim = {
-        dim: round(sum(float(r["scores"][dim]) for r in results) / len(results), 4)
+        dim: round(sum(float(r["scores"][dim]) for r in scored) / len(scored), 4)
         for dim in JUDGE_DIMENSIONS
     }
-    passed = judge_verdicts(results)
+    passed = judge_verdicts(scored)
     summary: dict[str, Any] = {
-        "cases": len(results),
+        "cases": len(scored),
+        "judge_errors": len(errors),
+        "error_cases": [result_key(r) for r in errors],
         "dimension_means": per_dim,
         "pass_rate": round(sum(passed.values()) / len(passed), 4),
         "mean_score_overall": round(
-            sum(float(r["mean_score"]) for r in results) / len(results), 4
+            sum(float(r["mean_score"]) for r in scored) / len(scored), 4
         ),
     }
     if reference:
