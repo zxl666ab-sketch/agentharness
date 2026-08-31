@@ -37,8 +37,10 @@ class SemanticCache:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._store = store
+        # redis-py>=8 拒绝 float 的 ex（"ex must be datetime.timedelta or int"）：
+        # 曾经 float TTL 让所有写入静默失败（计入 errors），必须传 int 秒。
         self._ttl_s = (
-            float(os.environ.get("AGENTHARNESS_SEMANTIC_CACHE_TTL_S", "86400"))
+            int(float(os.environ.get("AGENTHARNESS_SEMANTIC_CACHE_TTL_S", "86400")))
             if ttl_s is None
             else ttl_s
         )
@@ -143,7 +145,8 @@ class SemanticCache:
             self._store.set(
                 self._key(scope, sha256, version),
                 json.dumps(value, ensure_ascii=False, default=str),
-                ex=self._ttl_s,
+                # redis-py>=8 只接受 int/timedelta：出口统一归一，防注入 float ttl
+                ex=int(self._ttl_s),
             )
         except Exception:  # noqa: BLE001 - 缓存故障不阻断业务
             self._count("errors")

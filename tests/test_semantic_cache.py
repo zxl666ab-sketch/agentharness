@@ -63,6 +63,30 @@ def _cache(clock: _FakeClock) -> SemanticCache:
     return SemanticCache(store=_MemoryStore(clock), ttl_s=60.0, clock=clock)
 
 
+def test_default_ttl_is_int_for_redis_py8_compat(monkeypatch) -> None:
+    """线上事故回归：redis-py>=8 拒绝 float ex（"ex must be timedelta or int"），
+    曾经的 float 默认 TTL 让所有写入静默失败并计入 errors。"""
+    monkeypatch.delenv("AGENTHARNESS_SEMANTIC_CACHE_TTL_S", raising=False)
+    captured: dict = {}
+
+    class StrictStore:
+        def get(self, key: str):
+            return None
+
+        def set(self, key: str, value: str, ex=None) -> None:
+            if not isinstance(ex, int):
+                raise TypeError("ex must be datetime.timedelta or int")
+            captured["ex"] = ex
+
+        def ping(self) -> bool:
+            return True
+
+    cache = SemanticCache(store=StrictStore())
+    cache.put_requirement("a" * 64, 2, {"ok": True})
+    assert cache.stats()["errors"] == 0
+    assert captured["ex"] == 86400
+
+
 def _xlsx_bytes() -> bytes:
     workbook = Workbook()
     sheet = workbook.active
