@@ -80,7 +80,7 @@ jobs:
         working-directory: web
       - run: npm run lint
         working-directory: web
-      - name: Type-check tests (W-H2: vitest/esbuild never type-checks test files)
+      - name: "Type-check tests (W-H2: vitest/esbuild never type-checks test files)"
         run: npm run typecheck:test
         working-directory: web
       - run: npm run build
