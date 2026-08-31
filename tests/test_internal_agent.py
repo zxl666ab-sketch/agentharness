@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
@@ -404,6 +404,146 @@ def test_hybrid_planner_keeps_agent_run_but_uses_internal_structured_planner(tmp
     assert request.model == "deterministic-procurement"
     assert request.metadata["procurement_stage"] == "capture"
     harness.close()
+
+
+def _routing_body(message: str) -> AgentCommandBody:
+    payload = {"message": message, "attachments": []}
+    return AgentCommandBody(
+        operation_id="11111111-1111-1111-1111-111111111111",
+        operation_type="start_conversation",
+        aggregate_id="a" * 32,
+        generation=1,
+        expected_task_version=0,
+        payload_sha256=_canonical_sha256(payload),
+        payload=payload,
+    )
+
+
+def test_light_model_routes_capture_run_to_small_window(tmp_path) -> None:
+    """模型路由：capture 创建 run 降档 light 小窗口（上下文压缩成为必经路径）；推理阶段保持主模型。"""
+    harness = Harness(data_dir=tmp_path / "runtime", providers={"openai": FakeModelAdapter()})
+    (harness.data_dir / "procurement-model-config.json").write_text(
+        json.dumps(
+            {
+                "provider": "openai",
+                "model": "hy3",
+                "api_key": "test-key",
+                "light_model": "hy3-lite",
+                "light_max_context_tokens": "4096",
+            }
+        ),
+        encoding="utf-8",
+    )
+    commands = InternalAgentCommands(harness)
+    body = _routing_body("采购 5000 个纸箱，15 天内交付。")
+
+    capture = commands._new_procurement_request(
+        body, message="采购 5000 个纸箱，15 天内交付。", stage="capture",
+        pending_attachments=[], source_message="采购 5000 个纸箱，15 天内交付。",
+    )
+    review = commands._new_procurement_request(
+        body, message="阶段：人工审核。", stage="review",
+        pending_attachments=[], source_message="阶段：人工审核。",
+    )
+
+    assert capture.model == "hy3-lite"
+    assert capture.budget.max_context_tokens == 4096
+    assert capture.metadata["procurement_model_tier"] == "light"
+    assert capture.metadata["procurement_primary_model"] == "hy3"
+    assert review.model == "hy3"
+    assert review.budget.max_context_tokens == 100_000
+    assert review.metadata["procurement_model_tier"] == "primary"
+    assert "procurement_primary_model" not in review.metadata
+    harness.close()
+
+
+def test_select_run_tier_edge_cases() -> None:
+    select = InternalAgentCommands._select_run_tier
+    # 内部确定性 planner 不分档
+    assert select({"light_model": "lite"}, "capture", "procurement_internal", "det") == (
+        "det", None, "internal",
+    )
+    # 未配置 light / 与主模型同名 → 不降档
+    assert select({}, "capture", "openai", "hy3") == ("hy3", None, "primary")
+    assert select({"light_model": "hy3"}, "capture", "openai", "hy3") == ("hy3", None, "primary")
+    # 非解析类阶段保持主模型
+    assert select({"light_model": "lite"}, "comparison", "openai", "hy3") == ("hy3", None, "primary")
+    # 窗口非法值回退默认 8000
+    assert select(
+        {"light_model": "lite", "light_max_context_tokens": "oops"}, "capture", "openai", "hy3"
+    ) == ("lite", 8000, "light")
+
+
+@pytest.mark.asyncio
+async def test_failed_light_run_escalates_to_primary_before_deterministic(tmp_path) -> None:
+    """失败自动升档：light 失败 → 主模型重试 → 主模型仍协议错误才走确定性 planner 兜底。"""
+    adapter = FakeModelAdapter(
+        script=[
+            {"kind": "error", "error": "light model stream failed", "error_kind": "provider_protocol"},
+            {
+                "kind": "error",
+                "error": "tool call arguments are invalid JSON",
+                "error_kind": "provider_protocol",
+            },
+        ]
+    )
+    harness = Harness(data_dir=tmp_path / "runtime", providers={"openai": adapter})
+    (harness.data_dir / "procurement-model-config.json").write_text(
+        json.dumps(
+            {
+                "provider": "openai",
+                "model": "hy3",
+                "api_key": "test-key",
+                "light_model": "hy3-lite",
+                "light_max_context_tokens": "4096",
+            }
+        ),
+        encoding="utf-8",
+    )
+    commands = InternalAgentCommands(harness)
+    commands.procurement_tools._parse_attachment = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "artifact_id": "jb" + "a" * 30,
+            "supplier_name": "华南标签",
+            "status": "ready",
+            "parser_version": "test",
+            "processing_ms": "1",
+            "extracted": {"fields": {}, "review_fields": []},
+        }
+    )
+    message = "物料：热敏不干胶标签\n采购数量：20,000 个\n最长交期：10天"
+    payload = {
+        "message": message,
+        "attachments": [{"artifact_id": "jb" + "a" * 30, "filename": "报价.xlsx"}],
+    }
+    body = AgentCommandBody(
+        operation_id="11111111-1111-1111-1111-111111111111",
+        operation_type="start_conversation",
+        aggregate_id="a" * 32,
+        generation=1,
+        expected_task_version=0,
+        payload_sha256=_canonical_sha256(payload),
+        payload=payload,
+    )
+
+    result = await commands._start_conversation(body)
+
+    # 最终由确定性 planner 完成任务（三级链：light → primary → deterministic）
+    assert result["requirement"]["item_name"] == "热敏不干胶标签"
+    assert [call.model for call in adapter.calls] == ["hy3-lite", "hy3"]
+    runs = harness.storage.list_runs(limit=10)
+    by_tier = {
+        json.loads(run.get("metadata_json") or "{}").get("procurement_model_tier"): run
+        for run in runs
+        if json.loads(run.get("metadata_json") or "{}").get("procurement_model_tier")
+    }
+    assert by_tier["light"]["status"] == RunStatus.failed.value
+    assert by_tier["escalated"]["status"] == RunStatus.failed.value
+    assert by_tier["escalated"]["model"] == "hy3"
+    escalated_meta = json.loads(by_tier["escalated"]["metadata_json"])
+    assert escalated_meta["procurement_escalated_from_run_id"] == by_tier["light"]["id"]
+    assert "light model stream failed" in escalated_meta["procurement_escalation_reason"]
+    await harness.aclose()
 
 
 @pytest.mark.asyncio

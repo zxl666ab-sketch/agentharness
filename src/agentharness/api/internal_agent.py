@@ -174,6 +174,13 @@ class InternalAgentCommands:
         "bind",
     })
 
+    # 模型路由档位点：capture 是 run 的唯一创建点（后续阶段都 resume 同一 run），
+    # 因此"解析类步骤走强/弱模型"在 capture 创建时一次定档；推理类阶段
+    # （comparison/decision/review）保持主模型。配置 light_model 后，解析类 run
+    # 使用小窗口模型，上下文压缩从"备而不用"变成任务完成的必经路径。
+    _LIGHT_ROUTABLE_STAGES = frozenset({"capture"})
+    _LIGHT_DEFAULT_WINDOW = 8000
+
     def __init__(
         self,
         harness: Harness,
@@ -323,6 +330,30 @@ class InternalAgentCommands:
                 source_message=message_text,
             )
             result = await self.harness.run(request)
+            # 路由降档失败自动升档：light 档 run 失败先回主模型重试（保留会话），
+            # 主模型仍触发协议错误才继续走下方确定性 planner 兜底。
+            if (
+                result.status == RunStatus.failed
+                and request.metadata.get("procurement_model_tier") == "light"
+            ):
+                primary = str(request.metadata.get("procurement_primary_model") or "").strip()
+                if primary:
+                    escalation_request = request.model_copy(
+                        update={
+                            "session_id": result.session_id,
+                            "model": primary,
+                            "budget": request.budget.model_copy(
+                                update={"max_context_tokens": 100_000}
+                            ),
+                            "metadata": {
+                                **request.metadata,
+                                "procurement_model_tier": "escalated",
+                                "procurement_escalated_from_run_id": result.run_id,
+                                "procurement_escalation_reason": str(result.error or "")[:500],
+                            },
+                        }
+                    )
+                    result = await self.harness.run(escalation_request)
             if self._should_fallback_initial_capture(result):
                 fallback_request = request.model_copy(
                     update={
@@ -755,6 +786,24 @@ class InternalAgentCommands:
             "status": result.status.value,
         }
 
+    @staticmethod
+    def _select_run_tier(
+        config: dict[str, Any], stage: str, provider: str, model: str
+    ) -> tuple[str, int | None, str]:
+        """返回 (model, max_context_tokens, tier)。内部确定性 planner 不分档；
+        配置了与主模型不同的 light_model 且处于解析类创建阶段时降档。"""
+        if provider == "procurement_internal":
+            return model, None, "internal"
+        light = str(config.get("light_model") or "").strip()
+        if light and light != model and stage in InternalAgentCommands._LIGHT_ROUTABLE_STAGES:
+            raw = config.get("light_max_context_tokens")
+            try:
+                window = int(raw) if raw else InternalAgentCommands._LIGHT_DEFAULT_WINDOW
+            except (TypeError, ValueError):
+                window = InternalAgentCommands._LIGHT_DEFAULT_WINDOW
+            return light, max(1024, window), "light"
+        return model, None, "primary"
+
     def _new_procurement_request(
         self,
         body: AgentCommandBody,
@@ -772,6 +821,8 @@ class InternalAgentCommands:
             provider, model = "procurement_internal", "deterministic-procurement"
         else:
             provider, model = self._configure_provider(config)
+        primary_model = model
+        model, light_window, tier = self._select_run_tier(config, stage, provider, model)
         max_cost = _optional_float(config.get("max_cost_usd"))
         pricing = PricingConfig(
             input_per_million_usd=_optional_float(
@@ -803,6 +854,9 @@ class InternalAgentCommands:
                 max_tool_calls_per_turn=1,
                 max_concurrent_tools=1,
                 max_cost_usd=max_cost,
+                # 降档 run 使用小窗口：上下文压缩成为完成任务的必经路径。
+                # 成本上限仍按主模型单价计（保守：light 模型通常更便宜）。
+                **({"max_context_tokens": light_window} if light_window else {}),
             ),
             pricing=pricing,
             metadata={
@@ -818,6 +872,12 @@ class InternalAgentCommands:
                 "procurement_stage": stage,
                 "procurement_source_message": source_message,
                 "procurement_pending_attachments": pending_attachments,
+                "procurement_model_tier": tier,
+                **(
+                    {"procurement_primary_model": primary_model}
+                    if tier == "light"
+                    else {}
+                ),
             },
         )
 
@@ -1100,6 +1160,12 @@ def _default_model_config() -> dict[str, Any]:
             "AGENTHARNESS_PROCUREMENT_REASONING_EFFORT", "auto"
         ),
         "api_key": os.environ.get("OPENAI_API_KEY") or None,
+        # 模型路由：light_model 配置后，解析类 run（capture 创建）降档到便宜/小窗口模型，
+        # 失败自动升回主模型（见 _select_run_tier 与 _start_conversation 升档链）。
+        "light_model": os.environ.get("AGENTHARNESS_PROCUREMENT_LIGHT_MODEL") or None,
+        "light_max_context_tokens": (
+            os.environ.get("AGENTHARNESS_PROCUREMENT_LIGHT_MAX_CONTEXT_TOKENS") or None
+        ),
         "input_price_per_million_usd": None,
         "output_price_per_million_usd": None,
         "cached_input_price_per_million_usd": None,
@@ -1145,6 +1211,8 @@ def _write_model_config(data_dir: Path, body: dict[str, Any]) -> dict[str, Any]:
         "api_mode",
         "reasoning_effort",
         "api_key",
+        "light_model",
+        "light_max_context_tokens",
         "input_price_per_million_usd",
         "output_price_per_million_usd",
         "cached_input_price_per_million_usd",
@@ -1159,6 +1227,13 @@ def _write_model_config(data_dir: Path, body: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(422, "planner_mode must be model or hybrid")
     if not str(body.get("model") or "").strip():
         raise HTTPException(422, "model must not be blank")
+    if body.get("light_max_context_tokens") is not None:
+        try:
+            window = int(body["light_max_context_tokens"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, "light_max_context_tokens must be an integer") from exc
+        if not 1024 <= window <= 200_000:
+            raise HTTPException(422, "light_max_context_tokens must be between 1024 and 200000")
     for key in (
         "input_price_per_million_usd",
         "output_price_per_million_usd",
