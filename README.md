@@ -1,5 +1,7 @@
 # AI 智能采购平台（原采价台）· 采购询价、比价、审批、订单与供应商管理
 
+![CI](https://github.com/zxl666ab-sketch/agentharness/actions/workflows/ci.yml/badge.svg?branch=master)
+
 AI 智能采购平台是本地、自托管的采购决策工作台。采购员提交采购目标和多家 XLSX/文本型 PDF 报价，Python Agent 负责自然语言需求结构化、受限文档解析和受治理 Runtime；Java 负责采购业务状态、确定性比价、审批、订单生命周期、对账付款、供应商绩效、统计报表、审计与执行草稿。
 
 浏览器唯一入口是 [http://127.0.0.1:8741](http://127.0.0.1:8741)。
