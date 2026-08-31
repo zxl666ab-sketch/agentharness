@@ -194,6 +194,56 @@ async def test_capture_requirement_falls_back_when_model_shape_is_invalid(
     harness.close()
 
 
+@pytest.mark.asyncio
+async def test_fallback_requirement_is_cached_for_future_routing(tmp_path) -> None:
+    """线上实况：模型产出常校验失败走兜底——兜底提取结果同样必须入缓存，
+    否则"已校验产出才缓存"的纪律会让缓存永远为空，前置路由永不触发。"""
+    from agentharness.procurement.semantic_cache import SemanticCache
+
+    class DictStore:
+        def __init__(self) -> None:
+            self.data: dict[str, str] = {}
+
+        def get(self, key: str):
+            return self.data.get(key)
+
+        def set(self, key: str, value, ex=None):
+            self.data[key] = value
+            return True
+
+    harness = Harness(data_dir=tmp_path / "runtime")
+    commands = InternalAgentCommands(harness)
+    commands.procurement_tools.semantic_cache = SemanticCache(store=DictStore())
+    session_id = harness.storage.create_session(title="兜底入缓存")
+    run_id = new_id()
+    source_message = "采购3000个BOPP透明封箱胶带，宽48毫米、长100米、厚50微米，透明无印刷，送上海仓，12天内交付，需要开票。"
+    harness.storage.create_run(
+        run_id=run_id,
+        session_id=session_id,
+        root_run_id=run_id,
+        metadata={
+            "purchase_request_id": "a" * 32,
+            "procurement_source_message": source_message,
+        },
+    )
+    context = ToolContext(
+        run_id=run_id,
+        session_id=session_id,
+        cwd=str(tmp_path),
+        data_dir=str(harness.data_dir),
+        allow_write=False,
+    )
+
+    result = await commands.procurement_tools.capture_requirement(
+        context,
+        {"requirement": {"itemName": "坏形状", "quantity": 3000}},
+    )
+
+    assert json.loads(result.content)["source"] == "deterministic_validation_fallback"
+    assert commands.procurement_tools.semantic_cache.stats()["puts"] == 1
+    harness.close()
+
+
 def test_extracts_spaced_chinese_packaging_requirement() -> None:
     payload = extract_requirement(
         [
