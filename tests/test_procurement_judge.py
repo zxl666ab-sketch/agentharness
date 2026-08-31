@@ -173,6 +173,27 @@ def test_judge_cases_gives_up_after_retries() -> None:
         judge_cases([facts], lambda prompt: "garbage", retries=1)
 
 
+@pytest.mark.asyncio
+async def test_judge_cases_async_preserves_order_and_limits_concurrency() -> None:
+    import asyncio
+
+    from agentharness.procurement.judge import judge_cases_async
+
+    active = {"now": 0, "max": 0}
+
+    async def slow_ainvoke(prompt: str) -> str:
+        active["now"] += 1
+        active["max"] = max(active["max"], active["now"])
+        await asyncio.sleep(0.02)
+        active["now"] -= 1
+        return json.dumps({"scores": _scores(), "verdict": "correct", "reasons": []})
+
+    facts = [case_to_facts(_case(case_id=f"q-{i}"), _REQUIREMENT) for i in range(8)]
+    results = await judge_cases_async(facts, slow_ainvoke, concurrency=3)
+    assert [r["case_id"] for r in results] == [f"q-{i}" for i in range(8)]
+    assert active["max"] <= 3
+
+
 def test_verdict_requires_correct_and_all_dims_above_threshold() -> None:
     results = [
         {"case_id": "a", "variant": "clean", "scores": _scores(), "verdict": "correct", "mean_score": 1.0},

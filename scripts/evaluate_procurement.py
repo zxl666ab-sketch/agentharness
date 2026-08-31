@@ -34,7 +34,6 @@ from agentharness.procurement.judge import (
     case_to_facts,
     ground_truth_verdict,
     human_verdicts,
-    judge_cases,
     perturb_facts,
     summarize_judge,
 )
@@ -1399,15 +1398,13 @@ def verify_evaluation(args: argparse.Namespace) -> None:
 
 
 def _judge_invoke(args: argparse.Namespace):
-    """构造 (invoke, judge_model_label)。fake 仅用于接线冒烟，不产出证据。"""
+    """构造 (ainvoke, judge_model_label)。fake 仅用于接线冒烟，不产出证据。"""
     if args.provider == "fake":
-        def invoke(prompt: str) -> str:  # noqa: ARG001
+        async def ainvoke(prompt: str) -> str:  # noqa: ARG001
             return json.dumps(
                 {"scores": dict.fromkeys(JUDGE_DIMENSIONS, 1.0), "verdict": "correct", "reasons": []}
             )
-        return invoke, "fake(wiring-check-only)"
-
-    import asyncio
+        return ainvoke, "fake(wiring-check-only)"
 
     from agentharness.config import load_project_env
     from agentharness.contracts import Message, MessageRole, ModelRequest, StreamItemType
@@ -1433,36 +1430,32 @@ def _judge_invoke(args: argparse.Namespace):
         api_mode=os.environ.get("AGENTHARNESS_PROCUREMENT_API_MODE", "auto"),
         use_env=False,
     )
-    loop = asyncio.new_event_loop()
 
-    async def _once(prompt: str) -> str:
+    async def ainvoke(prompt: str) -> str:
+        from agentharness.procurement.judge import JudgeResponseError
+
         chunks: list[str] = []
-        async for item in adapter.stream(
-            ModelRequest(
-                model=model,
-                system="You are an independent read-only verifier. Return JSON only.",
-                messages=[Message(role=MessageRole.user, content=prompt)],
-                tools=[],
-                temperature=0,
-                max_tokens=4000,
-            )
-        ):
-            if item.type == StreamItemType.text_delta and item.text:
-                chunks.append(item.text)
-            elif item.type == StreamItemType.error:
-                raise RuntimeError(item.error or "judge provider error")
-        return "".join(chunks)
-
-    def invoke(prompt: str) -> str:
         try:
-            return loop.run_until_complete(_once(prompt))
+            async for item in adapter.stream(
+                ModelRequest(
+                    model=model,
+                    system="You are an independent read-only verifier. Return JSON only.",
+                    messages=[Message(role=MessageRole.user, content=prompt)],
+                    tools=[],
+                    temperature=0,
+                    max_tokens=4000,
+                )
+            ):
+                if item.type == StreamItemType.text_delta and item.text:
+                    chunks.append(item.text)
+                elif item.type == StreamItemType.error:
+                    raise RuntimeError(item.error or "judge provider error")
         except RuntimeError as exc:
             # provider 截断/故障属于响应质量问题 → 转 JudgeResponseError 走重试链
-            from agentharness.procurement.judge import JudgeResponseError
-
             raise JudgeResponseError(f"judge provider error: {exc}") from exc
+        return "".join(chunks)
 
-    return invoke, model
+    return ainvoke, model
 
 
 def judge_evaluation(args: argparse.Namespace) -> None:
@@ -1475,7 +1468,7 @@ def judge_evaluation(args: argparse.Namespace) -> None:
     result = evaluate_frozen_cases()
     cases = result["approaches"]["agent_assisted"]["raw"]["cases"]
     requirement = truth["request"]
-    invoke, judge_model = _judge_invoke(args)
+    ainvoke, judge_model = _judge_invoke(args)
     if args.provider == "fake":
         print("警告：--provider fake 仅验证接线，报告不构成任何质量证据！", file=sys.stderr)
 
@@ -1492,7 +1485,13 @@ def judge_evaluation(args: argparse.Namespace) -> None:
                 perturb_facts(facts, kinds[index % len(kinds)])
             )
 
-    results = judge_cases(facts_clean + facts_perturbed, invoke, retries=args.retries)
+    import asyncio
+
+    from agentharness.procurement.judge import judge_cases_async
+
+    results = asyncio.run(
+        judge_cases_async(facts_clean + facts_perturbed, ainvoke, retries=args.retries)
+    )
 
     reference: dict[str, bool] = {}
     for case in cases:

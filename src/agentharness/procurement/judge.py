@@ -16,9 +16,10 @@ Cohen's kappa。
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -202,6 +203,40 @@ def judge_cases(
                 f"judge failed for case {facts['case_id']} after {attempts} attempts: {last_error}"
             )
     return results
+
+
+async def judge_cases_async(
+    cases_facts: Sequence[Mapping[str, Any]],
+    ainvoke: Callable[[str], Awaitable[str]],
+    *,
+    retries: int = 1,
+    concurrency: int = 4,
+) -> list[dict[str, Any]]:
+    """并发批量评审（信号量限流）；结果顺序与输入一致。"""
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def one(facts: Mapping[str, Any]) -> dict[str, Any]:
+        async with semaphore:
+            attempts = retries + 1
+            last_error: Exception | None = None
+            for _ in range(attempts):
+                try:
+                    parsed = parse_judge_response(await ainvoke(build_judge_prompt(facts)))
+                    return {
+                        "case_id": facts["case_id"],
+                        "variant": str(facts.get("variant", "clean")),
+                        **parsed,
+                        "mean_score": round(
+                            sum(parsed["scores"].values()) / len(JUDGE_DIMENSIONS), 4
+                        ),
+                    }
+                except JudgeResponseError as exc:
+                    last_error = exc
+            raise JudgeResponseError(
+                f"judge failed for case {facts['case_id']} after {attempts} attempts: {last_error}"
+            )
+
+    return list(await asyncio.gather(*(one(facts) for facts in cases_facts)))
 
 
 def human_verdicts(
