@@ -500,6 +500,7 @@ def test_light_model_routes_capture_run_to_small_window(tmp_path) -> None:
     assert capture.budget.max_context_tokens == 4096
     assert capture.metadata["procurement_model_tier"] == "light"
     assert capture.metadata["procurement_primary_model"] == "hy3"
+    assert capture.metadata["procurement_model_ladder"] == ["hy3-lite", "hy3"]
     assert review.model == "hy3"
     assert review.budget.max_context_tokens == 100_000
     assert review.metadata["procurement_model_tier"] == "primary"
@@ -511,17 +512,22 @@ def test_select_run_tier_edge_cases() -> None:
     select = InternalAgentCommands._select_run_tier
     # 内部确定性 planner 不分档
     assert select({"light_model": "lite"}, "capture", "procurement_internal", "det") == (
-        "det", None, "internal",
+        "det", None, "internal", [],
     )
     # 未配置 light / 与主模型同名 → 不降档
-    assert select({}, "capture", "openai", "hy3") == ("hy3", None, "primary")
-    assert select({"light_model": "hy3"}, "capture", "openai", "hy3") == ("hy3", None, "primary")
+    assert select({}, "capture", "openai", "hy3") == ("hy3", None, "primary", [])
+    assert select({"light_model": "hy3"}, "capture", "openai", "hy3") == ("hy3", None, "primary", [])
     # 非解析类阶段保持主模型
-    assert select({"light_model": "lite"}, "comparison", "openai", "hy3") == ("hy3", None, "primary")
-    # 窗口非法值回退默认 8000
+    assert select({"light_model": "lite"}, "comparison", "openai", "hy3") == ("hy3", None, "primary", [])
+    # 窗口非法值回退默认 8000；单档 ladder 尾部自动挂主模型
     assert select(
         {"light_model": "lite", "light_max_context_tokens": "oops"}, "capture", "openai", "hy3"
-    ) == ("lite", 8000, "light")
+    ) == ("lite", 8000, "light", ["lite", "hy3"])
+    # 逗号分隔阶梯：按序去空白、剔除主模型同名项、尾部挂主模型兜底位
+    assert select(
+        {"light_model": "mimo-v2.5, longcat-2.0 ,hy3,deepseek-v4-flash"},
+        "capture", "openai", "hy3",
+    ) == ("mimo-v2.5", 8000, "light", ["mimo-v2.5", "longcat-2.0", "deepseek-v4-flash", "hy3"])
 
 
 def test_cached_requirement_routes_run_to_zero_model_calls(tmp_path) -> None:
@@ -646,6 +652,80 @@ async def test_failed_light_run_escalates_to_primary_before_deterministic(tmp_pa
     escalated_meta = json.loads(by_tier["escalated"]["metadata_json"])
     assert escalated_meta["procurement_escalated_from_run_id"] == by_tier["light"]["id"]
     assert "light model stream failed" in escalated_meta["procurement_escalation_reason"]
+    await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_full_ladder_escalates_tier_by_tier_then_deterministic(tmp_path) -> None:
+    """四级兜底链实锤：mimo → longcat → deepseek 逐级升档失败 → hy3 主模型协议错
+    → 确定性 planner 完成任务；每级模型与顺序全部可审计。"""
+    adapter = FakeModelAdapter(
+        script=[
+            {"kind": "error", "error": "mimo stream failed", "error_kind": "provider_protocol"},
+            {"kind": "error", "error": "longcat timeout", "error_kind": "provider_protocol"},
+            {"kind": "error", "error": "deepseek refused", "error_kind": "provider_protocol"},
+            {
+                "kind": "error",
+                "error": "tool call arguments are invalid JSON",
+                "error_kind": "provider_protocol",
+            },
+        ]
+    )
+    harness = Harness(data_dir=tmp_path / "runtime", providers={"openai": adapter})
+    (harness.data_dir / "procurement-model-config.json").write_text(
+        json.dumps(
+            {
+                "provider": "openai",
+                "model": "hy3",
+                "api_key": "test-key",
+                "light_model": "mimo-v2.5,longcat-2.0,deepseek-v4-flash",
+            }
+        ),
+        encoding="utf-8",
+    )
+    commands = InternalAgentCommands(harness)
+    commands.procurement_tools._parse_attachment = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "artifact_id": "jb" + "a" * 30,
+            "supplier_name": "华南标签",
+            "status": "ready",
+            "parser_version": "test",
+            "processing_ms": "1",
+            "extracted": {"fields": {}, "review_fields": []},
+        }
+    )
+    message = "物料：热敏不干胶标签\n采购数量：20,000 个\n最长交期：10天"
+    payload = {
+        "message": message,
+        "attachments": [{"artifact_id": "jb" + "a" * 30, "filename": "报价.xlsx"}],
+    }
+    body = AgentCommandBody(
+        operation_id="11111111-1111-1111-1111-111111111111",
+        operation_type="start_conversation",
+        aggregate_id="a" * 32,
+        generation=1,
+        expected_task_version=0,
+        payload_sha256=_canonical_sha256(payload),
+        payload=payload,
+    )
+
+    result = await commands._start_conversation(body)
+
+    assert result["requirement"]["item_name"] == "热敏不干胶标签"
+    assert [call.model for call in adapter.calls] == [
+        "mimo-v2.5", "longcat-2.0", "deepseek-v4-flash", "hy3",
+    ]
+    runs = harness.storage.list_runs(limit=10)
+    tiers: dict[str, list[str]] = {}
+    for run in runs:
+        meta = json.loads(run.get("metadata_json") or "{}")
+        tier = meta.get("procurement_model_tier")
+        if tier:
+            tiers.setdefault(tier, []).append(str(run["model"]))
+    assert tiers["light"] == ["mimo-v2.5"]
+    # 三次升档逐级上爬：longcat → deepseek → hy3（主模型兜底位）
+    assert sorted(tiers["escalated"]) == ["deepseek-v4-flash", "hy3", "longcat-2.0"]
+    assert tiers["deterministic_fallback"] == ["deterministic-procurement"]
     await harness.aclose()
 
 

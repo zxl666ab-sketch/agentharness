@@ -331,30 +331,31 @@ class InternalAgentCommands:
                 source_message=message_text,
             )
             result = await self.harness.run(request)
-            # 路由降档失败自动升档：light 档 run 失败先回主模型重试（保留会话），
+            # 路由降档失败自动升档：按 ladder 逐级上爬（最便宜/最高容量 → … → 主模型），
             # 主模型仍触发协议错误才继续走下方确定性 planner 兜底。
-            if (
-                result.status == RunStatus.failed
-                and request.metadata.get("procurement_model_tier") == "light"
-            ):
-                primary = str(request.metadata.get("procurement_primary_model") or "").strip()
-                if primary:
-                    escalation_request = request.model_copy(
-                        update={
-                            "session_id": result.session_id,
-                            "model": primary,
-                            "budget": request.budget.model_copy(
-                                update={"max_context_tokens": 100_000}
-                            ),
-                            "metadata": {
-                                **request.metadata,
-                                "procurement_model_tier": "escalated",
-                                "procurement_escalated_from_run_id": result.run_id,
-                                "procurement_escalation_reason": str(result.error or "")[:500],
-                            },
-                        }
-                    )
-                    result = await self.harness.run(escalation_request)
+            ladder = list(request.metadata.get("procurement_model_ladder") or [])
+            next_index = (
+                ladder.index(request.model) + 1 if request.model in ladder else len(ladder)
+            )
+            while result.status == RunStatus.failed and next_index < len(ladder):
+                escalation_request = request.model_copy(
+                    update={
+                        "session_id": result.session_id,
+                        "model": ladder[next_index],
+                        "budget": request.budget.model_copy(
+                            update={"max_context_tokens": 100_000}
+                        ),
+                        "metadata": {
+                            **request.metadata,
+                            "procurement_model_tier": "escalated",
+                            "procurement_escalated_from_run_id": result.run_id,
+                            "procurement_escalation_reason": str(result.error or "")[:500],
+                        },
+                    }
+                )
+                next_index += 1
+                request = escalation_request
+                result = await self.harness.run(escalation_request)
             if self._should_fallback_initial_capture(result):
                 fallback_request = request.model_copy(
                     update={
@@ -368,8 +369,9 @@ class InternalAgentCommands:
                         "pricing": PricingConfig(),
                         "metadata": {
                             **request.metadata,
+                            "procurement_model_tier": "deterministic_fallback",
                             "procurement_fallback_from_run_id": result.run_id,
-                            "procurement_fallback_reason": result.error,
+                            "procurement_fallback_reason": str(result.error or "")[:500],
                         },
                     }
                 )
@@ -790,20 +792,29 @@ class InternalAgentCommands:
     @staticmethod
     def _select_run_tier(
         config: dict[str, Any], stage: str, provider: str, model: str
-    ) -> tuple[str, int | None, str]:
-        """返回 (model, max_context_tokens, tier)。内部确定性 planner 不分档；
-        配置了与主模型不同的 light_model 且处于解析类创建阶段时降档。"""
+    ) -> tuple[str, int | None, str, list[str]]:
+        """返回 (model, max_context_tokens, tier, ladder)。
+
+        light_model 支持逗号分隔的**有序阶梯**（如 "mimo-v2.5,longcat-2.0,deepseek-v4-flash"）：
+        解析类 run 从阶梯第一档（最便宜/最高容量）起跑，失败按 ladder 逐级升档，
+        阶梯耗尽回主模型，主模型仍失败走确定性 planner（四级兜底链）。
+        内部确定性 planner 不分档；未配置或与主模型同名则 ladder 为空。"""
         if provider == "procurement_internal":
-            return model, None, "internal"
-        light = str(config.get("light_model") or "").strip()
-        if light and light != model and stage in InternalAgentCommands._LIGHT_ROUTABLE_STAGES:
+            return model, None, "internal", []
+        raw_light = str(config.get("light_model") or "")
+        ladder = [
+            item.strip()
+            for item in raw_light.split(",")
+            if item.strip() and item.strip() != model
+        ]
+        if ladder and stage in InternalAgentCommands._LIGHT_ROUTABLE_STAGES:
             raw = config.get("light_max_context_tokens")
             try:
                 window = int(raw) if raw else InternalAgentCommands._LIGHT_DEFAULT_WINDOW
             except (TypeError, ValueError):
                 window = InternalAgentCommands._LIGHT_DEFAULT_WINDOW
-            return light, max(1024, window), "light"
-        return model, None, "primary"
+            return ladder[0], max(1024, window), "light", [*ladder, model]
+        return model, None, "primary", []
 
     def _new_procurement_request(
         self,
@@ -823,7 +834,7 @@ class InternalAgentCommands:
         else:
             provider, model = self._configure_provider(config)
         primary_model = model
-        model, light_window, tier = self._select_run_tier(config, stage, provider, model)
+        model, light_window, tier, ladder = self._select_run_tier(config, stage, provider, model)
         # P2-3 语义缓存前置路由：相同需求消息已有"通过校验的模型产出"缓存时，
         # 本次 run 直接走确定性工具图（capture 工具内从缓存取回该产出），
         # 全程零远程调用——缓存必须前置才可能省下 LLM 成本。
@@ -837,7 +848,9 @@ class InternalAgentCommands:
             )
             is not None
         ):
-            provider, model, tier = "procurement_internal", "deterministic-procurement", "cache_routed"
+            provider, model, tier, ladder = (
+                "procurement_internal", "deterministic-procurement", "cache_routed", [],
+            )
         max_cost = _optional_float(config.get("max_cost_usd"))
         pricing = PricingConfig(
             input_per_million_usd=_optional_float(
@@ -889,7 +902,10 @@ class InternalAgentCommands:
                 "procurement_pending_attachments": pending_attachments,
                 "procurement_model_tier": tier,
                 **(
-                    {"procurement_primary_model": primary_model}
+                    {
+                        "procurement_primary_model": primary_model,
+                        "procurement_model_ladder": ladder,
+                    }
                     if tier == "light"
                     else {}
                 ),
