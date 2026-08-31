@@ -28,7 +28,8 @@ import {
   PageHeader,
   StatusPill,
 } from "../components/ui";
-import { aiStepInFlight, statusLabel } from "./viewModel";
+import { aiStepInFlight, staleReasonLabel, statusLabel } from "./viewModel";
+import { humanizeEngineError } from "./engineErrors";
 import type {
   AiTaskStatus,
   AiTaskView,
@@ -308,8 +309,18 @@ export function AiTaskCenter({
                     <i style={{ width: `${Math.round(Number(detail.progress) * 100)}%` }} />
                   </span>
                   {detail.error_code || detail.stale_reason ? (
-                    <p className="proc-ai-state-error" role="alert">
-                      {detail.error_category ? `${detail.error_category} · ` : ""}{detail.error_code || detail.stale_reason}
+                    <p className={`proc-ai-state-error${detail.stale ? " is-stale" : ""}`} role="alert" title={detail.error_code || detail.stale_reason || undefined}>
+                      {detail.stale
+                        ? staleReasonLabel(detail.stale_reason || detail.error_code)
+                        : `${detail.error_category ? `${detail.error_category} · ` : ""}${humanizeEngineError(detail.error_code) || detail.error_code}`}
+                    </p>
+                  ) : null}
+                  {detail.stale ? (
+                    <p className="proc-ai-stale-hint">
+                      本条结果保留为历史证据；重试与取消已禁用（终态且输入已变化）。
+                      <button type="button" className="proc-link-button" onClick={() => onOpenTask(detail.business_id)}>
+                        前往采购任务重新发起比价 <ExternalLink size={12} />
+                      </button>
                     </p>
                   ) : null}
                   <footer className="proc-ai-state-actions">
@@ -330,6 +341,7 @@ export function AiTaskCenter({
                       icon={confirmCancel ? <AlertTriangle size={15} /> : <Ban size={15} />}
                       disabled={!cancelAllowed}
                       loading={busy === "cancel"}
+                      title={cancelAllowed ? "取消 AI 任务" : detail.stale ? "任务已终态且结果已过期，无可取消的执行" : "任务已进入终态，无可取消的执行"}
                       onClick={() => {
                         if (!confirmCancel) { setConfirmCancel(true); return; }
                         void runAction("cancel");

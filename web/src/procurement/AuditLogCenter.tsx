@@ -99,6 +99,8 @@ export function AuditLogCenter() {
             <option value="supplier">{businessTypeLabel("supplier")}</option>
             <option value="order">{businessTypeLabel("order")}</option>
             <option value="settlement">{businessTypeLabel("settlement")}</option>
+            <option value="invoice">{businessTypeLabel("invoice")}</option>
+            <option value="contract">{businessTypeLabel("contract")}</option>
           </select>
           <input className="proc-input proc-filter-input mono" aria-label="任务ID" value={taskId} onChange={(event) => { setTaskId(event.target.value); setPage(0); }} placeholder="task_id（可选）" />
         </div>

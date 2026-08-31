@@ -13,6 +13,7 @@ import {
   procurementDecisionProgress,
   nextStepGuide,
   rulesetLabel,
+  staleReasonLabel,
   statusLabel,
   statusLabelFor,
   statusTone,
@@ -21,6 +22,18 @@ import {
 const ALL_STATUSES: ProcurementStatus[] = [...PROCUREMENT_STATUSES, "analyzing"];
 
 describe("procurement view model", () => {
+  it("maps stale reason codes to actionable Chinese guidance and never leaks raw enums", () => {
+    const known = staleReasonLabel("INPUT_GENERATION_CHANGED");
+    expect(known).toContain("重新发起");
+    expect(known).not.toContain("INPUT_GENERATION_CHANGED");
+    expect(staleReasonLabel("INPUT_OR_SNAPSHOT_CHANGED")).toContain("失效");
+    // 未知码：给中文兜底并保留原码供技术排查，绝不裸显英文当唯一文案
+    const fallback = staleReasonLabel("SOMETHING_NEW");
+    expect(fallback).toContain("结果已失效");
+    expect(fallback).toContain("SOMETHING_NEW");
+    expect(staleReasonLabel(null)).toBe("");
+  });
+
   it("labels every status with actionable Chinese labels and never leaks raw enums", () => {
     expect(ALL_STATUSES).toHaveLength(PROCUREMENT_STATUSES.length + 1);
     for (const status of ALL_STATUSES) {

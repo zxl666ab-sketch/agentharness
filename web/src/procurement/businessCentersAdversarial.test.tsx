@@ -976,5 +976,82 @@ describe("Adversarial Stress Verification: 8 Business Centers", () => {
 
       await act(async () => root.unmount());
     });
+
+    it("renders stale task with Chinese guidance and disabled retry/cancel (no raw enum leak)", async () => {
+      const host = document.createElement("div");
+      document.body.append(host);
+
+      // 复刻现场：分析成功后采购输入变化 → 后端标 stale（INPUT_GENERATION_CHANGED），
+      // 重试/取消必须禁用，且界面不得直出英文原因码。
+      const staleTask: AiTaskDetail = {
+        ai_task_id: "ai-stale-01",
+        business_id: "req-stale",
+        generation: 2,
+        status: "SUCCEEDED",
+        task_type: "QUOTE_ANALYSIS",
+        trace_id: "trace-stale",
+        current_step: "RESULT_PUBLISH",
+        progress: 1,
+        retry_count: 0,
+        max_retries: 3,
+        retryable: false,
+        operation_id: "op-stale",
+        result_id: "r-1",
+        stale: true,
+        stale_reason: "INPUT_GENERATION_CHANGED",
+        error_code: null,
+        assignee: "自动调度引擎",
+        started_at: "2026-08-30T15:30:00Z",
+        finished_at: "2026-08-30T15:30:06Z",
+        created_at: "2026-08-30T15:30:00Z",
+        updated_at: "2026-08-30T16:00:00Z",
+        records: [],
+        result: null,
+      };
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+        items: [staleTask], page: 0, size: 100, total: 1,
+      }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+      const queryClient = createTestClient();
+      queryClient.setQueryData(["procurement-ai-task", staleTask.ai_task_id], staleTask);
+      const onOpenTask = vi.fn();
+
+      const root = createRoot(host);
+      await act(async () => {
+        root.render(
+          <QueryClientProvider client={queryClient}>
+            <AiTaskCenter
+              requests={[]}
+              tasks={[staleTask]}
+              loading={false}
+              error={null}
+              selectedId={staleTask.ai_task_id}
+              onSelect={vi.fn()}
+              onOpenTask={onOpenTask}
+            />
+          </QueryClientProvider>,
+        );
+      });
+
+      const buttons = [...host.querySelectorAll("button")];
+      const retryBtn = buttons.find((b) => b.textContent?.trim() === "重试");
+      const cancelBtn = buttons.find((b) => b.textContent?.includes("取消") && !b.textContent?.includes("确认"));
+      expect(retryBtn?.disabled).toBe(true);
+      expect(cancelBtn?.disabled).toBe(true);
+      expect(retryBtn?.title).toContain("启动新的分析");
+
+      // 中文行动指引可见；英文原因码不得作为可见文案直出（只允许留在 title 里）
+      expect(host.textContent).toContain("结果已过期");
+      expect(host.textContent).toContain("重新发起比价");
+      expect(host.textContent).not.toContain("INPUT_GENERATION_CHANGED");
+
+      const jump = [...host.querySelectorAll("button")].find((b) => b.textContent?.includes("前往采购任务"));
+      await act(async () => {
+        jump?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(onOpenTask).toHaveBeenCalledWith("req-stale");
+
+      await act(async () => root.unmount());
+    });
   });
 });

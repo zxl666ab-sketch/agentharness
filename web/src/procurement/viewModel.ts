@@ -100,6 +100,20 @@ export function statusLabelFor(request: {
   return statusLabel(request.status);
 }
 
+/**
+ * 失效/过期原因码 → 中文行动指引（F10 纪律：禁止英文枚举直出；原始码保留在 title 供技术排查）。
+ * 后端来源：AiTaskService.markStale / ProcurementTaskService.markBusinessStale / ReviewService.markStale。
+ */
+export const STALE_REASON_LABELS: Record<string, string> = {
+  INPUT_GENERATION_CHANGED: "采购需求或报价已修改，本条分析结果已失效，不可直接重试。请前往采购任务重新发起比价。",
+  INPUT_OR_SNAPSHOT_CHANGED: "采购输入或比价快照已变化，本条审核证据已失效。请回到采购任务查看最新比价结果后重新提交。",
+};
+
+export function staleReasonLabel(reason: string | null | undefined): string {
+  if (!reason) return "";
+  return STALE_REASON_LABELS[reason] || `结果已失效（${reason}），请重新发起分析。`;
+}
+
 /** 合同状态文案唯一来源（ContractCenter 与工作台任务详情共用，避免内联重复/兜底误标）。 */
 export const CONTRACT_STATUS_LABELS: Record<ContractStatus, string> = {
   DRAFT: "草拟中",

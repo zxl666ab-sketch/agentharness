@@ -209,7 +209,11 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new Error(detail);
   }
-  return response.json() as Promise<T>;
+  // 204/空响应体不得强行走 JSON 解析（与 procurement/api.ts 同口径）。
+  if (response.status === 204) return undefined as T;
+  const text = await response.text();
+  if (!text) return undefined as T;
+  return JSON.parse(text) as T;
 }
 
 export const api = {

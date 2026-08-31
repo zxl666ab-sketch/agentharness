@@ -137,7 +137,11 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new Error(message);
   }
-  return response.json() as Promise<T>;
+  // 204/空响应体（如 DELETE /suppliers/{id} 按契约返回 204）不得强行走 JSON 解析。
+  if (response.status === 204) return undefined as T;
+  const text = await response.text();
+  if (!text) return undefined as T;
+  return JSON.parse(text) as T;
 }
 
 function postJson<T>(path: string, body?: unknown): Promise<T> {
@@ -281,7 +285,7 @@ export const procurementApi = {
       body: JSON.stringify(input),
     }),
   deleteRequest: (requestId: string) =>
-    requestJson<{ request_id: string; reference: string; deleted: boolean }>(
+    requestJson<{ request_id: string; deleted: boolean }>(
       `/api/procurement/requests/${requestId}`,
       { method: "DELETE" }
     ),
@@ -468,7 +472,7 @@ export const procurementApi = {
       body: JSON.stringify(input),
     }),
   deleteSupplier: (id: string) =>
-    requestJson<{ deleted: boolean }>(`/api/procurement/suppliers/${id}`, {
+    requestJson<void>(`/api/procurement/suppliers/${id}`, {
       method: "DELETE",
     }),
   supplierProfile: (id: string) =>

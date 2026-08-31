@@ -508,7 +508,8 @@ export type ProcurementModelConfig = {
   api_mode: "auto" | "chat" | "responses";
   reasoning_effort: "auto" | "none" | "minimal" | "low" | "medium" | "high" | "max";
   api_key_configured: boolean;
-  api_key_preview: string | null;
+  /** v0.5.1 起脱敏响应不再包含 key 前缀预览：类型如实声明为缺省。 */
+  api_key_preview?: string | null;
   input_price_per_million_usd: number | null;
   output_price_per_million_usd: number | null;
   cached_input_price_per_million_usd: number | null;
@@ -939,7 +940,8 @@ export type PlatformInfo = {
     provider: string;
     model: string;
     api_key_configured: boolean;
-    api_key_preview: string | null;
+    /** v0.5.1 起平台脱敏响应不再包含 key 前缀预览。 */
+    api_key_preview?: string | null;
     reasoning_effort: string;
   };
   db: Record<string, unknown>;

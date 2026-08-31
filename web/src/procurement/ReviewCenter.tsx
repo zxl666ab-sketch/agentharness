@@ -31,7 +31,7 @@ import {
   PageHeader,
   StatusPill,
 } from "../components/ui";
-import { actionablePendingReviewCount, reviewIsGhost } from "./viewModel";
+import { actionablePendingReviewCount, reviewIsGhost, staleReasonLabel } from "./viewModel";
 import type {
   ProcurementRequestSummary,
   ReviewAction,
@@ -354,7 +354,7 @@ export function ReviewCenter({
                 </header>
 
                 {detail.status === "STALE" ? (
-                  <div className="proc-review-banner is-warning" role="alert"><AlertTriangle size={16} /><span><strong>审核证据已过期</strong><small>{detail.stale_reason || "采购输入或比价快照已经变化"}</small></span></div>
+                  <div className="proc-review-banner is-warning" role="alert" title={detail.stale_reason || undefined}><AlertTriangle size={16} /><span><strong>审核证据已过期</strong><small>{staleReasonLabel(detail.stale_reason) || "采购输入或比价快照已经变化"}</small></span></div>
                 ) : null}
                 {ghostReview ? (
                   <div className="proc-review-banner is-warning" role="alert">
