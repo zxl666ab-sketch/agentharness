@@ -82,3 +82,8 @@ current-ui.png
 /print_run_lens.py
 /run_exact_replace.py
 /update_with_git.py
+
+# agent scratch files
+*.tmp.mjs
+*.tmp.py
+*.tmp.tsv
